@@ -42,24 +42,35 @@ exports.handler = async (event) => {
   try {
     let prompt, result;
 
+    // Fetch plant watchlist for revenue priority matching
+    const { data: watchlist } = await supabase
+      .from("plant_watchlist")
+      .select("plant_name, revenue_tier, priority_level, stock_status")
+      .order("revenue", { ascending: false });
+    const watchlistText = watchlist?.length
+      ? watchlist.map(p => `${p.plant_name} (${p.revenue_tier}, stock: ${p.stock_status})`).join(", ")
+      : "No watchlist loaded yet";
+
     if (type === "signal") {
-      prompt = buildSignalPrompt(data);
+      prompt = buildSignalPrompt(data, watchlistText);
       result = await callClaude(prompt);
-      // Also update the signal in DB
+      // Update signal in DB including revenue priority
       if (data.id && result) {
         await supabase.from("signals").update({
-          topic:           result.topic           || data.topic,
-          plant_or_product:result.plant_product   || data.plant_or_product,
-          priority:        result.priority        || data.priority,
-          shelf_life:      result.shelf_life      || data.shelf_life,
-          signal_type:     result.signal_type     || data.signal_type,
-          audience_problem:result.why_matters     || data.audience_problem,
-          ai_cleanup_notes:result.suggestions     || data.ai_cleanup_notes,
+          topic:                  result.topic           || data.topic,
+          plant_or_product:       result.plant_product   || data.plant_or_product,
+          priority:               result.priority        || data.priority,
+          shelf_life:             result.shelf_life      || data.shelf_life,
+          signal_type:            result.signal_type     || data.signal_type,
+          audience_problem:       result.why_matters     || data.audience_problem,
+          ai_cleanup_notes:       result.suggestions     || data.ai_cleanup_notes,
+          revenue_priority_match: result.revenue_priority_match || null,
+          revenue_priority_note:  result.revenue_priority_note  || null,
         }).eq("id", data.id);
       }
 
     } else if (type === "brief") {
-      prompt = buildBriefPrompt(data);
+      prompt = buildBriefPrompt(data, watchlistText);
       result = await callClaude(prompt);
 
     } else if (type === "script") {
@@ -86,13 +97,16 @@ exports.handler = async (event) => {
 
 
 // ── SIGNAL PROMPT ─────────────────────────────────────────────────────────────
-function buildSignalPrompt(s) {
+function buildSignalPrompt(s, watchlistText) {
   return `You are analyzing a social media signal for Succulents Box, a succulent plant subscription company.
 
 RAW INPUT: ${s.topic || s.raw_input || ""}
 Platform: ${s.platform || "unknown"}
 Source URL: ${s.source_url || "not provided"}
 Caption/notes: ${s.caption_summary || "not provided"}
+
+HIGH-REVENUE PLANT WATCHLIST (genus name — revenue tier — stock):
+${watchlistText}
 
 Return ONLY valid JSON:
 {
@@ -104,15 +118,22 @@ Return ONLY valid JSON:
   "shelf_life": "Trend | Seasonal | Evergreen | Experimental",
   "content_pillar": "one of: Repeated Questions | Common Mistakes | Plant Rescue | Myths and Debates | Experiments | Unusual Plant Features | Seasonal Problems | Trend Adaptation | Product / Catalog Fit",
   "suggestions": "Hook: [one strong opening line] | Format: [e.g. Talking head / Before-after / Tutorial]",
-  "catalog_fit": "matched SB product name, or Needs check, or Not applicable"
+  "catalog_fit": "matched SB product name, or Needs check, or Not applicable",
+  "revenue_priority_match": "Yes | No | Needs check",
+  "revenue_priority_note": "e.g. Echeveria is High-revenue — strong reason to prioritize. Or: weak demand despite revenue match — watch item only."
 }
 
-Rules: High priority = strong comment demand + clear product fit. Keep it factual, no invented metrics.`;
+Rules:
+- High priority = strong comment demand + clear product fit.
+- If plant matches watchlist AND demand is strong → mark revenue_priority_match Yes, boost priority.
+- If plant matches watchlist BUT demand is weak → mark Yes but note watch item, not automatic priority.
+- If plant is uncertain → Needs check.
+- Keep it factual, no invented metrics.`;
 }
 
 
 // ── BRIEF PROMPT ──────────────────────────────────────────────────────────────
-function buildBriefPrompt(b) {
+function buildBriefPrompt(b, watchlistText) {
   return `You are reviewing a video brief for Succulents Box, a succulent plant subscription company.
 
 BRIEF TITLE: ${b.title || ""}
@@ -123,6 +144,9 @@ KEY MESSAGE: ${b.key_message || "not specified"}
 CALL TO ACTION: ${b.cta || "not specified"}
 NOTES: ${b.notes || "none"}
 
+HIGH-REVENUE PLANT WATCHLIST (genus — revenue tier — stock):
+${watchlistText}
+
 Review this brief and return ONLY valid JSON:
 {
   "overall": "Strong | Needs work | Incomplete",
@@ -132,6 +156,8 @@ Review this brief and return ONLY valid JSON:
   "recommended_script_type": "e.g. TikTok / Reel short script | Longer educational script",
   "suggested_hook": "one strong opening line for this brief",
   "brand_fit": "High | Medium | Low",
+  "revenue_priority_match": "Yes | No | Needs check",
+  "revenue_priority_note": "note if plant is high-revenue and whether stock is confirmed",
   "notes": "any other recommendations in 1-2 sentences"
 }`;
 }

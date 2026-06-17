@@ -287,6 +287,9 @@ tbody tr:hover { background: #fafffe; }
       <div class="nav-item" data-view="brand-rules" onclick="showView('brand-rules',this)">
         <span class="icon">🎯</span> Brand Rules
       </div>
+      <div class="nav-item" data-view="watchlist" onclick="showView('watchlist',this)">
+        <span class="icon">🌿</span> Plant Watchlist
+      </div>
       <div class="nav-item" data-view="activity-log" onclick="showView('activity-log',this)">
         <span class="icon">📜</span> Activity Log
       </div>
@@ -572,6 +575,41 @@ tbody tr:hover { background: #fafffe; }
           <tbody id="brand-rules-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
         </table>
       </div>
+    </div>
+
+    <!-- ── PLANT WATCHLIST ── -->
+    <div id="view-watchlist" class="view">
+      <div class="view-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <h1>Plant Watchlist</h1>
+          <p>High-revenue genera to prioritize in social listening. Import monthly from the revenue sheet.</p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center" id="watchlist-admin-controls">
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('watchlist-import-panel').style.display=document.getElementById('watchlist-import-panel').style.display==='none'?'block':'none'">📥 Import CSV</button>
+        </div>
+      </div>
+      <div id="watchlist-import-panel" style="display:none;background:#f8f9fa;border:1px solid #ddd;border-radius:8px;padding:16px;margin-bottom:16px">
+        <p style="font-size:13px;margin:0 0 8px"><b>How to import:</b> Open the Revenue by genus Google Sheet → Revenue by genus tab → File → Download → CSV. Paste the CSV content below.</p>
+        <textarea id="watchlist-csv-input" rows="6" style="width:100%;font-size:12px;font-family:monospace;padding:8px;border:1px solid #ccc;border-radius:4px" placeholder="Paste CSV content here…"></textarea>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="importWatchlistCSV()">Import</button>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('watchlist-import-panel').style.display='none'">Cancel</button>
+        </div>
+      </div>
+      <div class="filters" style="margin-bottom:16px">
+        <select class="filter-select" id="watchlist-tier-filter" onchange="loadWatchlist()">
+          <option value="">All tiers</option>
+          <option value="High">High</option>
+          <option value="Medium">Medium</option>
+          <option value="Watch">Watch</option>
+        </select>
+      </div>
+      <table class="data-table">
+        <thead><tr>
+          <th>Plant (Genus)</th><th>Revenue tier</th><th>Total sales</th><th>SKUs</th><th>Items sold</th><th>Stock</th><th>Priority</th><th>Last imported</th>
+        </tr></thead>
+        <tbody id="watchlist-table"><tr><td colspan="8"><div class="empty"><div class="icon">🌿</div><p>No plants yet. Import the revenue CSV to populate.</p></div></td></tr></tbody>
+      </table>
     </div>
 
     <!-- ── ACTIVITY LOG ── -->
@@ -949,6 +987,7 @@ function showView(viewId, el) {
     'scripts':        loadScripts,
     'brand-rules':    loadBrandRules,
     'activity-log':   loadActivityLog,
+    'watchlist':      loadWatchlist,
   };
   if (loaders[viewId]) loaders[viewId]();
 }
@@ -1035,7 +1074,10 @@ async function loadInbox() {
       <td class="truncate">${esc(s.creator_name||'—')}</td>
       <td class="truncate">${esc(s.topic||'—')}</td>
       <td>${s.score != null ? `<span class="score-pill ${s.score>=65?'score-high':s.score>=40?'score-medium':'score-low'}">${s.score}</span>` : '—'}</td>
-      <td>${s.priority ? `<span class="badge badge-${s.priority.toLowerCase()}">${s.priority}</span>` : '—'}</td>
+      <td>
+        ${s.priority ? `<span class="badge badge-${s.priority.toLowerCase()}">${s.priority}</span>` : '—'}
+        ${s.revenue_priority_match === 'Yes' ? `<span class="badge badge-high" style="margin-left:4px;font-size:10px" title="${esc(s.revenue_priority_note||'')}">💰 Revenue match</span>` : s.revenue_priority_match === 'Needs check' ? `<span class="badge badge-pending" style="margin-left:4px;font-size:10px">🔍 Check stock</span>` : ''}
+      </td>
       <td>
         <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateSignalStatus('${s.id}',this.value)">
           ${['New','Needs cleanup','Needs scoring','Duplicate','Watch','Reject','Promote to Daily Board'].map(opt=>`<option${s.status===opt?' selected':''}>${opt}</option>`).join('')}
@@ -1060,7 +1102,10 @@ async function loadDailyBoard() {
         <div class="board-rank">${i+1}</div>
         <div class="board-card-title">
           <h3>${esc(o.topic)}</h3>
-          <div class="meta">${esc(o.plant_or_product||'')} · Score: ${o.total_ai_score||0} · ${o.shelf_life||'—'}</div>
+          <div class="meta">
+            ${esc(o.plant_or_product||'')} · Score: ${o.total_ai_score||0} · ${o.shelf_life||'—'}
+            ${o.revenue_priority_match === 'Yes' ? `<span class="badge badge-high" style="margin-left:6px;font-size:10px" title="${esc(o.revenue_priority_note||'')}">💰 High-revenue match</span>` : o.revenue_priority_match === 'Needs check' ? `<span class="badge badge-pending" style="margin-left:6px;font-size:10px">🔍 Needs stock check</span>` : ''}
+          </div>
         </div>
         <span class="score-pill ${o.total_ai_score>=65?'score-high':o.total_ai_score>=40?'score-medium':'score-low'}" style="flex-shrink:0">${o.total_ai_score||0}</span>
       </div>
@@ -1674,6 +1719,7 @@ function renderSignalAnalysis(a) {
       <div><b>Content pillar:</b> ${esc(a.content_pillar||'—')}</div>
       <div><b>Catalog fit:</b> ${esc(a.catalog_fit||'—')}</div>
     </div>
+    ${a.revenue_priority_match ? `<div style="font-size:13px;margin-bottom:8px"><b>💰 Revenue priority:</b> <span style="color:${a.revenue_priority_match==='Yes'?'#27ae60':a.revenue_priority_match==='Needs check'?'#e67e22':'#999'}">${esc(a.revenue_priority_match)}</span>${a.revenue_priority_note ? ` — ${esc(a.revenue_priority_note)}` : ''}</div>` : ''}
     ${a.why_matters ? `<div style="font-size:13px;margin-bottom:8px"><b>Why it matters:</b> ${esc(a.why_matters)}</div>` : ''}
     ${a.suggestions ? `<div style="font-size:13px"><b>Suggestions:</b> ${esc(a.suggestions)}</div>` : ''}
   </div>`;
@@ -1688,6 +1734,7 @@ function renderBriefAnalysis(a) {
     ${a.gaps?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>⚠️ Gaps:</b> ${a.gaps.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
     ${a.suggested_angles?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Suggested angles:</b> ${a.suggested_angles.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
     ${a.suggested_hook ? `<div style="font-size:13px;margin-bottom:8px"><b>Hook idea:</b> "${esc(a.suggested_hook)}"</div>` : ''}
+    ${a.revenue_priority_match ? `<div style="font-size:13px;margin-bottom:8px"><b>💰 Revenue priority:</b> <span style="color:${a.revenue_priority_match==='Yes'?'#27ae60':a.revenue_priority_match==='Needs check'?'#e67e22':'#999'}">${esc(a.revenue_priority_match)}</span>${a.revenue_priority_note ? ` — ${esc(a.revenue_priority_note)}` : ''}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
   </div>`;
 }
@@ -1711,6 +1758,71 @@ function renderScriptAnalysis(a) {
     ${a.improvements?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Improvements:</b> ${a.improvements.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
   </div>`;
+}
+
+// ── PLANT WATCHLIST ───────────────────────────────────────────────────
+async function loadWatchlist() {
+  let q = sb.from('plant_watchlist').select('*').order('revenue', { ascending: false }).limit(200);
+  const tier = document.getElementById('watchlist-tier-filter')?.value;
+  if (tier) q = q.eq('revenue_tier', tier);
+  const { data, error } = await q;
+  const tbody = document.getElementById('watchlist-table');
+  if (error) { tbody.innerHTML = `<tr><td colspan="8" style="color:#e74c3c;padding:16px">Error: ${esc(error.message)}</td></tr>`; return; }
+  if (!data?.length) {
+    tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">🌿</div><p>No plants imported yet. Use Import CSV to load from your Revenue by genus sheet.</p></div></td></tr>';
+    return;
+  }
+  const tierBadge = { High: 'badge-high', Medium: 'badge-low', Watch: 'badge-pending' };
+  const fmt = (n) => n != null ? '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : '—';
+  tbody.innerHTML = data.map(p => `
+    <tr>
+      <td style="font-weight:500">${esc(p.plant_name)}</td>
+      <td><span class="badge ${tierBadge[p.revenue_tier]||'badge-pending'}">${esc(p.revenue_tier||'—')}</span></td>
+      <td>${fmt(p.revenue)}</td>
+      <td>${p.skus != null ? p.skus : '—'}</td>
+      <td>${p.net_items_sold != null ? p.net_items_sold.toLocaleString() : '—'}</td>
+      <td>${p.stock_status || 'Unknown'}</td>
+      <td><span class="badge ${p.priority_level==='High'?'badge-high':'badge-pending'}">${esc(p.priority_level||'Normal')}</span></td>
+      <td style="font-size:12px;color:#888">${p.last_imported_at ? new Date(p.last_imported_at).toLocaleDateString() : '—'}</td>
+    </tr>`).join('');
+}
+
+function toggleWatchlistImport() {
+  const panel = document.getElementById('watchlist-import-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+async function importWatchlistCSV() {
+  const csv = document.getElementById('watchlist-csv-input')?.value?.trim();
+  if (!csv) { toast('Paste CSV content first', true); return; }
+
+  const session = await sb.auth.getSession();
+  const token = session?.data?.session?.access_token;
+  if (!token) { toast('Not logged in', true); return; }
+
+  const btn = document.querySelector('#watchlist-import-panel .btn-primary');
+  if (btn) { btn.textContent = 'Importing…'; btn.disabled = true; }
+
+  try {
+    const resp = await fetch('/.netlify/functions/import-watchlist', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body:    JSON.stringify({ csv }),
+    });
+    const result = await resp.json();
+    if (result.success) {
+      toast(`✅ ${result.message}`);
+      document.getElementById('watchlist-csv-input').value = '';
+      toggleWatchlistImport();
+      loadWatchlist();
+    } else {
+      toast('Import error: ' + (result.error || 'unknown'), true);
+    }
+  } catch (err) {
+    toast('Could not reach import function', true);
+  } finally {
+    if (btn) { btn.textContent = 'Import'; btn.disabled = false; }
+  }
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────
