@@ -773,6 +773,15 @@ tbody tr:hover { background: #fafffe; }
 </div>
 
 <!-- Add Script Modal -->
+<div class="modal-overlay" id="modal-view" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal" style="max-width:680px;max-height:85vh;overflow-y:auto">
+    <div id="modal-view-content"></div>
+    <div style="margin-top:16px;text-align:right">
+      <button class="btn btn-secondary" onclick="document.getElementById('modal-view').style.display='none'">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="modal-script">
   <div class="modal">
     <h2>New Script</h2>
@@ -1367,7 +1376,27 @@ async function updateScriptStatus(id, status) {
   }
 }
 
-function viewScript(id) { toast('Script detail view — coming soon'); }
+async function viewScript(id) {
+  const { data: s } = await sb.from('script_outputs').select('*').eq('id', id).single();
+  if (!s) { toast('Script not found', true); return; }
+  const el = document.getElementById('modal-view-content');
+  el.innerHTML = `
+    <h3 style="margin:0 0 12px">${esc(s.script_title)}</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;font-size:13px">
+      <div><b>Platform:</b> ${esc(s.platform||'—')}</div>
+      <div><b>Type:</b> ${esc(s.script_type||'—')}</div>
+      <div><b>Version:</b> ${esc(s.script_version||'v1')}</div>
+      <div><b>Status:</b> ${esc(s.review_status||'—')}</div>
+    </div>
+    ${s.opening_hook ? `<div style="background:#f8f9fa;padding:12px;border-radius:6px;margin-bottom:12px"><b>Hook:</b><br>${esc(s.opening_hook)}</div>` : ''}
+    ${s.full_voiceover_script ? `<div style="margin-bottom:12px"><b>Script:</b><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:#f8f9fa;padding:12px;border-radius:6px">${esc(s.full_voiceover_script)}</pre></div>` : ''}
+    ${s.cta ? `<div style="margin-bottom:12px"><b>CTA:</b> ${esc(s.cta)}</div>` : ''}
+    ${s.caption ? `<div style="margin-bottom:12px"><b>Caption:</b><br><span style="font-size:13px">${esc(s.caption)}</span></div>` : ''}
+    <div id="ai-analysis-result" style="margin-top:16px"></div>
+    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('script',${JSON.stringify(s).replace(/</g,'&lt;')})">🤖 AI Brand Check</button>
+  `;
+  document.getElementById('modal-view').style.display = 'flex';
+}
 
 async function saveScript() {
   const row = {
@@ -1586,9 +1615,102 @@ function showError(msg) {
   document.getElementById('auth-error').textContent = msg;
 }
 
-function viewBrief(id) {
-  // Could expand into a detail modal — placeholder for now
-  toast('Brief detail view coming soon');
+async function viewBrief(id) {
+  const { data: b } = await sb.from('briefs').select('*').eq('id', id).single();
+  if (!b) { toast('Brief not found', true); return; }
+  const el = document.getElementById('modal-view-content');
+  el.innerHTML = `
+    <h3 style="margin:0 0 12px">${esc(b.title)}</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;font-size:13px">
+      <div><b>Platform:</b> ${esc(b.platform||'—')}</div>
+      <div><b>Status:</b> ${esc(b.status||'—')}</div>
+      <div><b>Content pillar:</b> ${esc(b.content_pillar||'—')}</div>
+      <div><b>Shelf life:</b> ${esc(b.shelf_life||'—')}</div>
+    </div>
+    ${b.topic ? `<div style="margin-bottom:10px"><b>Topic:</b> ${esc(b.topic)}</div>` : ''}
+    ${b.target_audience ? `<div style="margin-bottom:10px"><b>Target audience:</b> ${esc(b.target_audience)}</div>` : ''}
+    ${b.key_message ? `<div style="margin-bottom:10px"><b>Key message:</b> ${esc(b.key_message)}</div>` : ''}
+    ${b.cta ? `<div style="margin-bottom:10px"><b>CTA:</b> ${esc(b.cta)}</div>` : ''}
+    ${b.notes ? `<div style="margin-bottom:10px"><b>Notes:</b> ${esc(b.notes)}</div>` : ''}
+    <div id="ai-analysis-result" style="margin-top:16px"></div>
+    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('brief',${JSON.stringify(b).replace(/</g,'&lt;')})">🤖 AI Review</button>
+  `;
+  document.getElementById('modal-view').style.display = 'flex';
+}
+
+// ── AI ANALYSIS ───────────────────────────────────────────────────────
+async function runAIAnalysis(type, data) {
+  const resultEl = document.getElementById('ai-analysis-result');
+  resultEl.innerHTML = '<div style="color:#888;font-size:13px">🤖 Analyzing…</div>';
+  try {
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, data }),
+    });
+    const result = await resp.json();
+    if (!result.success) { resultEl.innerHTML = `<div style="color:#e74c3c">Error: ${esc(result.error)}</div>`; return; }
+    const a = result.analysis;
+    if (type === 'signal') {
+      resultEl.innerHTML = renderSignalAnalysis(a);
+    } else if (type === 'brief') {
+      resultEl.innerHTML = renderBriefAnalysis(a);
+    } else if (type === 'script') {
+      resultEl.innerHTML = renderScriptAnalysis(a);
+    }
+  } catch (err) {
+    resultEl.innerHTML = `<div style="color:#e74c3c">Could not reach AI. Check CLAUDE_API_KEY in Netlify.</div>`;
+  }
+}
+
+function renderSignalAnalysis(a) {
+  return `<div style="background:#f0f7f0;border:1px solid #c3e6c3;border-radius:8px;padding:16px">
+    <div style="font-weight:600;margin-bottom:10px">🤖 AI Analysis</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;margin-bottom:10px">
+      <div><b>Topic:</b> ${esc(a.topic||'—')}</div>
+      <div><b>Plant/product:</b> ${esc(a.plant_product||'—')}</div>
+      <div><b>Priority:</b> <span style="color:${a.priority==='High'?'#27ae60':a.priority==='Low'?'#999':'#e67e22'}">${esc(a.priority||'—')}</span></div>
+      <div><b>Shelf life:</b> ${esc(a.shelf_life||'—')}</div>
+      <div><b>Content pillar:</b> ${esc(a.content_pillar||'—')}</div>
+      <div><b>Catalog fit:</b> ${esc(a.catalog_fit||'—')}</div>
+    </div>
+    ${a.why_matters ? `<div style="font-size:13px;margin-bottom:8px"><b>Why it matters:</b> ${esc(a.why_matters)}</div>` : ''}
+    ${a.suggestions ? `<div style="font-size:13px"><b>Suggestions:</b> ${esc(a.suggestions)}</div>` : ''}
+  </div>`;
+}
+
+function renderBriefAnalysis(a) {
+  const color = a.overall === 'Strong' ? '#27ae60' : a.overall === 'Needs work' ? '#e67e22' : '#e74c3c';
+  return `<div style="background:#f0f7f0;border:1px solid #c3e6c3;border-radius:8px;padding:16px">
+    <div style="font-weight:600;margin-bottom:10px">🤖 AI Brief Review</div>
+    <div style="font-size:15px;font-weight:600;color:${color};margin-bottom:10px">${esc(a.overall||'—')}</div>
+    ${a.strengths?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>✅ Strengths:</b> ${a.strengths.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
+    ${a.gaps?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>⚠️ Gaps:</b> ${a.gaps.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
+    ${a.suggested_angles?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Suggested angles:</b> ${a.suggested_angles.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
+    ${a.suggested_hook ? `<div style="font-size:13px;margin-bottom:8px"><b>Hook idea:</b> "${esc(a.suggested_hook)}"</div>` : ''}
+    ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
+  </div>`;
+}
+
+function renderScriptAnalysis(a) {
+  const color = a.overall === 'Approved' ? '#27ae60' : a.overall === 'Needs revision' ? '#e67e22' : '#e74c3c';
+  const violations = a.brand_violations || [];
+  return `<div style="background:#f0f7f0;border:1px solid #c3e6c3;border-radius:8px;padding:16px">
+    <div style="font-weight:600;margin-bottom:10px">🤖 AI Brand Check</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <span style="font-size:15px;font-weight:600;color:${color}">${esc(a.overall||'—')}</span>
+      <span style="font-size:13px;color:#555">Score: ${a.score||'—'}/100</span>
+      <span style="font-size:13px">Hook: ${esc(a.hook_strength||'—')}</span>
+      <span style="font-size:13px">CTA: ${a.cta_present ? '✅' : '❌'}</span>
+    </div>
+    ${violations.length ? `<div style="margin-bottom:10px"><b style="font-size:13px">⚠️ Brand issues:</b>${violations.map(v=>`
+      <div style="font-size:12px;background:#fff3cd;padding:6px 10px;border-radius:4px;margin-top:4px">
+        <b>[${esc(v.severity)}]</b> ${esc(v.rule)}: ${esc(v.issue)}<br>
+        <span style="color:#555">Fix: ${esc(v.fix)}</span>
+      </div>`).join('')}</div>` : '<div style="font-size:13px;color:#27ae60;margin-bottom:8px">✅ No brand violations found</div>'}
+    ${a.improvements?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Improvements:</b> ${a.improvements.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
+    ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
+  </div>`;
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────
