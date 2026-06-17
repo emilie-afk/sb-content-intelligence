@@ -34,9 +34,7 @@ exports.handler = async (event) => {
   const token = authHeader.replace("Bearer ", "").trim();
   if (!token) return { statusCode: 401, headers, body: JSON.stringify({ error: "Authorization header required" }) };
 
-  const { data: { user }, error: authErr } = await createClient(
-    process.env.SUPABASE_URL, token
-  ).auth.getUser();
+  const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
 
   if (authErr || !user) return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
 
