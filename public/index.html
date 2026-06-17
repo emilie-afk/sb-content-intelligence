@@ -287,6 +287,9 @@ tbody tr:hover { background: #fafffe; }
       <div class="nav-item" data-view="brand-rules" onclick="showView('brand-rules',this)">
         <span class="icon">🎯</span> Brand Rules
       </div>
+      <div class="nav-item" data-view="activity-log" onclick="showView('activity-log',this)">
+        <span class="icon">📜</span> Activity Log
+      </div>
     </nav>
     <div class="sidebar-user">
       <strong id="user-name">Loading…</strong>
@@ -516,7 +519,20 @@ tbody tr:hover { background: #fafffe; }
             <option>TikTok</option><option>Instagram</option><option>YouTube</option><option>Facebook</option>
           </select>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="openScriptModal()">+ New Script</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-primary btn-sm" onclick="openScriptModal()">+ New Script</button>
+          <button id="btn-calendar-settings" class="btn btn-secondary btn-sm" onclick="toggleCalendarSettings()" style="display:none">⚙ Calendar URL</button>
+        </div>
+      </div>
+      <!-- Calendar URL settings (admin/owner only) -->
+      <div id="calendar-settings-panel" style="display:none;background:#f9f9f9;border:1px solid #e0e0e0;border-radius:8px;padding:16px;margin-bottom:16px">
+        <p style="font-size:13px;font-weight:600;margin-bottom:8px">📅 Google Calendar Sheet URL</p>
+        <p style="font-size:12px;color:#666;margin-bottom:12px">Paste the Apps Script web app URL from your script calendar sheet. Update this each new year when you create a new sheet.</p>
+        <div style="display:flex;gap:8px">
+          <input type="url" id="calendar-url-input" placeholder="https://script.google.com/macros/s/…/exec" style="flex:1;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px">
+          <button class="btn btn-primary btn-sm" onclick="saveCalendarUrl()">Save</button>
+        </div>
+        <p style="font-size:11px;color:#888;margin-top:8px">Current: <span id="calendar-url-display">not set</span></p>
       </div>
       <div class="table-wrap">
         <table>
@@ -554,6 +570,30 @@ tbody tr:hover { background: #fafffe; }
             <th>Category</th><th>Rule Name</th><th>Rule</th><th>Severity</th><th>Platform</th><th>Active</th><th>Action</th>
           </tr></thead>
           <tbody id="brand-rules-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── ACTIVITY LOG ── -->
+    <div id="view-activity-log" class="view">
+      <div class="view-header">
+        <h1>Activity Log</h1>
+        <p>Who approved, rejected, or changed status on opportunities, briefs, and scripts</p>
+      </div>
+      <div class="filters" style="margin-bottom:16px">
+        <select class="filter-select" id="log-type-filter" onchange="loadActivityLog()">
+          <option value="">All Types</option>
+          <option value="opportunity">Opportunities</option>
+          <option value="brief">Briefs</option>
+          <option value="script">Scripts</option>
+        </select>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>When</th><th>Who</th><th>Type</th><th>Title</th><th>Action</th><th>From</th><th>To</th>
+          </tr></thead>
+          <tbody id="activity-log-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -821,6 +861,8 @@ tbody tr:hover { background: #fafffe; }
   </div>
 </div>
 
+<!-- (Schedule modal removed — calendar push is automatic on approval) -->
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -829,8 +871,8 @@ tbody tr:hover { background: #fafffe; }
 // ── CONFIG ────────────────────────────────────────────────────────────
 // These values are injected by Netlify at build time from env variables.
 // Replace the placeholders below ONLY if running locally.
-const SUPABASE_URL  = typeof __SUPABASE_URL__  !== 'undefined' ? __SUPABASE_URL__  : 'YOUR_SUPABASE_URL';
-const SUPABASE_ANON = typeof __SUPABASE_ANON__ !== 'undefined' ? __SUPABASE_ANON__ : 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_URL  = typeof __SUPABASE_URL__  !== 'undefined' ? __SUPABASE_URL__  : 'https://tzqjsweptsodmdtxwntt.supabase.co';
+const SUPABASE_ANON = typeof __SUPABASE_ANON__ !== 'undefined' ? __SUPABASE_ANON__ : 'sb_publishable_5yHE9QEcqWh2N_Ll3uyZTw_uQ-Xy7hJ';
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
@@ -872,6 +914,7 @@ async function loadUser(user) {
   document.getElementById('app').style.display = 'grid';
   document.getElementById('today-date').textContent = new Date().toLocaleDateString('en-US', {weekday:'long',year:'numeric',month:'long',day:'numeric'});
   loadCommandCenter();
+  initCalendarUrl();
 }
 
 sb.auth.onAuthStateChange((_event, session) => {
@@ -896,6 +939,7 @@ function showView(viewId, el) {
     'sources':        loadSources,
     'scripts':        loadScripts,
     'brand-rules':    loadBrandRules,
+    'activity-log':   loadActivityLog,
   };
   if (loaders[viewId]) loaders[viewId]();
 }
@@ -1135,7 +1179,7 @@ async function updateSignalStatus(id, status) {
 }
 
 async function updateBriefStatus(id, status) {
-  await sb.from('briefs').update({ status }).eq('id', id);
+  await sb.from('briefs').update({ status, updated_by: currentUser?.id }).eq('id', id);
   toast('Brief status updated');
   loadCommandCenter();
 }
@@ -1291,18 +1335,36 @@ async function loadScripts() {
       <td>${s.estimated_duration_seconds ? s.estimated_duration_seconds + 's' : '—'}</td>
       <td>
         <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateScriptStatus('${s.id}',this.value)">
-          ${['Draft','Needs review','Needs revision','Approved','Used in production','Archived'].map(opt=>`<option${s.review_status===opt?' selected':''}>${opt}</option>`).join('')}
+          ${['Draft','Needs review','Needs revision',...(['admin','owner'].includes(userRole)?['Approved']:[]),'Used in production','Archived'].map(opt=>`<option${s.review_status===opt?' selected':''}>${opt}</option>`).join('')}
         </select>
       </td>
-      <td><button class="btn btn-secondary btn-sm" onclick="viewScript('${s.id}')">View</button></td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-secondary btn-sm" onclick="viewScript('${s.id}')">View</button>
+      </td>
     </tr>`).join('');
 }
 
 async function updateScriptStatus(id, status) {
-  const update = { review_status: status };
+  const update = { review_status: status, updated_by: currentUser?.id };
   if (status === 'Approved') { update.approved_by = currentUser?.id; update.approved_at = new Date().toISOString(); }
-  await sb.from('script_outputs').update(update).eq('id', id);
+  const { error } = await sb.from('script_outputs').update(update).eq('id', id);
+  if (error) { toast('Error: ' + error.message, true); return; }
   toast('Script status updated');
+
+  // Auto-push to Google Sheet when approved
+  if (status === 'Approved') {
+    const { data: s } = await sb.from('script_outputs')
+      .select('script_title, script_type, platform, full_voiceover_script')
+      .eq('id', id).single();
+    if (s) {
+      await pushToCalendar(
+        s.script_title || '',
+        s.script_type  || '',
+        s.full_voiceover_script || '',
+        s.platform     || ''
+      );
+    }
+  }
 }
 
 function viewScript(id) { toast('Script detail view — coming soon'); }
@@ -1331,6 +1393,41 @@ async function saveScript() {
   toast('Script saved');
   closeModal('modal-script');
   loadScripts();
+}
+
+// ── ACTIVITY LOG ──────────────────────────────────────────────────────
+async function loadActivityLog() {
+  const typeFilter = document.getElementById('log-type-filter')?.value;
+  let q = sb.from('activity_log')
+    .select('*, performed_by_profile:users_profile!activity_log_performed_by_fkey(display_name,email)')
+    .order('performed_at', { ascending: false })
+    .limit(200);
+  if (typeFilter) q = q.eq('entity_type', typeFilter);
+  const { data, error } = await q;
+  const tbody = document.getElementById('activity-log-table');
+  if (error) { tbody.innerHTML = `<tr><td colspan="7" style="color:#e74c3c">Error: ${esc(error.message)}</td></tr>`; return; }
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">📜</div><p>No activity yet. Actions on opportunities, briefs, and scripts will appear here.</p></div></td></tr>'; return; }
+
+  const typeEmoji = { opportunity: '⭐', brief: '📋', script: '📝' };
+  const actionColor = (action) => {
+    if (/approve/i.test(action)) return '#27ae60';
+    if (/reject/i.test(action)) return '#e74c3c';
+    if (/watch/i.test(action)) return '#f39c12';
+    return '#555';
+  };
+  tbody.innerHTML = data.map(row => {
+    const who = row.performed_by_profile?.display_name || row.performed_by_profile?.email || '—';
+    const when = row.performed_at ? new Date(row.performed_at).toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+    return `<tr>
+      <td style="font-size:12px;color:#888;white-space:nowrap">${when}</td>
+      <td style="font-size:12px">${esc(who)}</td>
+      <td style="font-size:12px">${typeEmoji[row.entity_type]||''} ${row.entity_type}</td>
+      <td class="truncate" style="font-size:12px">${esc(row.entity_title||'—')}</td>
+      <td style="font-weight:600;color:${actionColor(row.action)};font-size:12px">${esc(row.action)}</td>
+      <td style="font-size:11px;color:#aaa">${esc(row.old_value||'—')}</td>
+      <td style="font-size:11px;color:#555">${esc(row.new_value||'—')}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ── BRAND RULES ───────────────────────────────────────────────────────
@@ -1400,6 +1497,66 @@ function openSourceModal()    { document.getElementById('modal-source').classLis
 function openScriptModal()    { document.getElementById('modal-script').classList.add('open'); }
 function openBrandRuleModal() { document.getElementById('modal-brand-rule').classList.add('open'); }
 function closeModal(id)       { document.getElementById(id).classList.remove('open'); }
+
+// ── CALENDAR INTEGRATION ──────────────────────────────────────────────
+let calendarUrl = null;
+
+async function initCalendarUrl() {
+  const { data } = await sb.from('settings').select('value').eq('key', 'calendar_script_url').single();
+  calendarUrl = data?.value?.url || null;
+  const display = document.getElementById('calendar-url-display');
+  if (display) display.textContent = calendarUrl ? calendarUrl.slice(0, 60) + '…' : 'not set';
+  if (calendarUrl && document.getElementById('calendar-url-input')) {
+    document.getElementById('calendar-url-input').value = calendarUrl;
+  }
+  if (['admin','owner'].includes(userRole)) {
+    const btn = document.getElementById('btn-calendar-settings');
+    if (btn) btn.style.display = 'inline-flex';
+  }
+}
+
+function toggleCalendarSettings() {
+  const panel = document.getElementById('calendar-settings-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveCalendarUrl() {
+  const url = document.getElementById('calendar-url-input').value.trim();
+  if (!url) { toast('Paste the Apps Script URL first', true); return; }
+  const { error } = await sb.from('settings').upsert({ key: 'calendar_script_url', value: { url } });
+  if (error) { toast('Error: ' + error.message, true); return; }
+  calendarUrl = url;
+  document.getElementById('calendar-url-display').textContent = url.slice(0, 60) + '…';
+  toast('Calendar URL saved');
+  toggleCalendarSettings();
+}
+
+// Called automatically when a script is approved.
+// Appends the script as a new row in the current month's tab of the Google Sheet.
+async function pushToCalendar(title, style, script_text, platform) {
+  if (!calendarUrl) {
+    toast('Calendar URL not set — admin: use ⚙ Calendar URL to add it', true);
+    return false;
+  }
+  try {
+    const resp = await fetch('/.netlify/functions/push-to-calendar', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, style, script_text, platform, calendar_url: calendarUrl }),
+    });
+    const result = await resp.json();
+    if (result.success) {
+      toast('📋 Added to script sheet — ' + (result.placed || ''));
+      return true;
+    } else {
+      toast('Sheet error: ' + (result.error || 'unknown'), true);
+      return false;
+    }
+  } catch (err) {
+    toast('Could not reach sheet. Check URL in ⚙ Calendar URL.', true);
+    return false;
+  }
+}
 
 // Close modal on overlay click
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
