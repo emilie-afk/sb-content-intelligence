@@ -73,6 +73,50 @@ exports.handler = async (event) => {
       prompt = buildBriefPrompt(data, watchlistText);
       result = await callClaude(prompt);
 
+    } else if (type === "opportunity") {
+      // Fetch content history from the 2026 Google Sheet (all monthly tabs)
+      let sheetEntries = [];
+      try {
+        const { data: setting } = await supabase
+          .from("settings").select("value").eq("key", "calendar_script_url").single();
+        const scriptUrl = setting?.value?.url;
+        if (scriptUrl) {
+          const sheetResp = await fetch(scriptUrl, { method: "GET", redirect: "follow" });
+          const sheetData = await sheetResp.json();
+          sheetEntries = sheetData?.entries || [];
+        }
+      } catch (sheetErr) {
+        console.warn("Could not fetch sheet history:", sheetErr.message);
+      }
+
+      // Also fetch any manually logged published videos from Supabase
+      const { data: dbPublished } = await supabase
+        .from("published_videos")
+        .select("video_title, topic, plant_or_product, hook_used, angle_used, platform, publish_date, performance_summary, audience_followup_questions")
+        .order("publish_date", { ascending: false })
+        .limit(30);
+
+      prompt = buildOpportunityPrompt(data, watchlistText, sheetEntries, dbPublished || []);
+      result = await callClaude(prompt);
+      // Save repetition fields back to opportunity
+      if (data.id && result) {
+        await supabase.from("opportunities").update({
+          similar_published_url:     result.similar_published_url     || null,
+          similar_published_date:    result.similar_published_date     || null,
+          days_since_similar:        result.days_since_similar         || null,
+          previous_plant:            result.previous_plant             || null,
+          previous_hook:             result.previous_hook              || null,
+          previous_angle:            result.previous_angle             || null,
+          previous_format:           result.previous_format            || null,
+          previous_performance:      result.previous_performance       || null,
+          audience_followup_demand:  result.audience_followup_demand   || null,
+          new_angle_available:       result.new_angle_available        ?? null,
+          freshness_reason:          result.freshness_reason           || null,
+          repetition_risk:           result.repetition_risk            || null,
+          repetition_recommendation: result.repetition_recommendation  || null,
+        }).eq("id", data.id);
+      }
+
     } else if (type === "script") {
       // Fetch brand rules from DB
       const { data: rules } = await supabase
@@ -84,7 +128,7 @@ exports.handler = async (event) => {
       result = await callClaude(prompt);
 
     } else {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: "type must be signal, brief, or script" }) };
+      return { statusCode: 400, headers, body: JSON.stringify({ error: "type must be signal, brief, opportunity, or script" }) };
     }
 
     return { statusCode: 200, headers, body: JSON.stringify({ success: true, analysis: result }) };
@@ -129,6 +173,94 @@ Rules:
 - If plant matches watchlist BUT demand is weak → mark Yes but note watch item, not automatic priority.
 - If plant is uncertain → Needs check.
 - Keep it factual, no invented metrics.`;
+}
+
+
+// ── OPPORTUNITY / REPETITION PROMPT ──────────────────────────────────────────
+function buildOpportunityPrompt(o, watchlistText, sheetEntries, dbPublished) {
+  // Sheet entries: all 2026 content from the Google Sheet (planned + published)
+  const sheetText = sheetEntries.length
+    ? sheetEntries.map(e =>
+        `[${e.month}] "${e.title}"${e.style ? " | Style: " + e.style : ""}${e.script && e.script !== "*No script*" ? " | Script excerpt: " + e.script.slice(0, 120) : ""}${e.note ? " | Note: " + e.note : ""}${e.status ? " | Status: " + e.status : ""}`
+      ).join("\n")
+    : "No sheet entries available";
+
+  // DB published videos: manually logged with hook/angle/performance detail
+  const dbText = dbPublished.length
+    ? dbPublished.map(p =>
+        `- "${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | Hook: ${p.hook_used || "—"} | Angle: ${p.angle_used || "—"} | Platform: ${p.platform || "?"} | Performance: ${p.performance_summary || "not recorded"} | Follow-up: ${p.audience_followup_questions || "none"}`
+      ).join("\n")
+    : "";
+
+  // Combine both sources into one history block for the prompt
+  const historyLines = [];
+
+  // Sheet entries — these are ALL production scripts (published or scheduled for 2026)
+  sheetEntries.forEach(e => {
+    const scriptHint = e.script && e.script !== "*No script*" && e.script.trim()
+      ? ` | Script: "${e.script.slice(0, 120)}…"`
+      : "";
+    historyLines.push(`[${e.month} 2026] "${e.title}"${e.style ? " | Style: " + e.style : ""}${scriptHint}${e.note ? " | Note: " + e.note : ""}`);
+  });
+
+  // DB published videos (manually logged with hook/angle detail)
+  dbPublished.forEach(p => {
+    historyLines.push(`[Published ${p.publish_date || "?"}] "${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | Hook: ${p.hook_used || "—"} | Angle: ${p.angle_used || "—"} | Performance: ${p.performance_summary || "not recorded"}`);
+  });
+
+  const historyText = historyLines.length
+    ? historyLines.join("\n")
+    : "No content history available yet.";
+
+  return `You are reviewing a content opportunity for Succulents Box, a succulent plant subscription company.
+
+OPPORTUNITY:
+Topic: ${o.topic || ""}
+Plant/product: ${o.plant_or_product || ""}
+Why now: ${o.why_now || ""}
+Evidence: ${o.evidence_summary || ""}
+Suggested hook: ${o.suggested_hook || ""}
+Suggested format: ${o.suggested_format || ""}
+Platform: ${o.platform || ""}
+Shelf life: ${o.shelf_life || ""}
+
+HIGH-REVENUE PLANT WATCHLIST:
+${watchlistText}
+
+2026 PRODUCTION CONTENT HISTORY (published or scheduled — all months):
+These are real Succulents Box production scripts. Use them to check repetition.
+${historyText}
+
+Check whether this opportunity is too similar to something already in production.
+Rules:
+- Same topic + same plant + same angle = High or Block risk regardless of timing.
+- Same topic + different plant = Low risk (usually fine — different visual, different problem).
+- Same plant + different care problem = Low risk.
+- Same topic + follow-up from audience comments = Low risk, often priority.
+- Same topic + new seasonal urgency = Medium risk — needs a distinct hook.
+- High revenue alone does not justify repetition.
+- "*No script*" entries are ideas only — still count as claimed territory for that month.
+
+Return ONLY valid JSON:
+{
+  "repetition_risk": "Low | Medium | High | Block",
+  "repetition_recommendation": "one clear sentence — can review / hold and revise angle / hold unless new format / do not recommend",
+  "freshness_reason": "why this is or is not fresh — one to two sentences",
+  "new_angle_available": true,
+  "similar_published_url": "link from content history if found, else null",
+  "similar_published_date": "month and year if found, e.g. April 2026, else null",
+  "days_since_similar": null,
+  "previous_plant": "plant from similar entry, or null",
+  "previous_hook": "hook from similar entry, or null",
+  "previous_angle": "angle from similar entry, or null",
+  "previous_format": "format from similar entry, or null",
+  "previous_performance": null,
+  "audience_followup_demand": "any follow-up question opportunity found, or null",
+  "revenue_priority_match": "Yes | No | Needs check",
+  "revenue_priority_note": "note if plant is high-revenue"
+}
+
+If no similar entry exists, set repetition_risk to Low and similar fields to null.`;
 }
 
 

@@ -754,8 +754,15 @@ tbody tr:hover { background: #fafffe; }
       <div class="form-group"><label>Publish Date</label><input type="datetime-local" id="pub-date"></div>
     </div>
     <div class="form-group"><label>Topic</label><input type="text" id="pub-topic"></div>
+    <div class="form-group"><label>Plant / Product</label><input type="text" id="pub-plant"></div>
+    <div class="form-group"><label>Hook used (opening line or approach)</label><input type="text" id="pub-hook"></div>
+    <div class="form-group"><label>Angle used (what made it different)</label><input type="text" id="pub-angle"></div>
     <div class="form-group"><label>Hypothesis (what you expected to happen)</label><textarea id="pub-hypothesis" rows="2"></textarea></div>
-    <div class="form-group"><label>Original Opportunity Score</label><input type="number" id="pub-score" min="0" max="100"></div>
+    <div class="form-group"><label>Audience follow-up questions (from comments)</label><textarea id="pub-followup" rows="2" placeholder="e.g. Should I water it while it splits?"></textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>Original Opportunity Score</label><input type="number" id="pub-score" min="0" max="100"></div>
+      <div class="form-group"><label>Cooldown (days before repeating)</label><input type="number" id="pub-cooldown" value="30" min="0"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-published')">Cancel</button>
       <button class="btn btn-primary" onclick="savePublished()">Add Video</button>
@@ -1122,6 +1129,16 @@ async function loadDailyBoard() {
         ${o.suggested_format ? `<div class="board-field"><label>Format</label><p>${esc(o.suggested_format)}</p></div>` : ''}
         ${o.historical_memory_note ? `<div class="board-field" style="grid-column:1/-1"><label>🧠 Memory</label><p style="color:#666;font-style:italic">${esc(o.historical_memory_note)}</p></div>` : ''}
         ${o.recommended_deadline ? `<div class="board-field"><label>Deadline</label><p>${o.recommended_deadline}</p></div>` : ''}
+        ${o.repetition_risk ? `<div class="board-field" style="grid-column:1/-1">
+          <label>🔁 Repetition check</label>
+          <p>
+            <span class="badge ${o.repetition_risk==='Low'?'badge-low':o.repetition_risk==='Medium'?'badge-pending':o.repetition_risk==='High'?'badge-medium':'badge-reject'}" style="margin-right:6px">${o.repetition_risk} risk</span>
+            ${esc(o.freshness_reason||'')}
+            ${o.days_since_similar ? ` · ${o.days_since_similar}d since similar post` : ''}
+          </p>
+          ${o.repetition_recommendation ? `<p style="font-size:12px;color:#666;font-style:italic">${esc(o.repetition_recommendation)}</p>` : ''}
+        </div>` : ''}
+        <div id="rep-result-${o.id}"></div>
       </div>
       <div class="board-card-actions">
         <button class="btn btn-primary btn-sm" onclick="decideOpportunity('${o.id}','Approve brief')">✅ Approve Brief</button>
@@ -1129,6 +1146,7 @@ async function loadDailyBoard() {
         <button class="btn btn-secondary btn-sm" onclick="decideOpportunity('${o.id}','Needs more evidence')">🔍 Need More</button>
         <button class="btn btn-secondary btn-sm" onclick="decideOpportunity('${o.id}','Move to evergreen')">🌿 Evergreen</button>
         <button class="btn btn-danger btn-sm" onclick="decideOpportunity('${o.id}','Reject')">✕ Reject</button>
+        <button class="btn btn-secondary btn-sm" onclick="runRepetitionCheck('${o.id}')">🔁 Rep. Check</button>
       </div>
     </div>`).join('');
 }
@@ -1325,13 +1343,18 @@ async function saveBrief() {
 
 async function savePublished() {
   const row = {
-    video_title:               document.getElementById('pub-title').value,
-    video_url:                 document.getElementById('pub-url').value,
-    platform:                  document.getElementById('pub-platform').value,
-    publish_datetime:          document.getElementById('pub-date').value || null,
-    topic:                     document.getElementById('pub-topic').value || null,
-    hypothesis:                document.getElementById('pub-hypothesis').value || null,
-    original_opportunity_score:Number(document.getElementById('pub-score').value) || null,
+    video_title:                document.getElementById('pub-title').value,
+    video_url:                  document.getElementById('pub-url').value,
+    platform:                   document.getElementById('pub-platform').value,
+    publish_datetime:           document.getElementById('pub-date').value || null,
+    topic:                      document.getElementById('pub-topic').value || null,
+    plant_or_product:           document.getElementById('pub-plant').value || null,
+    hook_used:                  document.getElementById('pub-hook').value || null,
+    angle_used:                 document.getElementById('pub-angle').value || null,
+    hypothesis:                 document.getElementById('pub-hypothesis').value || null,
+    audience_followup_questions:document.getElementById('pub-followup').value || null,
+    original_opportunity_score: Number(document.getElementById('pub-score').value) || null,
+    cooldown_days:              Number(document.getElementById('pub-cooldown').value) || 30,
   };
   const { error } = await sb.from('published_videos').insert(row);
   if (error) { toast('Error: ' + error.message, true); return; }
@@ -1871,6 +1894,52 @@ async function importWatchlistCSV() {
     toast('Could not reach import function', true);
     if (btn) { btn.textContent = 'Import'; btn.disabled = false; }
   }
+}
+
+// ── REPETITION CHECK ──────────────────────────────────────────────────
+async function runRepetitionCheck(opportunityId) {
+  const resultEl = document.getElementById(`rep-result-${opportunityId}`);
+  if (!resultEl) return;
+  resultEl.innerHTML = '<div style="color:#888;font-size:13px;margin-top:8px">🔁 Checking published history…</div>';
+  const { data: o } = await sb.from('opportunities').select('*').eq('id', opportunityId).single();
+  if (!o) { resultEl.innerHTML = ''; return; }
+  try {
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'opportunity', data: o }),
+    });
+    const result = await resp.json();
+    if (!result.success) { resultEl.innerHTML = `<div style="color:#e74c3c;font-size:13px">Error: ${esc(result.error)}</div>`; return; }
+    resultEl.innerHTML = renderRepetitionAnalysis(result.analysis);
+    // Refresh card so saved fields show next time
+    loadDailyBoard();
+  } catch (err) {
+    resultEl.innerHTML = '<div style="color:#e74c3c;font-size:13px">Could not reach AI. Check CLAUDE_API_KEY.</div>';
+  }
+}
+
+function renderRepetitionAnalysis(a) {
+  if (!a) return '';
+  const riskColor = { Low: '#27ae60', Medium: '#e67e22', High: '#c0392b', Block: '#7f1f1f' }[a.repetition_risk] || '#888';
+  const riskBg   = { Low: '#eafaf1', Medium: '#fef9ec', High: '#fdf0ed', Block: '#f9eded' }[a.repetition_risk] || '#f8f9fa';
+  return `<div style="background:${riskBg};border:1px solid ${riskColor}33;border-radius:8px;padding:14px;margin-top:10px;font-size:13px">
+    <div style="font-weight:600;margin-bottom:8px">🔁 Repetition Check</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span style="font-weight:700;color:${riskColor}">${esc(a.repetition_risk||'—')} risk</span>
+      ${a.days_since_similar ? `<span style="color:#555">${a.days_since_similar} days since similar post</span>` : ''}
+    </div>
+    ${a.freshness_reason ? `<div style="margin-bottom:6px"><b>Freshness:</b> ${esc(a.freshness_reason)}</div>` : ''}
+    ${a.repetition_recommendation ? `<div style="margin-bottom:6px;font-style:italic;color:#444">${esc(a.repetition_recommendation)}</div>` : ''}
+    ${a.previous_plant || a.previous_hook ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #ddd">
+      <b>Previous similar:</b>
+      ${a.previous_plant ? `<div>Plant: ${esc(a.previous_plant)}</div>` : ''}
+      ${a.previous_hook  ? `<div>Hook: ${esc(a.previous_hook)}</div>` : ''}
+      ${a.previous_angle ? `<div>Angle: ${esc(a.previous_angle)}</div>` : ''}
+      ${a.similar_published_url ? `<div><a href="${esc(a.similar_published_url)}" target="_blank" style="color:#4CAF50">View published video ↗</a></div>` : ''}
+    </div>` : ''}
+    ${a.audience_followup_demand ? `<div style="margin-top:8px"><b>Audience follow-up demand:</b> ${esc(a.audience_followup_demand)}</div>` : ''}
+  </div>`;
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────

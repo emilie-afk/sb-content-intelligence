@@ -121,9 +121,52 @@ function jsonResponse(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+// ── GET: return all 2026 content entries for repetition checking ──────
+// Called by the dashboard's repetition check (no auth required — URL is secret)
 function doGet(e) {
-  return jsonResponse({
-    status: 'SB Script Export API running',
-    sheet:  SpreadsheetApp.getActiveSpreadsheet().getName(),
-  });
+  try {
+    var ss      = SpreadsheetApp.getActiveSpreadsheet();
+    var entries = [];
+
+    MONTHS.forEach(function(monthName) {
+      var sheet = ss.getSheetByName(monthName);
+      if (!sheet) return;
+
+      var header = findHeaderRow(sheet);
+      if (!header) return;
+
+      var cols    = getColumnMap(sheet, header.row, header.startCol);
+      var lastRow = findLastDataRow(sheet, header.row);
+
+      for (var r = header.row + 1; r <= lastRow; r++) {
+        var rowData = sheet.getRange(r, 1, 1, sheet.getLastColumn()).getValues()[0];
+        // Skip completely empty rows
+        if (!rowData.some(function(v) { return v !== ''; })) continue;
+
+        var getCol = function(key) {
+          var idx = cols[key];
+          return idx ? String(rowData[idx - 1] || '').trim() : '';
+        };
+
+        var title = getCol('title');
+        if (!title) continue;
+
+        entries.push({
+          month:  monthName,
+          no:     getCol('no.'),
+          title:  title,
+          style:  getCol('style'),
+          script: getCol('script').slice(0, 300), // first 300 chars only
+          link:   getCol('link sample'),
+          note:   getCol('note'),
+          status: getCol('status'),
+        });
+      }
+    });
+
+    return jsonResponse({ success: true, entries: entries, sheet: ss.getName() });
+
+  } catch(err) {
+    return jsonResponse({ success: false, error: err.message });
+  }
 }
