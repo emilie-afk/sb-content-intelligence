@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SB Content Intelligence — Social Listening + Script Production</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 /* ── RESET & BASE ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -589,11 +590,16 @@ tbody tr:hover { background: #fafffe; }
         </div>
       </div>
       <div id="watchlist-import-panel" style="display:none;background:#f8f9fa;border:1px solid #ddd;border-radius:8px;padding:16px;margin-bottom:16px">
-        <p style="font-size:13px;margin:0 0 8px"><b>How to import:</b> Open the Revenue by genus Google Sheet → Revenue by genus tab → File → Download → CSV. Paste the CSV content below.</p>
-        <textarea id="watchlist-csv-input" rows="6" style="width:100%;font-size:12px;font-family:monospace;padding:8px;border:1px solid #ccc;border-radius:4px" placeholder="Paste CSV content here…"></textarea>
-        <div style="margin-top:8px;display:flex;gap:8px">
-          <button class="btn btn-primary btn-sm" onclick="importWatchlistCSV()">Import</button>
-          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('watchlist-import-panel').style.display='none'">Cancel</button>
+        <p style="font-size:13px;margin:0 0 12px"><b>How to import:</b> Open the Revenue by genus Google Sheet → Revenue by genus tab → File → Download → CSV (or XLSX). Upload the file below.</p>
+        <label for="watchlist-file-input" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:12px 16px;border:2px dashed #ccc;border-radius:6px;background:#fff" id="watchlist-drop-zone">
+          <span style="font-size:22px">📂</span>
+          <span style="font-size:13px;color:#555">Click to choose a file — <b>.csv</b> or <b>.xlsx</b></span>
+          <input type="file" id="watchlist-file-input" accept=".csv,.xlsx,.xls" style="display:none" onchange="handleWatchlistFile(this)">
+        </label>
+        <div id="watchlist-file-status" style="font-size:12px;color:#555;margin-top:8px"></div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" id="watchlist-import-btn" onclick="importWatchlistCSV()" disabled>Import</button>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('watchlist-import-panel').style.display='none';document.getElementById('watchlist-file-status').textContent='';document.getElementById('watchlist-import-btn').disabled=true;window._watchlistCSV=null">Cancel</button>
         </div>
       </div>
       <div class="filters" style="margin-bottom:16px">
@@ -1787,20 +1793,60 @@ async function loadWatchlist() {
     </tr>`).join('');
 }
 
-function toggleWatchlistImport() {
-  const panel = document.getElementById('watchlist-import-panel');
-  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+// Stores parsed CSV string ready to submit
+window._watchlistCSV = null;
+
+function handleWatchlistFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('watchlist-file-status');
+  const importBtn = document.getElementById('watchlist-import-btn');
+  statusEl.textContent = `Reading "${file.name}"…`;
+  importBtn.disabled = true;
+  window._watchlistCSV = null;
+
+  const isXLSX = file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls');
+
+  if (isXLSX) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'array' });
+        // Try to find "Revenue by genus" sheet; fall back to first sheet
+        const sheetName = wb.SheetNames.find(n => n.toLowerCase().includes('genus')) || wb.SheetNames[0];
+        const ws = wb.Sheets[sheetName];
+        const csv = XLSX.utils.sheet_to_csv(ws);
+        window._watchlistCSV = csv;
+        const rows = csv.split('\n').filter(r => r.trim()).length;
+        statusEl.textContent = `✅ "${file.name}" loaded (sheet: ${sheetName}, ${rows} rows). Click Import to upload.`;
+        importBtn.disabled = false;
+      } catch (err) {
+        statusEl.textContent = '❌ Could not read XLSX: ' + err.message;
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  } else {
+    // CSV
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      window._watchlistCSV = e.target.result;
+      const rows = e.target.result.split('\n').filter(r => r.trim()).length;
+      statusEl.textContent = `✅ "${file.name}" loaded (${rows} rows). Click Import to upload.`;
+      importBtn.disabled = false;
+    };
+    reader.readAsText(file);
+  }
 }
 
 async function importWatchlistCSV() {
-  const csv = document.getElementById('watchlist-csv-input')?.value?.trim();
-  if (!csv) { toast('Paste CSV content first', true); return; }
+  const csv = window._watchlistCSV;
+  if (!csv) { toast('Choose a file first', true); return; }
 
   const session = await sb.auth.getSession();
   const token = session?.data?.session?.access_token;
   if (!token) { toast('Not logged in', true); return; }
 
-  const btn = document.querySelector('#watchlist-import-panel .btn-primary');
+  const btn = document.getElementById('watchlist-import-btn');
   if (btn) { btn.textContent = 'Importing…'; btn.disabled = true; }
 
   try {
@@ -1812,15 +1858,17 @@ async function importWatchlistCSV() {
     const result = await resp.json();
     if (result.success) {
       toast(`✅ ${result.message}`);
-      document.getElementById('watchlist-csv-input').value = '';
-      toggleWatchlistImport();
+      window._watchlistCSV = null;
+      document.getElementById('watchlist-file-status').textContent = '';
+      document.getElementById('watchlist-file-input').value = '';
+      document.getElementById('watchlist-import-panel').style.display = 'none';
       loadWatchlist();
     } else {
       toast('Import error: ' + (result.error || 'unknown'), true);
+      if (btn) { btn.textContent = 'Import'; btn.disabled = false; }
     }
   } catch (err) {
     toast('Could not reach import function', true);
-  } finally {
     if (btn) { btn.textContent = 'Import'; btn.disabled = false; }
   }
 }
