@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SB Content Intelligence — Social Listening + Script Production</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+/* ── RESET & BASE ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f6f8; color: #1a1a2e; min-height: 100vh; }
+
+/* ── AUTH SCREEN ── */
+#auth-screen {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: 100vh; background: linear-gradient(135deg, #1a2e1a 0%, #2d5a27 100%);
+}
+.auth-card {
+  background: white; border-radius: 16px; padding: 48px 40px; text-align: center;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-width: 380px; width: 90%;
+}
+.auth-logo { font-size: 48px; margin-bottom: 16px; }
+.auth-card h1 { color: #1a2e1a; font-size: 22px; margin-bottom: 8px; }
+.auth-card p { color: #666; font-size: 14px; margin-bottom: 32px; }
+.btn-google {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; padding: 14px 20px; background: white; border: 2px solid #e0e0e0;
+  border-radius: 10px; font-size: 15px; font-weight: 500; cursor: pointer;
+  transition: all 0.2s; color: #333;
+}
+.btn-google:hover { border-color: #4CAF50; box-shadow: 0 4px 12px rgba(76,175,80,0.2); }
+.btn-google svg { width: 20px; height: 20px; }
+.auth-error { color: #e74c3c; font-size: 13px; margin-top: 16px; }
+
+/* ── APP LAYOUT ── */
+#app { display: none; height: 100vh; display: grid; grid-template-columns: 220px 1fr; }
+
+/* ── SIDEBAR ── */
+.sidebar {
+  background: #1a2e1a; color: white; display: flex; flex-direction: column;
+  padding: 0; overflow-y: auto;
+}
+.sidebar-brand {
+  padding: 20px 20px 16px; border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.sidebar-brand .logo { font-size: 22px; }
+.sidebar-brand h2 { font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.9); margin-top: 4px; }
+.sidebar-brand p { font-size: 11px; color: rgba(255,255,255,0.5); }
+.sidebar-nav { flex: 1; padding: 12px 0; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px; padding: 10px 20px;
+  color: rgba(255,255,255,0.7); font-size: 13.5px; cursor: pointer;
+  transition: all 0.15s; border-left: 3px solid transparent; user-select: none;
+}
+.nav-item:hover { background: rgba(255,255,255,0.08); color: white; }
+.nav-item.active { background: rgba(76,175,80,0.2); color: #81c784; border-left-color: #4CAF50; }
+.nav-item .icon { font-size: 16px; width: 20px; text-align: center; }
+.nav-badge {
+  margin-left: auto; background: #e74c3c; color: white;
+  border-radius: 10px; padding: 1px 7px; font-size: 11px; font-weight: 600;
+}
+.sidebar-user {
+  padding: 16px 20px; border-top: 1px solid rgba(255,255,255,0.1);
+  font-size: 12px; color: rgba(255,255,255,0.6);
+}
+.sidebar-user strong { display: block; color: rgba(255,255,255,0.9); margin-bottom: 2px; font-size: 13px; }
+.btn-signout {
+  margin-top: 8px; width: 100%; padding: 7px; background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; color: rgba(255,255,255,0.7);
+  font-size: 12px; cursor: pointer; transition: all 0.2s;
+}
+.btn-signout:hover { background: rgba(231,76,60,0.3); color: white; }
+
+/* ── MAIN CONTENT ── */
+.main { overflow-y: auto; }
+.view { display: none; padding: 28px 32px; }
+.view.active { display: block; }
+.view-header { margin-bottom: 24px; }
+.view-header h1 { font-size: 22px; font-weight: 700; color: #1a2e1a; }
+.view-header p { color: #666; font-size: 14px; margin-top: 4px; }
+
+/* ── COMMAND CENTER ── */
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+.stat-card {
+  background: white; border-radius: 12px; padding: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08); border-top: 3px solid #e0e0e0;
+}
+.stat-card.red { border-top-color: #e74c3c; }
+.stat-card.amber { border-top-color: #f39c12; }
+.stat-card.green { border-top-color: #27ae60; }
+.stat-card.blue { border-top-color: #3498db; }
+.stat-number { font-size: 32px; font-weight: 700; color: #1a2e1a; }
+.stat-label { font-size: 12px; color: #888; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* ── SECTION HEADER ── */
+.section-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.section-header h2 { font-size: 16px; font-weight: 600; color: #1a2e1a; }
+
+/* ── TABLES ── */
+.table-wrap { background: white; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow: hidden; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+thead th {
+  background: #f8f9fa; padding: 11px 14px; text-align: left;
+  font-size: 11.5px; font-weight: 600; color: #666; text-transform: uppercase;
+  letter-spacing: 0.5px; border-bottom: 1px solid #eee;
+}
+tbody td { padding: 11px 14px; border-bottom: 1px solid #f5f5f5; vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: #fafffe; }
+.truncate { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── BADGES ── */
+.badge {
+  display: inline-flex; align-items: center; padding: 3px 10px;
+  border-radius: 20px; font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.badge-high  { background: #fde8e8; color: #c0392b; }
+.badge-medium{ background: #fef3cd; color: #856404; }
+.badge-low   { background: #d4edda; color: #155724; }
+.badge-new   { background: #e8f4fd; color: #1a6699; }
+.badge-watch { background: #fff3cd; color: #856404; }
+.badge-approve { background: #d4edda; color: #155724; }
+.badge-reject  { background: #fde8e8; color: #c0392b; }
+.badge-pending { background: #f0f0f0; color: #666; }
+.badge-submitted { background: #d4edda; color: #155724; }
+.badge-overdue { background: #fde8e8; color: #c0392b; }
+.badge-draft   { background: #f0f0f0; color: #555; }
+.badge-filming { background: #e8f4fd; color: #1a6699; }
+.badge-editing { background: #fff3cd; color: #856404; }
+.badge-scheduled { background: #e8eafd; color: #3a4adb; }
+.badge-published { background: #d4edda; color: #155724; }
+
+/* ── SCORE PILL ── */
+.score-pill {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 42px; height: 26px; border-radius: 13px; font-size: 12px; font-weight: 700;
+}
+.score-high   { background: #fde8e8; color: #c0392b; }
+.score-medium { background: #fef3cd; color: #856404; }
+.score-low    { background: #d4edda; color: #155724; }
+
+/* ── BUTTONS ── */
+.btn {
+  padding: 7px 16px; border-radius: 7px; font-size: 13px; font-weight: 500;
+  cursor: pointer; border: none; transition: all 0.15s;
+}
+.btn-primary   { background: #4CAF50; color: white; }
+.btn-primary:hover { background: #43a047; }
+.btn-secondary { background: #f0f0f0; color: #333; }
+.btn-secondary:hover { background: #e0e0e0; }
+.btn-danger    { background: #fde8e8; color: #c0392b; }
+.btn-danger:hover { background: #fcc; }
+.btn-warning   { background: #fff3cd; color: #856404; }
+.btn-warning:hover { background: #ffe69c; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+
+/* ── DAILY BOARD CARDS ── */
+.board-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+.board-card {
+  background: white; border-radius: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  border-left: 5px solid #e0e0e0; overflow: hidden;
+}
+.board-card.priority-high   { border-left-color: #e74c3c; }
+.board-card.priority-medium { border-left-color: #f39c12; }
+.board-card.priority-low    { border-left-color: #27ae60; }
+.board-card-header { padding: 16px 20px 12px; display: flex; align-items: flex-start; gap: 12px; }
+.board-rank {
+  background: #1a2e1a; color: white; border-radius: 50%;
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; flex-shrink: 0;
+}
+.board-card-title { flex: 1; }
+.board-card-title h3 { font-size: 15px; font-weight: 600; color: #1a2e1a; }
+.board-card-title .meta { font-size: 12px; color: #888; margin-top: 3px; }
+.board-card-body { padding: 0 20px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.board-field label { font-size: 11px; color: #888; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 3px; }
+.board-field p { font-size: 13px; color: #333; }
+.board-card-actions { padding: 12px 20px 16px; display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid #f5f5f5; }
+
+/* ── FILTERS ── */
+.filters { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+.filter-select {
+  padding: 7px 12px; border: 1px solid #e0e0e0; border-radius: 8px;
+  font-size: 13px; background: white; cursor: pointer;
+}
+
+/* ── MODAL ── */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  z-index: 1000; align-items: center; justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: white; border-radius: 16px; padding: 28px; max-width: 560px;
+  width: 90%; max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+.modal h2 { font-size: 18px; margin-bottom: 20px; color: #1a2e1a; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; }
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid #e0e0e0; border-radius: 8px;
+  font-size: 13.5px; font-family: inherit; resize: vertical;
+}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+  outline: none; border-color: #4CAF50; box-shadow: 0 0 0 3px rgba(76,175,80,0.1);
+}
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; padding-top: 16px; border-top: 1px solid #f0f0f0; }
+
+/* ── EMPTY STATE ── */
+.empty { text-align: center; padding: 48px; color: #aaa; }
+.empty .icon { font-size: 40px; margin-bottom: 12px; }
+.empty p { font-size: 14px; }
+
+/* ── LOADING ── */
+.loading { text-align: center; padding: 40px; color: #aaa; font-size: 14px; }
+
+/* ── TOAST ── */
+.toast {
+  position: fixed; bottom: 24px; right: 24px; padding: 14px 20px;
+  background: #1a2e1a; color: white; border-radius: 10px;
+  font-size: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  transform: translateY(80px); opacity: 0; transition: all 0.3s; z-index: 2000;
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.error { background: #c0392b; }
+</style>
+</head>
+<body>
+
+<!-- ══ AUTH SCREEN ══════════════════════════════════════════════════ -->
+<div id="auth-screen">
+  <div class="auth-card">
+    <div class="auth-logo">🌵</div>
+    <h1>Content Intelligence</h1>
+    <p>Social Listening + Script Production · Succulents Box</p>
+    <button class="btn-google" onclick="signInWithGoogle()">
+      <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+      Sign in with Google
+    </button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- ══ APP ══════════════════════════════════════════════════════════ -->
+<div id="app" style="display:none">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="logo">🌵</div>
+      <h2>Content Intelligence</h2>
+      <p>Succulents Box</p>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-item active" data-view="command-center" onclick="showView('command-center',this)">
+        <span class="icon">🏠</span> Command Center
+      </div>
+      <div class="nav-item" data-view="inbox" onclick="showView('inbox',this)">
+        <span class="icon">📥</span> Inbox
+        <span class="nav-badge" id="badge-inbox">0</span>
+      </div>
+      <div class="nav-item" data-view="daily-board" onclick="showView('daily-board',this)">
+        <span class="icon">⭐</span> Daily Board
+        <span class="nav-badge" id="badge-board">0</span>
+      </div>
+      <div class="nav-item" data-view="briefs" onclick="showView('briefs',this)">
+        <span class="icon">📋</span> Briefs
+      </div>
+      <div class="nav-item" data-view="published" onclick="showView('published',this)">
+        <span class="icon">📊</span> Published
+        <span class="nav-badge" id="badge-snapshots" style="background:#f39c12">0</span>
+      </div>
+      <div class="nav-item" data-view="learning" onclick="showView('learning',this)">
+        <span class="icon">🧠</span> Learning
+      </div>
+      <div class="nav-item" data-view="sources" onclick="showView('sources',this)">
+        <span class="icon">🔗</span> Sources
+      </div>
+      <div class="nav-item" data-view="scripts" onclick="showView('scripts',this)">
+        <span class="icon">📝</span> Scripts
+      </div>
+      <div class="nav-item" data-view="brand-rules" onclick="showView('brand-rules',this)">
+        <span class="icon">🎯</span> Brand Rules
+      </div>
+    </nav>
+    <div class="sidebar-user">
+      <strong id="user-name">Loading…</strong>
+      <span id="user-role"></span>
+      <button class="btn-signout" onclick="signOut()">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+
+    <!-- ── COMMAND CENTER ── -->
+    <div id="view-command-center" class="view active">
+      <div class="view-header">
+        <h1>Command Center</h1>
+        <p id="today-date"></p>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card red">
+          <div class="stat-number" id="stat-high">–</div>
+          <div class="stat-label">High Priority</div>
+        </div>
+        <div class="stat-card amber">
+          <div class="stat-number" id="stat-inbox">–</div>
+          <div class="stat-label">New in Inbox</div>
+        </div>
+        <div class="stat-card green">
+          <div class="stat-number" id="stat-briefs">–</div>
+          <div class="stat-label">Briefs Approved</div>
+        </div>
+        <div class="stat-card blue">
+          <div class="stat-number" id="stat-snapshots">–</div>
+          <div class="stat-label">Snapshots Due</div>
+        </div>
+      </div>
+
+      <div class="section-header">
+        <h2>Today's Top Opportunities</h2>
+        <button class="btn btn-secondary btn-sm" onclick="showView('daily-board', document.querySelector('[data-view=daily-board]'))">See All →</button>
+      </div>
+      <div class="table-wrap" style="margin-bottom:24px">
+        <table>
+          <thead><tr>
+            <th>Topic</th><th>Plant / Product</th><th>Score</th><th>Priority</th><th>Shelf Life</th><th>Decision</th>
+          </tr></thead>
+          <tbody id="cmd-opportunities"><tr><td colspan="6" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="section-header"><h2>Briefs Needing Approval</h2></div>
+      <div class="table-wrap" style="margin-bottom:24px">
+        <table>
+          <thead><tr><th>Title</th><th>Product</th><th>Deadline</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody id="cmd-briefs"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="section-header"><h2>Performance Checkpoints Due</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Video</th><th>Platform</th><th>24h</th><th>72h</th><th>7d</th></tr></thead>
+          <tbody id="cmd-checkpoints"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── INBOX ── -->
+    <div id="view-inbox" class="view">
+      <div class="view-header">
+        <h1>Opportunity Inbox</h1>
+        <p>Raw signals from scraper and manual entries</p>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="filters">
+          <select class="filter-select" id="inbox-platform-filter" onchange="loadInbox()">
+            <option value="">All Platforms</option>
+            <option>Instagram</option><option>TikTok</option><option>YouTube</option><option>Facebook</option>
+          </select>
+          <select class="filter-select" id="inbox-priority-filter" onchange="loadInbox()">
+            <option value="">All Priorities</option>
+            <option>High</option><option>Medium</option><option>Low</option>
+          </select>
+          <select class="filter-select" id="inbox-status-filter" onchange="loadInbox()">
+            <option value="New">New Only</option>
+            <option value="">All Statuses</option>
+            <option>Needs cleanup</option><option>Needs scoring</option><option>Watch</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openSignalModal()">+ Add Signal</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Date</th><th>Platform</th><th>Creator</th><th>Topic</th><th>Score</th>
+            <th>Priority</th><th>Status</th><th>Action</th>
+          </tr></thead>
+          <tbody id="inbox-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── DAILY BOARD ── -->
+    <div id="view-daily-board" class="view">
+      <div class="view-header">
+        <h1>Daily Review Board</h1>
+        <p>Top opportunities awaiting your decision</p>
+      </div>
+      <div class="board-grid" id="board-cards">
+        <div class="loading">Loading…</div>
+      </div>
+    </div>
+
+    <!-- ── BRIEFS ── -->
+    <div id="view-briefs" class="view">
+      <div class="view-header">
+        <h1>Approved Briefs</h1>
+        <p>Production pipeline</p>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="filters">
+          <select class="filter-select" id="briefs-status-filter" onchange="loadBriefs()">
+            <option value="">All Statuses</option>
+            <option>Draft</option><option>Needs review</option><option>Approved</option>
+            <option>Filming</option><option>Editing</option><option>Scheduled</option>
+            <option>Published</option><option>Measured</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openBriefModal()">+ New Brief</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Title</th><th>Product</th><th>Format</th><th>Owner</th><th>Deadline</th><th>Status</th><th>Action</th>
+          </tr></thead>
+          <tbody id="briefs-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── PUBLISHED ── -->
+    <div id="view-published" class="view">
+      <div class="view-header">
+        <h1>Published Results</h1>
+        <p>Track performance after publishing</p>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="filters">
+          <select class="filter-select" id="published-platform-filter" onchange="loadPublished()">
+            <option value="">All Platforms</option>
+            <option>TikTok</option><option>Instagram</option><option>YouTube</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openPublishedModal()">+ Add Video</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Title</th><th>Platform</th><th>Published</th><th>Score</th><th>24h</th><th>72h</th><th>7d</th><th>Learning</th>
+          </tr></thead>
+          <tbody id="published-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── LEARNING ── -->
+    <div id="view-learning" class="view">
+      <div class="view-header">
+        <h1>Learning Memory</h1>
+        <p>Lessons from past content — review and approve before they apply</p>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="filters">
+          <select class="filter-select" id="learning-status-filter" onchange="loadLearning()">
+            <option value="Needs review next time">Needs Review</option>
+            <option value="">All</option>
+            <option value="Active">Active</option>
+            <option value="Approved rule">Approved Rules</option>
+            <option value="Archived">Archived</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openLearningModal()">+ Add Memory</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Applies To</th><th>Topic</th><th>What Happened</th><th>Recommendation</th><th>Confidence</th><th>Status</th><th>Action</th>
+          </tr></thead>
+          <tbody id="learning-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── SOURCES ── -->
+    <div id="view-sources" class="view">
+      <div class="view-header">
+        <h1>Source Quality</h1>
+        <p>Track which sources generate usable ideas</p>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
+        <button class="btn btn-primary btn-sm" onclick="openSourceModal()">+ Add Source</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Source</th><th>Platform</th><th>Type</th><th>Frequency</th><th>Quality</th><th>Ideas</th><th>Approved</th><th>Published</th>
+          </tr></thead>
+          <tbody id="sources-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── SCRIPTS ── -->
+    <div id="view-scripts" class="view">
+      <div class="view-header">
+        <h1>Video Scripts</h1>
+        <p>Production-ready scripts generated from approved briefs</p>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="filters">
+          <select class="filter-select" id="scripts-status-filter" onchange="loadScripts()">
+            <option value="">All Statuses</option>
+            <option>Draft</option><option>Needs review</option><option>Needs revision</option>
+            <option>Approved</option><option>Used in production</option><option>Archived</option>
+          </select>
+          <select class="filter-select" id="scripts-platform-filter" onchange="loadScripts()">
+            <option value="">All Platforms</option>
+            <option>TikTok</option><option>Instagram</option><option>YouTube</option><option>Facebook</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openScriptModal()">+ New Script</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Status</th><th>Action</th>
+          </tr></thead>
+          <tbody id="scripts-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── BRAND RULES ── -->
+    <div id="view-brand-rules" class="view">
+      <div class="view-header">
+        <h1>Brand &amp; Content Rules</h1>
+        <p>AI uses these rules when generating hooks, scripts, and captions</p>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="filters">
+          <select class="filter-select" id="rules-category-filter" onchange="loadBrandRules()">
+            <option value="">All Categories</option>
+            <option>Brand voice</option><option>Content</option><option>Legal</option>
+            <option>Accuracy</option><option>Product</option><option>Privacy</option>
+          </select>
+          <select class="filter-select" id="rules-severity-filter" onchange="loadBrandRules()">
+            <option value="">All Severities</option>
+            <option>Required</option><option>Recommended</option><option>Avoid</option><option>Forbidden</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openBrandRuleModal()">+ Add Rule</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Category</th><th>Rule Name</th><th>Rule</th><th>Severity</th><th>Platform</th><th>Active</th><th>Action</th>
+          </tr></thead>
+          <tbody id="brand-rules-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ══ MODALS ════════════════════════════════════════════════════════ -->
+
+<!-- Add Signal Modal -->
+<div class="modal-overlay" id="modal-signal">
+  <div class="modal">
+    <h2>Add Signal</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Platform</label>
+        <select id="sig-platform"><option>Instagram</option><option>TikTok</option><option>YouTube</option><option>Facebook</option><option>Pinterest</option></select>
+      </div>
+      <div class="form-group">
+        <label>Priority</label>
+        <select id="sig-priority"><option>High</option><option>Medium</option><option>Low</option></select>
+      </div>
+    </div>
+    <div class="form-group"><label>Source URL</label><input type="url" id="sig-url" placeholder="https://…"></div>
+    <div class="form-group"><label>Creator / Account</label><input type="text" id="sig-creator"></div>
+    <div class="form-group"><label>Topic / Plant</label><input type="text" id="sig-topic"></div>
+    <div class="form-group"><label>Caption Summary</label><textarea id="sig-caption" rows="3"></textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>Likes</label><input type="number" id="sig-likes" value="0"></div>
+      <div class="form-group"><label>Comments</label><input type="number" id="sig-comments" value="0"></div>
+    </div>
+    <div class="form-group"><label>Audience Problem</label><input type="text" id="sig-problem" placeholder="What question are people asking?"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-signal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSignal()">Add Signal</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Opportunity Modal -->
+<div class="modal-overlay" id="modal-opportunity">
+  <div class="modal">
+    <h2>Score Opportunity</h2>
+    <div class="form-group"><label>Topic</label><input type="text" id="opp-topic"></div>
+    <div class="form-group"><label>Plant / Product</label><input type="text" id="opp-plant"></div>
+    <div class="form-group"><label>Why Now</label><textarea id="opp-why" rows="2"></textarea></div>
+    <div class="form-group"><label>Evidence Summary</label><textarea id="opp-evidence" rows="2"></textarea></div>
+    <div class="form-group"><label>Suggested Hook</label><input type="text" id="opp-hook"></div>
+    <div class="form-group"><label>Suggested Format</label>
+      <select id="opp-format"><option>Talking head</option><option>Tutorial</option><option>Before & after</option><option>POV</option><option>Timelapse</option><option>Voiceover</option></select>
+    </div>
+    <p style="font-size:12px;color:#888;margin-bottom:8px">Score each dimension (0–30 max each, total ≤ 100):</p>
+    <div class="form-row">
+      <div class="form-group"><label>External Demand (0-30)</label><input type="number" id="opp-external" min="0" max="30" value="0"></div>
+      <div class="form-group"><label>Comment Demand (0-25)</label><input type="number" id="opp-comment" min="0" max="25" value="0"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Cross-Platform (0-20)</label><input type="number" id="opp-cross" min="0" max="20" value="0"></div>
+      <div class="form-group"><label>Production Ease (0-15)</label><input type="number" id="opp-ease" min="0" max="15" value="0"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Catalog Fit (0-10)</label><input type="number" id="opp-catalog" min="0" max="10" value="0"></div>
+      <div class="form-group"><label>Shelf Life</label>
+        <select id="opp-shelf"><option>Trend</option><option>Seasonal</option><option>Evergreen</option><option>Experimental</option></select>
+      </div>
+    </div>
+    <div class="form-group"><label>Recommended Deadline</label><input type="date" id="opp-deadline"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-opportunity')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveOpportunity()">Add to Board</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Brief Modal -->
+<div class="modal-overlay" id="modal-brief">
+  <div class="modal">
+    <h2>New Brief</h2>
+    <div class="form-group"><label>Title</label><input type="text" id="brief-title"></div>
+    <div class="form-group"><label>Featured Product</label><input type="text" id="brief-product"></div>
+    <div class="form-group"><label>Product URL</label><input type="url" id="brief-url"></div>
+    <div class="form-group"><label>Audience Problem</label><input type="text" id="brief-problem"></div>
+    <div class="form-group"><label>Opening Hook</label><textarea id="brief-hook" rows="2"></textarea></div>
+    <div class="form-group"><label>Visual Hook</label><input type="text" id="brief-visual"></div>
+    <div class="form-group"><label>Video Format</label>
+      <select id="brief-format"><option>Talking head</option><option>Tutorial</option><option>Before & after</option><option>POV</option><option>Timelapse</option><option>Voiceover</option></select>
+    </div>
+    <div class="form-group"><label>Video Flow (brief outline)</label><textarea id="brief-flow" rows="3"></textarea></div>
+    <div class="form-group"><label>Caption Draft</label><textarea id="brief-caption" rows="3"></textarea></div>
+    <div class="form-group"><label>CTA</label><input type="text" id="brief-cta" placeholder="e.g. Link in bio for the plant care kit"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Deadline</label><input type="date" id="brief-deadline"></div>
+      <div class="form-group"><label>Status</label>
+        <select id="brief-status"><option>Draft</option><option>Needs review</option><option>Approved</option></select>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-brief')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveBrief()">Save Brief</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Published Video Modal -->
+<div class="modal-overlay" id="modal-published">
+  <div class="modal">
+    <h2>Add Published Video</h2>
+    <div class="form-group"><label>Video Title</label><input type="text" id="pub-title"></div>
+    <div class="form-group"><label>Video URL</label><input type="url" id="pub-url"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Platform</label>
+        <select id="pub-platform"><option>TikTok</option><option>Instagram</option><option>YouTube</option></select>
+      </div>
+      <div class="form-group"><label>Publish Date</label><input type="datetime-local" id="pub-date"></div>
+    </div>
+    <div class="form-group"><label>Topic</label><input type="text" id="pub-topic"></div>
+    <div class="form-group"><label>Hypothesis (what you expected to happen)</label><textarea id="pub-hypothesis" rows="2"></textarea></div>
+    <div class="form-group"><label>Original Opportunity Score</label><input type="number" id="pub-score" min="0" max="100"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-published')">Cancel</button>
+      <button class="btn btn-primary" onclick="savePublished()">Add Video</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Learning Memory Modal -->
+<div class="modal-overlay" id="modal-learning">
+  <div class="modal">
+    <h2>Add Learning Memory</h2>
+    <div class="form-row">
+      <div class="form-group"><label>Applies To</label>
+        <select id="learn-applies"><option>Topic</option><option>Plant</option><option>Hook</option><option>Format</option><option>Source</option><option>Product</option><option>Audience question</option><option>Content pillar</option></select>
+      </div>
+      <div class="form-group"><label>Confidence</label>
+        <select id="learn-confidence"><option>High</option><option>Medium</option><option>Low</option></select>
+      </div>
+    </div>
+    <div class="form-group"><label>Topic</label><input type="text" id="learn-topic"></div>
+    <div class="form-group"><label>What Happened</label><textarea id="learn-happened" rows="3"></textarea></div>
+    <div class="form-group"><label>Evidence Summary</label><textarea id="learn-evidence" rows="2"></textarea></div>
+    <div class="form-group"><label>Recommendation Next Time</label><textarea id="learn-rec" rows="2"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-learning')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveLearning()">Save Memory</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Source Modal -->
+<div class="modal-overlay" id="modal-source">
+  <div class="modal">
+    <h2>Add Source</h2>
+    <div class="form-group"><label>Source Name</label><input type="text" id="src-name"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Platform</label>
+        <select id="src-platform"><option>Instagram</option><option>TikTok</option><option>YouTube</option><option>Facebook</option><option>Pinterest</option></select>
+      </div>
+      <div class="form-group"><label>Type</label>
+        <select id="src-type"><option>Hashtag</option><option>Creator</option><option>Facebook Group</option><option>Search keyword</option></select>
+      </div>
+    </div>
+    <div class="form-group"><label>URL / Handle</label><input type="text" id="src-url"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Collection Frequency</label>
+        <select id="src-freq"><option>Daily</option><option>Weekly</option><option>Manual</option></select>
+      </div>
+      <div class="form-group"><label>Signal Quality</label>
+        <select id="src-quality"><option>Unknown</option><option>High</option><option>Medium</option><option>Low</option></select>
+      </div>
+    </div>
+    <div class="form-group"><label>Notes</label><textarea id="src-notes" rows="2"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-source')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSource()">Add Source</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Script Modal -->
+<div class="modal-overlay" id="modal-script">
+  <div class="modal">
+    <h2>New Script</h2>
+    <div class="form-group"><label>Script Title</label><input type="text" id="scr-title" placeholder="e.g. Why your Echeveria is stretching"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Platform</label>
+        <select id="scr-platform"><option>TikTok</option><option>Instagram</option><option>YouTube</option><option>Facebook</option></select>
+      </div>
+      <div class="form-group"><label>Script Type</label>
+        <select id="scr-type">
+          <option>TikTok / Reel short script</option>
+          <option>YouTube Shorts script</option>
+          <option>Facebook Reel script</option>
+          <option>Longer educational script</option>
+          <option>Caption-only variant</option>
+          <option>UGC-style script</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Version</label>
+        <select id="scr-version"><option>v1</option><option>v2</option><option>v3</option></select>
+      </div>
+      <div class="form-group"><label>Est. Duration (seconds)</label><input type="number" id="scr-duration" min="5" max="600" placeholder="30"></div>
+    </div>
+    <div class="form-group"><label>Opening Hook</label><input type="text" id="scr-hook" placeholder="First line of the video"></div>
+    <div class="form-group"><label>Full Voiceover Script</label><textarea id="scr-voiceover" rows="5" placeholder="Full spoken script…"></textarea></div>
+    <div class="form-group"><label>On-Screen Text</label><textarea id="scr-onscreen" rows="2" placeholder="Text overlays / captions…"></textarea></div>
+    <div class="form-group"><label>Shot List</label><textarea id="scr-shots" rows="3" placeholder="Shot 1: close-up on soil…"></textarea></div>
+    <div class="form-group"><label>B-Roll / Close-Up Notes</label><input type="text" id="scr-broll" placeholder="e.g. Show roots being trimmed"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Product Mention</label><input type="text" id="scr-product"></div>
+      <div class="form-group"><label>CTA</label><input type="text" id="scr-cta" placeholder="e.g. Link in bio"></div>
+    </div>
+    <div class="form-group"><label>Caption</label><textarea id="scr-caption" rows="2"></textarea></div>
+    <div class="form-group"><label>Review Status</label>
+      <select id="scr-status"><option>Draft</option><option>Needs review</option><option>Approved</option></select>
+    </div>
+    <div class="form-group"><label>Reviewer Notes</label><textarea id="scr-notes" rows="2" placeholder="Anything to flag for the reviewer…"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-script')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveScript()">Save Script</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Brand Rule Modal -->
+<div class="modal-overlay" id="modal-brand-rule">
+  <div class="modal">
+    <h2>Add Brand Rule</h2>
+    <div class="form-row">
+      <div class="form-group"><label>Category</label>
+        <select id="rule-category">
+          <option>Brand voice</option><option>Content</option><option>Legal</option>
+          <option>Accuracy</option><option>Product</option><option>Privacy</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Severity</label>
+        <select id="rule-severity">
+          <option>Required</option><option>Recommended</option><option>Avoid</option><option>Forbidden</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label>Rule Name</label><input type="text" id="rule-name" placeholder="Short label"></div>
+    <div class="form-group"><label>Rule Text</label><textarea id="rule-text" rows="3" placeholder="Full rule description…"></textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>Platform (optional)</label>
+        <select id="rule-platform">
+          <option value="">All Platforms</option>
+          <option>TikTok</option><option>Instagram</option><option>YouTube</option><option>Facebook</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Content Pillar (optional)</label>
+        <select id="rule-pillar">
+          <option value="">All Pillars</option>
+          <option>Repeated Questions</option><option>Common Mistakes</option><option>Plant Rescue</option>
+          <option>Myths and Debates</option><option>Experiments</option><option>Seasonal Problems</option>
+          <option>Product / Catalog Fit</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-brand-rule')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveBrandRule()">Add Rule</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- ══ SCRIPTS ═══════════════════════════════════════════════════════ -->
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────
+// These values are injected by Netlify at build time from env variables.
+// Replace the placeholders below ONLY if running locally.
+const SUPABASE_URL  = typeof __SUPABASE_URL__  !== 'undefined' ? __SUPABASE_URL__  : 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON = typeof __SUPABASE_ANON__ !== 'undefined' ? __SUPABASE_ANON__ : 'YOUR_SUPABASE_ANON_KEY';
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+let currentUser = null;
+let userRole    = 'viewer';
+
+// ── AUTH ──────────────────────────────────────────────────────────────
+async function signInWithGoogle() {
+  const { error } = await sb.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: window.location.href }
+  });
+  if (error) showError(error.message);
+}
+
+async function signOut() {
+  await sb.auth.signOut();
+  location.reload();
+}
+
+async function initAuth() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session?.user) {
+    await loadUser(session.user);
+  } else {
+    document.getElementById('auth-screen').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+  }
+}
+
+async function loadUser(user) {
+  currentUser = user;
+  const { data: profile } = await sb.from('users_profile').select('*').eq('id', user.id).single();
+  userRole = profile?.role || 'viewer';
+  document.getElementById('user-name').textContent = profile?.display_name || user.email;
+  document.getElementById('user-role').textContent = userRole;
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'grid';
+  document.getElementById('today-date').textContent = new Date().toLocaleDateString('en-US', {weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  loadCommandCenter();
+}
+
+sb.auth.onAuthStateChange((_event, session) => {
+  if (session?.user) loadUser(session.user);
+  else { document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; }
+});
+
+// ── NAVIGATION ────────────────────────────────────────────────────────
+function showView(viewId, el) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('view-' + viewId).classList.add('active');
+  if (el) el.classList.add('active');
+  // Load data for this view
+  const loaders = {
+    'command-center': loadCommandCenter,
+    'inbox':          loadInbox,
+    'daily-board':    loadDailyBoard,
+    'briefs':         loadBriefs,
+    'published':      loadPublished,
+    'learning':       loadLearning,
+    'sources':        loadSources,
+    'scripts':        loadScripts,
+    'brand-rules':    loadBrandRules,
+  };
+  if (loaders[viewId]) loaders[viewId]();
+}
+
+// ── COMMAND CENTER ────────────────────────────────────────────────────
+async function loadCommandCenter() {
+  // Stats
+  const [high, inbox, briefs, snapshots] = await Promise.all([
+    sb.from('opportunities').select('id', {count:'exact'}).eq('priority','High').is('reviewer_decision', null),
+    sb.from('signals').select('id', {count:'exact'}).eq('status','New'),
+    sb.from('briefs').select('id', {count:'exact'}).eq('status','Approved'),
+    sb.from('published_videos').select('id', {count:'exact'}).or('snapshot_24h_status.eq.Pending,snapshot_72h_status.eq.Pending,snapshot_7d_status.eq.Pending'),
+  ]);
+  document.getElementById('stat-high').textContent      = high.count ?? 0;
+  document.getElementById('stat-inbox').textContent     = inbox.count ?? 0;
+  document.getElementById('stat-briefs').textContent    = briefs.count ?? 0;
+  document.getElementById('stat-snapshots').textContent = snapshots.count ?? 0;
+  document.getElementById('badge-inbox').textContent    = inbox.count ?? 0;
+  document.getElementById('badge-snapshots').textContent = snapshots.count ?? 0;
+
+  // Top opportunities
+  const { data: opps } = await sb.from('opportunities').select('*')
+    .is('reviewer_decision', null).order('total_ai_score', {ascending:false}).limit(5);
+  const oppTbody = document.getElementById('cmd-opportunities');
+  if (!opps?.length) { oppTbody.innerHTML = '<tr><td colspan="6"><div class="empty"><div class="icon">🌱</div><p>No pending opportunities</p></div></td></tr>'; }
+  else oppTbody.innerHTML = opps.map(o => `
+    <tr>
+      <td class="truncate">${esc(o.topic)}</td>
+      <td>${esc(o.plant_or_product || '—')}</td>
+      <td><span class="score-pill ${o.total_ai_score>=65?'score-high':o.total_ai_score>=40?'score-medium':'score-low'}">${o.total_ai_score||0}</span></td>
+      <td><span class="badge badge-${(o.priority||'').toLowerCase()}">${o.priority||'—'}</span></td>
+      <td>${o.shelf_life||'—'}</td>
+      <td><button class="btn btn-primary btn-sm" onclick="decideOpportunity('${o.id}','Approve brief')">Approve</button></td>
+    </tr>`).join('');
+
+  // Briefs needing approval
+  const { data: bfs } = await sb.from('briefs').select('*').in('status',['Needs review','Draft']).order('deadline').limit(5);
+  const bTbody = document.getElementById('cmd-briefs');
+  if (!bfs?.length) { bTbody.innerHTML = '<tr><td colspan="5"><div class="empty"><p>No briefs needing approval</p></div></td></tr>'; }
+  else bTbody.innerHTML = bfs.map(b => `
+    <tr>
+      <td class="truncate">${esc(b.title)}</td>
+      <td>${esc(b.featured_product||'—')}</td>
+      <td>${b.deadline||'—'}</td>
+      <td><span class="badge badge-${b.status?.toLowerCase().replace(' ','-')}">${b.status}</span></td>
+      <td><button class="btn btn-primary btn-sm" onclick="updateBriefStatus('${b.id}','Approved')">Approve</button></td>
+    </tr>`).join('');
+
+  // Checkpoints due
+  const { data: vids } = await sb.from('published_videos').select('*')
+    .or('snapshot_24h_status.eq.Pending,snapshot_72h_status.eq.Pending,snapshot_7d_status.eq.Pending').limit(10);
+  const cTbody = document.getElementById('cmd-checkpoints');
+  if (!vids?.length) { cTbody.innerHTML = '<tr><td colspan="5"><div class="empty"><p>No checkpoints due</p></div></td></tr>'; }
+  else cTbody.innerHTML = vids.map(v => `
+    <tr>
+      <td class="truncate"><a href="${esc(v.video_url)}" target="_blank">${esc(v.video_title||v.video_url)}</a></td>
+      <td>${esc(v.platform||'—')}</td>
+      <td>${snapshotBadge(v.snapshot_24h_status)}</td>
+      <td>${snapshotBadge(v.snapshot_72h_status)}</td>
+      <td>${snapshotBadge(v.snapshot_7d_status)}</td>
+    </tr>`).join('');
+
+  // Update board badge
+  const { count: boardCount } = await sb.from('opportunities').select('id',{count:'exact'}).is('reviewer_decision',null);
+  document.getElementById('badge-board').textContent = boardCount ?? 0;
+}
+
+// ── INBOX ─────────────────────────────────────────────────────────────
+async function loadInbox() {
+  let q = sb.from('signals').select('*').order('created_at', {ascending:false}).limit(100);
+  const platform = document.getElementById('inbox-platform-filter')?.value;
+  const priority = document.getElementById('inbox-priority-filter')?.value;
+  const status   = document.getElementById('inbox-status-filter')?.value;
+  if (platform) q = q.eq('platform', platform);
+  if (priority) q = q.eq('priority', priority);
+  if (status)   q = q.eq('status', status);
+  const { data } = await q;
+  const tbody = document.getElementById('inbox-table');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📥</div><p>No signals found</p></div></td></tr>'; return; }
+  tbody.innerHTML = data.map(s => `
+    <tr>
+      <td>${s.date_found||'—'}</td>
+      <td>${esc(s.platform||'—')}</td>
+      <td class="truncate">${esc(s.creator_name||'—')}</td>
+      <td class="truncate">${esc(s.topic||'—')}</td>
+      <td>${s.score != null ? `<span class="score-pill ${s.score>=65?'score-high':s.score>=40?'score-medium':'score-low'}">${s.score}</span>` : '—'}</td>
+      <td>${s.priority ? `<span class="badge badge-${s.priority.toLowerCase()}">${s.priority}</span>` : '—'}</td>
+      <td>
+        <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateSignalStatus('${s.id}',this.value)">
+          ${['New','Needs cleanup','Needs scoring','Duplicate','Watch','Reject','Promote to Daily Board'].map(opt=>`<option${s.status===opt?' selected':''}>${opt}</option>`).join('')}
+        </select>
+      </td>
+      <td>${s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="font-size:12px;color:#4CAF50">View ↗</a>` : '—'}</td>
+    </tr>`).join('');
+}
+
+// ── DAILY BOARD ───────────────────────────────────────────────────────
+async function loadDailyBoard() {
+  const { data } = await sb.from('opportunities').select('*')
+    .is('reviewer_decision', null).order('total_ai_score', {ascending:false}).limit(10);
+  const container = document.getElementById('board-cards');
+  if (!data?.length) {
+    container.innerHTML = '<div class="empty"><div class="icon">⭐</div><p>No opportunities pending review. Add signals to the Inbox and promote them.</p></div>';
+    return;
+  }
+  container.innerHTML = data.map((o, i) => `
+    <div class="board-card priority-${(o.priority||'low').toLowerCase()}">
+      <div class="board-card-header">
+        <div class="board-rank">${i+1}</div>
+        <div class="board-card-title">
+          <h3>${esc(o.topic)}</h3>
+          <div class="meta">${esc(o.plant_or_product||'')} · Score: ${o.total_ai_score||0} · ${o.shelf_life||'—'}</div>
+        </div>
+        <span class="score-pill ${o.total_ai_score>=65?'score-high':o.total_ai_score>=40?'score-medium':'score-low'}" style="flex-shrink:0">${o.total_ai_score||0}</span>
+      </div>
+      <div class="board-card-body">
+        ${o.why_now ? `<div class="board-field"><label>Why Now</label><p>${esc(o.why_now)}</p></div>` : ''}
+        ${o.evidence_summary ? `<div class="board-field"><label>Evidence</label><p>${esc(o.evidence_summary)}</p></div>` : ''}
+        ${o.suggested_hook ? `<div class="board-field"><label>Hook</label><p>${esc(o.suggested_hook)}</p></div>` : ''}
+        ${o.suggested_format ? `<div class="board-field"><label>Format</label><p>${esc(o.suggested_format)}</p></div>` : ''}
+        ${o.historical_memory_note ? `<div class="board-field" style="grid-column:1/-1"><label>🧠 Memory</label><p style="color:#666;font-style:italic">${esc(o.historical_memory_note)}</p></div>` : ''}
+        ${o.recommended_deadline ? `<div class="board-field"><label>Deadline</label><p>${o.recommended_deadline}</p></div>` : ''}
+      </div>
+      <div class="board-card-actions">
+        <button class="btn btn-primary btn-sm" onclick="decideOpportunity('${o.id}','Approve brief')">✅ Approve Brief</button>
+        <button class="btn btn-warning btn-sm" onclick="decideOpportunity('${o.id}','Watch')">👀 Watch</button>
+        <button class="btn btn-secondary btn-sm" onclick="decideOpportunity('${o.id}','Needs more evidence')">🔍 Need More</button>
+        <button class="btn btn-secondary btn-sm" onclick="decideOpportunity('${o.id}','Move to evergreen')">🌿 Evergreen</button>
+        <button class="btn btn-danger btn-sm" onclick="decideOpportunity('${o.id}','Reject')">✕ Reject</button>
+      </div>
+    </div>`).join('');
+}
+
+// ── BRIEFS ────────────────────────────────────────────────────────────
+async function loadBriefs() {
+  let q = sb.from('briefs').select('*').order('created_at',{ascending:false}).limit(50);
+  const status = document.getElementById('briefs-status-filter')?.value;
+  if (status) q = q.eq('status', status);
+  const { data } = await q;
+  const tbody = document.getElementById('briefs-table');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">📋</div><p>No briefs yet</p></div></td></tr>'; return; }
+  tbody.innerHTML = data.map(b => `
+    <tr>
+      <td class="truncate">${esc(b.title)}</td>
+      <td>${esc(b.featured_product||'—')}</td>
+      <td>${esc(b.video_format||'—')}</td>
+      <td>—</td>
+      <td>${b.deadline||'—'}</td>
+      <td>
+        <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateBriefStatus('${b.id}',this.value)">
+          ${['Draft','Needs review','Approved','Filming','Editing','Scheduled','Published','Measured'].map(opt=>`<option${b.status===opt?' selected':''}>${opt}</option>`).join('')}
+        </select>
+      </td>
+      <td><button class="btn btn-secondary btn-sm" onclick="viewBrief('${b.id}')">View</button></td>
+    </tr>`).join('');
+}
+
+// ── PUBLISHED ─────────────────────────────────────────────────────────
+async function loadPublished() {
+  let q = sb.from('published_videos').select('*').order('publish_datetime',{ascending:false}).limit(50);
+  const platform = document.getElementById('published-platform-filter')?.value;
+  if (platform) q = q.eq('platform', platform);
+  const { data } = await q;
+  const tbody = document.getElementById('published-table');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📊</div><p>No published videos yet</p></div></td></tr>'; return; }
+  tbody.innerHTML = data.map(v => `
+    <tr>
+      <td class="truncate"><a href="${esc(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.video_url||'—')}</a></td>
+      <td>${esc(v.platform||'—')}</td>
+      <td>${v.publish_datetime ? new Date(v.publish_datetime).toLocaleDateString() : '—'}</td>
+      <td>${v.original_opportunity_score != null ? `<span class="score-pill ${v.original_opportunity_score>=65?'score-high':v.original_opportunity_score>=40?'score-medium':'score-low'}">${v.original_opportunity_score}</span>` : '—'}</td>
+      <td>${snapshotBadge(v.snapshot_24h_status)}</td>
+      <td>${snapshotBadge(v.snapshot_72h_status)}</td>
+      <td>${snapshotBadge(v.snapshot_7d_status)}</td>
+      <td><span class="badge badge-${(v.learning_status||'pending').toLowerCase().replace(' ','-')}">${v.learning_status||'Pending'}</span></td>
+    </tr>`).join('');
+}
+
+// ── LEARNING ──────────────────────────────────────────────────────────
+async function loadLearning() {
+  let q = sb.from('learning_memory').select('*').order('date_added',{ascending:false}).limit(50);
+  const status = document.getElementById('learning-status-filter')?.value;
+  if (status) q = q.eq('status', status);
+  const { data } = await q;
+  const tbody = document.getElementById('learning-table');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">🧠</div><p>No learning memories yet</p></div></td></tr>'; return; }
+  tbody.innerHTML = data.map(m => `
+    <tr>
+      <td><span class="badge badge-new">${esc(m.applies_to||'—')}</span></td>
+      <td class="truncate">${esc(m.topic||'—')}</td>
+      <td class="truncate">${esc(m.what_happened||'—')}</td>
+      <td class="truncate">${esc(m.recommendation_next_time||'—')}</td>
+      <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
+      <td>
+        <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)">
+          ${['Active','Needs review next time','Approved rule','Archived'].map(opt=>`<option${m.status===opt?' selected':''}>${opt}</option>`).join('')}
+        </select>
+      </td>
+      <td><button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button></td>
+    </tr>`).join('');
+}
+
+// ── SOURCES ───────────────────────────────────────────────────────────
+async function loadSources() {
+  const { data } = await sb.from('sources').select('*').order('created_at',{ascending:false});
+  const tbody = document.getElementById('sources-table');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">🔗</div><p>No sources added yet</p></div></td></tr>'; return; }
+  tbody.innerHTML = data.map(s => `
+    <tr>
+      <td>${esc(s.source_name||'—')}</td>
+      <td>${esc(s.platform||'—')}</td>
+      <td>${esc(s.source_type||'—')}</td>
+      <td>${esc(s.collection_frequency||'—')}</td>
+      <td><span class="badge badge-${(s.signal_quality||'unknown').toLowerCase()}">${s.signal_quality||'Unknown'}</span></td>
+      <td>${s.ideas_generated||0}</td>
+      <td>${s.approved_ideas||0}</td>
+      <td>${s.published_videos||0}</td>
+    </tr>`).join('');
+}
+
+// ── MUTATIONS ─────────────────────────────────────────────────────────
+async function decideOpportunity(id, decision) {
+  const { error } = await sb.from('opportunities').update({
+    reviewer_decision: decision,
+    reviewer_id: currentUser?.id,
+    reviewed_at: new Date().toISOString()
+  }).eq('id', id);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Decision saved: ' + decision);
+  loadDailyBoard();
+  loadCommandCenter();
+}
+
+async function updateSignalStatus(id, status) {
+  await sb.from('signals').update({ status }).eq('id', id);
+  toast('Status updated');
+}
+
+async function updateBriefStatus(id, status) {
+  await sb.from('briefs').update({ status }).eq('id', id);
+  toast('Brief status updated');
+  loadCommandCenter();
+}
+
+async function updateLearningStatus(id, status) {
+  await sb.from('learning_memory').update({ status }).eq('id', id);
+  toast('Memory updated');
+}
+
+async function deleteLearning(id) {
+  await sb.from('learning_memory').update({ status: 'Archived' }).eq('id', id);
+  toast('Memory archived');
+  loadLearning();
+}
+
+// ── SAVE MODALS ───────────────────────────────────────────────────────
+async function saveSignal() {
+  const row = {
+    platform:        document.getElementById('sig-platform').value,
+    source_url:      document.getElementById('sig-url').value || null,
+    creator_name:    document.getElementById('sig-creator').value || null,
+    topic:           document.getElementById('sig-topic').value || null,
+    caption_summary: document.getElementById('sig-caption').value || null,
+    audience_problem:document.getElementById('sig-problem').value || null,
+    priority:        document.getElementById('sig-priority').value,
+    likes:           Number(document.getElementById('sig-likes').value) || null,
+    comments_count:  Number(document.getElementById('sig-comments').value) || null,
+    status:          'New',
+    created_by:      currentUser?.id,
+  };
+  const { error } = await sb.from('signals').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Signal added');
+  closeModal('modal-signal');
+  loadInbox();
+}
+
+async function saveOpportunity() {
+  const row = {
+    topic:                 document.getElementById('opp-topic').value,
+    plant_or_product:      document.getElementById('opp-plant').value || null,
+    why_now:               document.getElementById('opp-why').value || null,
+    evidence_summary:      document.getElementById('opp-evidence').value || null,
+    suggested_hook:        document.getElementById('opp-hook').value || null,
+    suggested_format:      document.getElementById('opp-format').value,
+    external_demand_score: Number(document.getElementById('opp-external').value) || 0,
+    comment_demand_score:  Number(document.getElementById('opp-comment').value) || 0,
+    cross_platform_score:  Number(document.getElementById('opp-cross').value) || 0,
+    production_ease_score: Number(document.getElementById('opp-ease').value) || 0,
+    catalog_fit_score:     Number(document.getElementById('opp-catalog').value) || 0,
+    shelf_life:            document.getElementById('opp-shelf').value,
+    recommended_deadline:  document.getElementById('opp-deadline').value || null,
+  };
+  const { error } = await sb.from('opportunities').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Opportunity added to Daily Board');
+  closeModal('modal-opportunity');
+  loadDailyBoard();
+}
+
+async function saveBrief() {
+  const row = {
+    title:            document.getElementById('brief-title').value,
+    featured_product: document.getElementById('brief-product').value || null,
+    product_url:      document.getElementById('brief-url').value || null,
+    audience_problem: document.getElementById('brief-problem').value || null,
+    opening_hook:     document.getElementById('brief-hook').value || null,
+    visual_hook:      document.getElementById('brief-visual').value || null,
+    video_format:     document.getElementById('brief-format').value,
+    video_flow:       document.getElementById('brief-flow').value || null,
+    caption:          document.getElementById('brief-caption').value || null,
+    cta:              document.getElementById('brief-cta').value || null,
+    deadline:         document.getElementById('brief-deadline').value || null,
+    status:           document.getElementById('brief-status').value,
+    owner_id:         currentUser?.id,
+  };
+  const { error } = await sb.from('briefs').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Brief saved');
+  closeModal('modal-brief');
+  loadBriefs();
+}
+
+async function savePublished() {
+  const row = {
+    video_title:               document.getElementById('pub-title').value,
+    video_url:                 document.getElementById('pub-url').value,
+    platform:                  document.getElementById('pub-platform').value,
+    publish_datetime:          document.getElementById('pub-date').value || null,
+    topic:                     document.getElementById('pub-topic').value || null,
+    hypothesis:                document.getElementById('pub-hypothesis').value || null,
+    original_opportunity_score:Number(document.getElementById('pub-score').value) || null,
+  };
+  const { error } = await sb.from('published_videos').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Video added');
+  closeModal('modal-published');
+  loadPublished();
+}
+
+async function saveLearning() {
+  const row = {
+    applies_to:              document.getElementById('learn-applies').value,
+    topic:                   document.getElementById('learn-topic').value || null,
+    what_happened:           document.getElementById('learn-happened').value || null,
+    evidence_summary:        document.getElementById('learn-evidence').value || null,
+    recommendation_next_time:document.getElementById('learn-rec').value || null,
+    confidence:              document.getElementById('learn-confidence').value,
+    status:                  'Needs review next time',
+    reviewed_by:             currentUser?.id,
+  };
+  const { error } = await sb.from('learning_memory').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Memory saved');
+  closeModal('modal-learning');
+  loadLearning();
+}
+
+async function saveSource() {
+  const row = {
+    source_name:          document.getElementById('src-name').value,
+    platform:             document.getElementById('src-platform').value,
+    source_type:          document.getElementById('src-type').value,
+    source_url:           document.getElementById('src-url').value || null,
+    collection_frequency: document.getElementById('src-freq').value,
+    signal_quality:       document.getElementById('src-quality').value,
+    notes:                document.getElementById('src-notes').value || null,
+  };
+  const { error } = await sb.from('sources').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Source added');
+  closeModal('modal-source');
+  loadSources();
+}
+
+// ── SCRIPTS ───────────────────────────────────────────────────────────
+async function loadScripts() {
+  let q = sb.from('script_outputs').select('*').order('created_at', {ascending:false}).limit(50);
+  const status   = document.getElementById('scripts-status-filter')?.value;
+  const platform = document.getElementById('scripts-platform-filter')?.value;
+  if (status)   q = q.eq('review_status', status);
+  if (platform) q = q.eq('platform', platform);
+  const { data } = await q;
+  const tbody = document.getElementById('scripts-table');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📝</div><p>No scripts yet. Approve a brief and generate a script.</p></div></td></tr>'; return; }
+  tbody.innerHTML = data.map(s => `
+    <tr>
+      <td class="truncate">${esc(s.script_title)}</td>
+      <td>${esc(s.platform||'—')}</td>
+      <td style="font-size:12px">${esc(s.script_type||'—')}</td>
+      <td><span class="badge badge-new">${esc(s.script_version||'v1')}</span></td>
+      <td class="truncate" style="font-style:italic;color:#555">${esc(s.opening_hook||'—')}</td>
+      <td>${s.estimated_duration_seconds ? s.estimated_duration_seconds + 's' : '—'}</td>
+      <td>
+        <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateScriptStatus('${s.id}',this.value)">
+          ${['Draft','Needs review','Needs revision','Approved','Used in production','Archived'].map(opt=>`<option${s.review_status===opt?' selected':''}>${opt}</option>`).join('')}
+        </select>
+      </td>
+      <td><button class="btn btn-secondary btn-sm" onclick="viewScript('${s.id}')">View</button></td>
+    </tr>`).join('');
+}
+
+async function updateScriptStatus(id, status) {
+  const update = { review_status: status };
+  if (status === 'Approved') { update.approved_by = currentUser?.id; update.approved_at = new Date().toISOString(); }
+  await sb.from('script_outputs').update(update).eq('id', id);
+  toast('Script status updated');
+}
+
+function viewScript(id) { toast('Script detail view — coming soon'); }
+
+async function saveScript() {
+  const row = {
+    script_title:              document.getElementById('scr-title').value,
+    platform:                  document.getElementById('scr-platform').value,
+    script_type:               document.getElementById('scr-type').value,
+    script_version:            document.getElementById('scr-version').value,
+    estimated_duration_seconds:Number(document.getElementById('scr-duration').value) || null,
+    opening_hook:              document.getElementById('scr-hook').value || null,
+    full_voiceover_script:     document.getElementById('scr-voiceover').value || null,
+    on_screen_text:            document.getElementById('scr-onscreen').value || null,
+    shot_list:                 document.getElementById('scr-shots').value || null,
+    broll_notes:               document.getElementById('scr-broll').value || null,
+    product_mention:           document.getElementById('scr-product').value || null,
+    cta:                       document.getElementById('scr-cta').value || null,
+    caption:                   document.getElementById('scr-caption').value || null,
+    review_status:             document.getElementById('scr-status').value,
+    reviewer_notes:            document.getElementById('scr-notes').value || null,
+  };
+  if (!row.script_title) { toast('Script title is required', true); return; }
+  const { error } = await sb.from('script_outputs').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Script saved');
+  closeModal('modal-script');
+  loadScripts();
+}
+
+// ── BRAND RULES ───────────────────────────────────────────────────────
+async function loadBrandRules() {
+  let q = sb.from('brand_content_rules').select('*').order('category').order('severity').limit(100);
+  const category = document.getElementById('rules-category-filter')?.value;
+  const severity = document.getElementById('rules-severity-filter')?.value;
+  if (category) q = q.eq('category', category);
+  if (severity) q = q.eq('severity', severity);
+  const { data } = await q;
+  const tbody = document.getElementById('brand-rules-table');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">🎯</div><p>No brand rules yet</p></div></td></tr>'; return; }
+  const sevClass = { Required:'badge-high', Recommended:'badge-low', Avoid:'badge-medium', Forbidden:'badge-reject' };
+  tbody.innerHTML = data.map(r => `
+    <tr>
+      <td><span class="badge badge-new">${esc(r.category)}</span></td>
+      <td style="font-weight:500">${esc(r.rule_name)}</td>
+      <td style="font-size:12.5px;color:#444">${esc(r.rule_text)}</td>
+      <td><span class="badge ${sevClass[r.severity]||'badge-pending'}">${esc(r.severity)}</span></td>
+      <td style="font-size:12px">${esc(r.applies_to_platform||'All')}</td>
+      <td>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" ${r.active?'checked':''} onchange="toggleBrandRule('${r.id}',this.checked)" style="cursor:pointer">
+          <span style="font-size:12px">${r.active?'Yes':'No'}</span>
+        </label>
+      </td>
+      <td><button class="btn btn-danger btn-sm" onclick="deleteBrandRule('${r.id}')">Remove</button></td>
+    </tr>`).join('');
+}
+
+async function toggleBrandRule(id, active) {
+  await sb.from('brand_content_rules').update({ active }).eq('id', id);
+  toast(active ? 'Rule activated' : 'Rule deactivated');
+}
+
+async function deleteBrandRule(id) {
+  if (!confirm('Remove this rule?')) return;
+  await sb.from('brand_content_rules').delete().eq('id', id);
+  toast('Rule removed');
+  loadBrandRules();
+}
+
+async function saveBrandRule() {
+  const row = {
+    category:                  document.getElementById('rule-category').value,
+    severity:                  document.getElementById('rule-severity').value,
+    rule_name:                 document.getElementById('rule-name').value,
+    rule_text:                 document.getElementById('rule-text').value,
+    applies_to_platform:       document.getElementById('rule-platform').value || null,
+    applies_to_content_pillar: document.getElementById('rule-pillar').value || null,
+    created_by:                currentUser?.id,
+  };
+  if (!row.rule_name || !row.rule_text) { toast('Rule name and text are required', true); return; }
+  const { error } = await sb.from('brand_content_rules').insert(row);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Rule added');
+  closeModal('modal-brand-rule');
+  loadBrandRules();
+}
+
+// ── MODAL HELPERS ─────────────────────────────────────────────────────
+function openSignalModal()    { document.getElementById('modal-signal').classList.add('open'); }
+function openBriefModal()     { document.getElementById('modal-brief').classList.add('open'); }
+function openPublishedModal() { document.getElementById('modal-published').classList.add('open'); }
+function openLearningModal()  { document.getElementById('modal-learning').classList.add('open'); }
+function openSourceModal()    { document.getElementById('modal-source').classList.add('open'); }
+function openScriptModal()    { document.getElementById('modal-script').classList.add('open'); }
+function openBrandRuleModal() { document.getElementById('modal-brand-rule').classList.add('open'); }
+function closeModal(id)       { document.getElementById(id).classList.remove('open'); }
+
+// Close modal on overlay click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('open'); });
+});
+
+// ── UTILITIES ─────────────────────────────────────────────────────────
+function esc(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function snapshotBadge(status) {
+  const cls = { Pending:'badge-pending', Submitted:'badge-submitted', Overdue:'badge-overdue' }[status] || 'badge-pending';
+  return `<span class="badge ${cls}">${status||'Pending'}</span>`;
+}
+
+function toast(msg, isError = false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast' + (isError ? ' error' : '');
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+function showError(msg) {
+  document.getElementById('auth-error').textContent = msg;
+}
+
+function viewBrief(id) {
+  // Could expand into a detail modal — placeholder for now
+  toast('Brief detail view coming soon');
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────
+initAuth();
+</script>
+</body>
+</html>
