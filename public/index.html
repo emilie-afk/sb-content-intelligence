@@ -390,7 +390,10 @@ tbody tr:hover { background: #fafffe; }
             <option>Needs cleanup</option><option>Needs scoring</option><option>Watch</option>
           </select>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="openSignalModal()">+ Add Signal</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-secondary btn-sm" id="cluster-all-btn" onclick="clusterAllSignals()" title="Auto-cluster all unclustered signals using AI">🔍 Cluster all</button>
+          <button class="btn btn-primary btn-sm" onclick="openSignalModal()">+ Add Signal</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
@@ -2469,6 +2472,65 @@ async function crDecision(id, status, direction) {
   loadContentReview();
 }
 
+
+// ── BULK CLUSTER ──────────────────────────────────────────────────────
+async function clusterAllSignals() {
+  const btn = document.getElementById('cluster-all-btn');
+  btn.disabled = true;
+  btn.textContent = '🔍 Loading signals…';
+
+  // Fetch all unclustered signals (not yet linked to any cluster)
+  const { data: linked } = await sb.from('signal_cluster_links').select('signal_id');
+  const linkedIds = new Set((linked || []).map(l => l.signal_id));
+
+  const { data: allSignals } = await sb
+    .from('signals')
+    .select('id, topic, platform, source_url, caption_summary, plant_or_product')
+    .not('status', 'eq', 'Reject')
+    .order('created_at', { ascending: true })
+    .limit(200);
+
+  const unclustered = (allSignals || []).filter(s => !linkedIds.has(s.id));
+
+  if (!unclustered.length) {
+    toast('All signals already clustered ✓');
+    btn.disabled = false;
+    btn.textContent = '🔍 Cluster all';
+    return;
+  }
+
+  toast(`🔍 Clustering ${unclustered.length} signals — this takes a minute…`);
+  btn.textContent = `🔍 0 / ${unclustered.length}`;
+
+  let done = 0;
+  let errors = 0;
+
+  // Process in batches of 5 to avoid overwhelming the function
+  const BATCH = 5;
+  for (let i = 0; i < unclustered.length; i += BATCH) {
+    const batch = unclustered.slice(i, i + BATCH);
+    await Promise.allSettled(
+      batch.map(sig =>
+        fetch('/.netlify/functions/ai-analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'cluster', data: sig }),
+        })
+        .then(r => r.json())
+        .then(r => { if (r.success) done++; else errors++; })
+        .catch(() => errors++)
+      )
+    );
+    btn.textContent = `🔍 ${Math.min(i + BATCH, unclustered.length)} / ${unclustered.length}`;
+    // Small pause between batches
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  btn.disabled = false;
+  btn.textContent = '🔍 Cluster all';
+  toast(`✅ Clustered ${done} signals${errors ? ` (${errors} errors)` : ''} — check Discovery Board`);
+  loadDiscovery();
+}
 
 // ── INIT ──────────────────────────────────────────────────────────────
 initAuth();
