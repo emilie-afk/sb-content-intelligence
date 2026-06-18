@@ -696,9 +696,10 @@ tbody tr:hover { background: #fafffe; }
         <div style="color:var(--text-muted);padding:40px;text-align:center;grid-column:1/-1">Loading clusters…</div>
       </div>
 
-      <!-- Cluster detail panel (slides in) -->
-      <div id="discovery-detail-panel" style="display:none;position:fixed;top:0;right:0;width:520px;max-width:100vw;height:100vh;background:var(--bg-card);border-left:1px solid var(--border);overflow-y:auto;z-index:200;padding:24px;box-shadow:-4px 0 20px rgba(0,0,0,.3)">
-        <button onclick="closeDiscoveryPanel()" style="float:right;background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer">✕</button>
+      <!-- Cluster detail backdrop + panel -->
+      <div id="discovery-panel-backdrop" onclick="closeDiscoveryPanel()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:199"></div>
+      <div id="discovery-detail-panel" style="display:none;position:fixed;top:0;right:0;width:540px;max-width:100vw;height:100vh;background:var(--bg-card);border-left:1px solid var(--border);overflow-y:auto;z-index:200;padding:28px 24px;box-shadow:-6px 0 32px rgba(0,0,0,.5)">
+        <button onclick="closeDiscoveryPanel()" style="float:right;background:none;border:none;color:var(--text-muted);font-size:22px;cursor:pointer;line-height:1">✕</button>
         <div id="discovery-detail-content"></div>
       </div>
     </div>
@@ -2229,9 +2230,11 @@ function renderDiscoveryClusters(all) {
 }
 
 async function openDiscoveryPanel(clusterId) {
-  const panel   = document.getElementById('discovery-detail-panel');
-  const content = document.getElementById('discovery-detail-content');
-  panel.style.display = 'block';
+  const panel    = document.getElementById('discovery-detail-panel');
+  const backdrop = document.getElementById('discovery-panel-backdrop');
+  const content  = document.getElementById('discovery-detail-content');
+  panel.style.display    = 'block';
+  backdrop.style.display = 'block';
   content.innerHTML   = '<div style="color:var(--text-muted);padding:40px;text-align:center">Loading…</div>';
 
   const [{ data: cluster }, { data: signals }] = await Promise.all([
@@ -2289,6 +2292,7 @@ async function openDiscoveryPanel(clusterId) {
         <button class="btn btn-secondary" onclick="updateClusterStatus('${cluster.id}','Content review ready')">→ Content Review</button>
         <button class="btn btn-secondary" onclick="pinCluster('${cluster.id}')">📌 Pin</button>
         <button class="btn btn-secondary" onclick="dismissCluster('${cluster.id}')">✕ Dismiss</button>
+        <button class="btn btn-secondary" style="color:#e74c3c;border-color:#e74c3c" onclick="deleteCluster('${cluster.id}','${cluster.title.replace(/'/g,"\\'")}')">🗑 Delete + block</button>
       </div>
       <div style="margin-top:10px">
         <input id="disc-reviewer-note-${cluster.id}" type="text" placeholder="Add reviewer note…" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
@@ -2300,7 +2304,8 @@ async function openDiscoveryPanel(clusterId) {
 }
 
 function closeDiscoveryPanel() {
-  document.getElementById('discovery-detail-panel').style.display = 'none';
+  document.getElementById('discovery-detail-panel').style.display  = 'none';
+  document.getElementById('discovery-panel-backdrop').style.display = 'none';
 }
 
 async function updateClusterStatus(id, status) {
@@ -2324,6 +2329,35 @@ async function pinCluster(id) {
 async function dismissCluster(id) {
   await sb.from('discovery_clusters').update({ status: 'Closed', reviewer_status: 'Dismissed' }).eq('id', id);
   toast('Cluster dismissed');
+  closeDiscoveryPanel();
+  loadDiscovery();
+}
+
+async function deleteCluster(id, title) {
+  if (!confirm(`Delete "${title}"?\n\nThis will:\n• Delete the cluster\n• Mark all linked signals as Noise (won't be re-clustered)\n• Remove all cluster links\n\nCannot be undone.`)) return;
+
+  // 1. Find all signals linked to this cluster
+  const { data: links } = await sb.from('signal_cluster_links')
+    .select('signal_id').eq('cluster_id', id);
+  const signalIds = (links || []).map(l => l.signal_id);
+
+  // 2. Mark signals as Noise so they're skipped in future clustering
+  if (signalIds.length) {
+    await sb.from('signals')
+      .update({ status: 'Noise' })
+      .in('id', signalIds);
+  }
+
+  // 3. Delete cluster links (also cascades via FK, but explicit is safer)
+  await sb.from('signal_cluster_links').delete().eq('cluster_id', id);
+
+  // 4. Delete any content review candidates for this cluster
+  await sb.from('content_review_candidates').delete().eq('cluster_id', id);
+
+  // 5. Delete the cluster itself
+  await sb.from('discovery_clusters').delete().eq('id', id);
+
+  toast(`🗑 Deleted — ${signalIds.length} signal(s) marked as Noise`);
   closeDiscoveryPanel();
   loadDiscovery();
 }
@@ -2486,7 +2520,7 @@ async function clusterAllSignals() {
   const { data: allSignals } = await sb
     .from('signals')
     .select('id, topic, platform, source_url, caption_summary, plant_or_product')
-    .not('status', 'eq', 'Reject')
+    .not('status', 'in', '("Reject","Noise")')
     .order('created_at', { ascending: true })
     .limit(200);
 
