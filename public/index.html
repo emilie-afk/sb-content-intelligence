@@ -269,6 +269,14 @@ tbody tr:hover { background: #fafffe; }
         <span class="icon">⭐</span> Daily Board
         <span class="nav-badge" id="badge-board">0</span>
       </div>
+      <div class="nav-item" data-view="discovery" onclick="showView('discovery',this)">
+        <span class="icon">🔍</span> Discovery
+        <span class="nav-badge" id="badge-discovery" style="background:#8b5cf6">0</span>
+      </div>
+      <div class="nav-item" data-view="content-review" onclick="showView('content-review',this)">
+        <span class="icon">🗂️</span> Content Review
+        <span class="nav-badge" id="badge-review" style="background:#059669">0</span>
+      </div>
       <div class="nav-item" data-view="briefs" onclick="showView('briefs',this)">
         <span class="icon">📋</span> Briefs
       </div>
@@ -642,6 +650,97 @@ tbody tr:hover { background: #fafffe; }
       </div>
     </div>
 
+    <!-- ── DISCOVERY BOARD ── -->
+    <div id="view-discovery" class="view">
+      <div class="view-header">
+        <h1>Discovery Board</h1>
+        <p>Audience patterns grouped across signals — what people are asking, repeating, and teaching</p>
+      </div>
+
+      <!-- Summary row -->
+      <div class="stats-grid" style="margin-bottom:24px">
+        <div class="stat-card"><div class="stat-number" id="disc-total">—</div><div class="stat-label">Total clusters</div></div>
+        <div class="stat-card"><div class="stat-number" id="disc-pattern">—</div><div class="stat-label">Pattern detected</div></div>
+        <div class="stat-card"><div class="stat-number" id="disc-ready">—</div><div class="stat-label">Review ready</div></div>
+        <div class="stat-card"><div class="stat-number" id="disc-new">—</div><div class="stat-label">New claims</div></div>
+      </div>
+
+      <!-- Section tabs -->
+      <div class="filters" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm disc-section-btn active" data-section="all" onclick="setDiscSection('all',this)">All</button>
+        <button class="btn btn-sm disc-section-btn" data-section="most-mentioned" onclick="setDiscSection('most-mentioned',this)">Most Mentioned</button>
+        <button class="btn btn-sm disc-section-btn" data-section="most-asked" onclick="setDiscSection('most-asked',this)">Most Asked</button>
+        <button class="btn btn-sm disc-section-btn" data-section="emerging" onclick="setDiscSection('emerging',this)">Emerging</button>
+        <button class="btn btn-sm disc-section-btn" data-section="new-claims" onclick="setDiscSection('new-claims',this)">New &amp; Unfamiliar</button>
+        <button class="btn btn-sm disc-section-btn" data-section="contradictions" onclick="setDiscSection('contradictions',this)">Contradictions</button>
+        <div style="flex:1"></div>
+        <select class="filter-select" id="disc-plant-filter" onchange="loadDiscovery()">
+          <option value="">All plants</option>
+        </select>
+        <select class="filter-select" id="disc-platform-filter" onchange="loadDiscovery()">
+          <option value="">All platforms</option>
+          <option>TikTok</option><option>Instagram</option><option>Facebook</option><option>YouTube</option>
+        </select>
+        <select class="filter-select" id="disc-status-filter" onchange="loadDiscovery()">
+          <option value="">All statuses</option>
+          <option>Collecting</option><option>Pattern detected</option><option>Content review ready</option><option>Keep watching</option>
+        </select>
+        <button class="btn btn-secondary" onclick="loadDiscovery()">↺ Refresh</button>
+      </div>
+
+      <!-- Cluster cards -->
+      <div id="discovery-clusters-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px">
+        <div style="color:var(--text-muted);padding:40px;text-align:center;grid-column:1/-1">Loading clusters…</div>
+      </div>
+
+      <!-- Cluster detail panel (slides in) -->
+      <div id="discovery-detail-panel" style="display:none;position:fixed;top:0;right:0;width:520px;max-width:100vw;height:100vh;background:var(--bg-card);border-left:1px solid var(--border);overflow-y:auto;z-index:200;padding:24px;box-shadow:-4px 0 20px rgba(0,0,0,.3)">
+        <button onclick="closeDiscoveryPanel()" style="float:right;background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer">✕</button>
+        <div id="discovery-detail-content"></div>
+      </div>
+    </div>
+
+    <!-- ── CONTENT REVIEW ── -->
+    <div id="view-content-review" class="view">
+      <div class="view-header">
+        <h1>Content Review</h1>
+        <p>AI-prepared candidates ready for a direction decision — you decide what becomes a brief</p>
+      </div>
+
+      <!-- Stats -->
+      <div class="stats-grid" style="margin-bottom:24px">
+        <div class="stat-card"><div class="stat-number" id="cr-ready">—</div><div class="stat-label">Ready for review</div></div>
+        <div class="stat-card"><div class="stat-number" id="cr-followup">—</div><div class="stat-label">Follow-up opportunities</div></div>
+        <div class="stat-card"><div class="stat-number" id="cr-research">—</div><div class="stat-label">Needs research</div></div>
+        <div class="stat-card"><div class="stat-number" id="cr-approved">—</div><div class="stat-label">Approved for brief</div></div>
+      </div>
+
+      <!-- Filters -->
+      <div class="filters" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <select class="filter-select" id="cr-status-filter" onchange="loadContentReview()">
+          <option value="">All statuses</option>
+          <option>Ready for review</option>
+          <option>Recommended follow-up</option>
+          <option>Needs research</option>
+          <option>Needs reviewer check</option>
+          <option>Hold for repetition</option>
+          <option>Already covered</option>
+          <option>Approved for brief</option>
+          <option>Dismissed</option>
+        </select>
+        <select class="filter-select" id="cr-risk-filter" onchange="loadContentReview()">
+          <option value="">All repetition risks</option>
+          <option>Low</option><option>Medium</option><option>High</option><option>Block</option><option>Needs reviewer check</option>
+        </select>
+        <button class="btn btn-secondary" onclick="loadContentReview()">↺ Refresh</button>
+      </div>
+
+      <!-- Candidate cards -->
+      <div id="content-review-list" style="display:flex;flex-direction:column;gap:16px">
+        <div style="color:var(--text-muted);padding:40px;text-align:center">Loading candidates…</div>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -1001,6 +1100,8 @@ function showView(viewId, el) {
     'brand-rules':    loadBrandRules,
     'activity-log':   loadActivityLog,
     'watchlist':      loadWatchlist,
+    'discovery':      loadDiscovery,
+    'content-review': loadContentReview,
   };
   if (loaders[viewId]) loaders[viewId]();
 }
@@ -1727,6 +1828,25 @@ async function runAIAnalysis(type, data) {
     const a = result.analysis;
     if (type === 'signal') {
       resultEl.innerHTML = renderSignalAnalysis(a);
+      // Auto-cluster after signal analysis
+      if (data.id) {
+        const clusterBadge = document.createElement('div');
+        clusterBadge.style.cssText = 'font-size:12px;color:#9ca3af;margin-top:8px;padding:6px 10px;background:#1e293b;border-radius:6px';
+        clusterBadge.textContent = '🔍 Clustering signal…';
+        resultEl.appendChild(clusterBadge);
+        fetch('/.netlify/functions/ai-analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'cluster', data }),
+        }).then(r => r.json()).then(cr => {
+          if (cr.success && cr.analysis) {
+            const ca = cr.analysis;
+            clusterBadge.innerHTML = `🔍 Cluster: <b>${esc(ca.cluster_title)}</b> · ${ca.match_type === 'existing' ? 'Added to existing' : 'New cluster created'} · ${ca.signal_count} signal${ca.signal_count!==1?'s':''}${ca.qualifies ? ' · <span style="color:#059669">✓ Pattern qualified</span>' : ''}`;
+          } else {
+            clusterBadge.textContent = '🔍 Clustering completed';
+          }
+        }).catch(() => { clusterBadge.textContent = '🔍 Cluster: could not auto-cluster'; });
+      }
     } else if (type === 'brief') {
       resultEl.innerHTML = renderBriefAnalysis(a);
     } else if (type === 'script') {
@@ -1990,6 +2110,365 @@ function renderRepetitionAnalysis(a) {
     ${a.audience_followup_demand ? `<div style="margin-top:8px"><b>Audience follow-up demand:</b> ${esc(a.audience_followup_demand)}</div>` : ''}
   </div>`;
 }
+
+// ── DISCOVERY BOARD ───────────────────────────────────────────────────
+let _discSection = 'all';
+
+function setDiscSection(section, btn) {
+  _discSection = section;
+  document.querySelectorAll('.disc-section-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderDiscoveryClusters(window._discClusters || []);
+}
+
+async function loadDiscovery() {
+  const plant    = document.getElementById('disc-plant-filter')?.value;
+  const platform = document.getElementById('disc-platform-filter')?.value;
+  const status   = document.getElementById('disc-status-filter')?.value;
+
+  let q = sb.from('discovery_clusters')
+    .select('*')
+    .not('status', 'eq', 'Closed')
+    .order('signal_count', { ascending: false })
+    .limit(100);
+  if (plant)    q = q.ilike('plant_or_product', `%${plant}%`);
+  if (platform) q = q.contains('platforms', [platform]);
+  if (status)   q = q.eq('status', status);
+
+  const { data, error } = await q;
+  if (error) {
+    document.getElementById('discovery-clusters-grid').innerHTML =
+      `<div style="color:#e74c3c;padding:40px;text-align:center;grid-column:1/-1">Error: ${esc(error.message)}</div>`;
+    return;
+  }
+
+  window._discClusters = data || [];
+
+  // Update stats
+  document.getElementById('disc-total').textContent   = data?.length || 0;
+  document.getElementById('disc-pattern').textContent = data?.filter(c => c.status === 'Pattern detected').length || 0;
+  document.getElementById('disc-ready').textContent   = data?.filter(c => c.status === 'Content review ready').length || 0;
+  document.getElementById('disc-new').textContent     = data?.filter(c => ['New tip or claim','New contradiction'].includes(c.novelty_status)).length || 0;
+  document.getElementById('badge-discovery').textContent =
+    data?.filter(c => ['Pattern detected','Content review ready'].includes(c.status)).length || 0;
+
+  // Populate plant filter dropdown
+  const plants = [...new Set((data || []).map(c => c.plant_or_product).filter(Boolean))].sort();
+  const plantSel = document.getElementById('disc-plant-filter');
+  const currentPlant = plantSel.value;
+  plantSel.innerHTML = '<option value="">All plants</option>' +
+    plants.map(p => `<option${p === currentPlant ? ' selected' : ''}>${esc(p)}</option>`).join('');
+
+  renderDiscoveryClusters(data || []);
+}
+
+function renderDiscoveryClusters(all) {
+  const grid = document.getElementById('discovery-clusters-grid');
+
+  // Filter by section
+  let data = all;
+  if (_discSection === 'most-mentioned')  data = [...all].sort((a,b) => (b.signal_count||0) - (a.signal_count||0));
+  if (_discSection === 'most-asked')      data = all.filter(c => (c.question_count||0) >= 1).sort((a,b) => (b.question_count||0) - (a.question_count||0));
+  if (_discSection === 'emerging')        data = all.filter(c => (c.previous_mention_count||0) > 0 && (c.recent_mention_count||0) >= (c.previous_mention_count||0) * 1.5).sort((a,b) => (b.recent_mention_count||0) - (a.recent_mention_count||0));
+  if (_discSection === 'new-claims')      data = all.filter(c => ['New tip or claim','New contradiction','New audience wording','New question about a known topic','New plant connected to a known problem'].includes(c.novelty_status));
+  if (_discSection === 'contradictions')  data = all.filter(c => c.contradiction_status === 'Detected' || c.contradiction_status === 'Reviewer confirmed');
+
+  if (!data.length) {
+    grid.innerHTML = '<div style="color:var(--text-muted);padding:40px;text-align:center;grid-column:1/-1">No clusters found for this section.</div>';
+    return;
+  }
+
+  const statusColor = {
+    'Collecting':            '#6b7280',
+    'Pattern detected':      '#d97706',
+    'Content review ready':  '#059669',
+    'Under review':          '#2563eb',
+    'Keep watching':         '#7c3aed',
+  };
+  const noveltyBadge = {
+    'New tip or claim':                 { bg: '#d97706', text: '🆕 New tip' },
+    'New contradiction':                { bg: '#e74c3c', text: '⚡ Contradiction' },
+    'New audience wording':             { bg: '#7c3aed', text: '💬 New wording' },
+    'New question about a known topic': { bg: '#2563eb', text: '❓ New angle' },
+    'New plant connected to a known problem': { bg: '#059669', text: '🌱 New plant link' },
+    'Known recurring topic':            { bg: '#6b7280', text: '🔁 Recurring' },
+  };
+
+  grid.innerHTML = data.map(c => {
+    const nb = noveltyBadge[c.novelty_status] || null;
+    const wording = (c.audience_wording || []).slice(0, 3);
+    const lastSeen = c.last_seen_at ? new Date(c.last_seen_at).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—';
+    const platforms = (c.platforms || []).join(', ') || '—';
+    const reviewReadyBtn = c.status === 'Pattern detected'
+      ? `<button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="moveClusterToReview('${c.id}',event)">→ Content Review</button>`
+      : '';
+    return `
+    <div class="stat-card" style="cursor:pointer;border-left:3px solid ${statusColor[c.status]||'#444'}" onclick="openDiscoveryPanel('${c.id}')">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
+        <div style="font-weight:600;font-size:14px;line-height:1.3">${esc(c.title)}</div>
+        <span style="font-size:11px;color:${statusColor[c.status]||'#888'};white-space:nowrap;font-weight:500">${esc(c.status)}</span>
+      </div>
+      ${c.plant_or_product ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">🌱 ${esc(c.plant_or_product)}</div>` : ''}
+      <div style="display:flex;gap:12px;font-size:12px;color:var(--text-muted);margin-bottom:8px">
+        <span title="Signals">📊 ${c.signal_count||0}</span>
+        ${(c.question_count||0) > 0 ? `<span title="Questions">❓ ${c.question_count}</span>` : ''}
+        ${(c.distinct_source_count||0) > 1 ? `<span title="Sources">🔗 ${c.distinct_source_count} sources</span>` : ''}
+        <span title="Last seen">🕐 ${lastSeen}</span>
+        ${platforms !== '—' ? `<span title="Platforms">${platforms}</span>` : ''}
+      </div>
+      ${wording.length ? `<div style="font-size:12px;color:#9ca3af;font-style:italic;margin-bottom:8px">"${wording.map(esc).join('" · "')}"</div>` : ''}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+        ${nb ? `<span style="font-size:11px;font-weight:600;color:${nb.bg}">${nb.text}</span>` : '<span></span>'}
+        ${reviewReadyBtn}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function openDiscoveryPanel(clusterId) {
+  const panel   = document.getElementById('discovery-detail-panel');
+  const content = document.getElementById('discovery-detail-content');
+  panel.style.display = 'block';
+  content.innerHTML   = '<div style="color:var(--text-muted);padding:40px;text-align:center">Loading…</div>';
+
+  const [{ data: cluster }, { data: signals }] = await Promise.all([
+    sb.from('discovery_clusters').select('*').eq('id', clusterId).single(),
+    sb.from('signal_cluster_links')
+      .select('*, signal:signals(id, topic, source_url, platform, caption_summary, created_at)')
+      .eq('cluster_id', clusterId)
+      .limit(20),
+  ]);
+
+  if (!cluster) { content.innerHTML = '<div style="color:#e74c3c">Could not load cluster</div>'; return; }
+
+  const statusColor = { 'Pattern detected':'#d97706', 'Content review ready':'#059669', 'Under review':'#2563eb' };
+  const wording = (cluster.audience_wording || []);
+  const problems = (cluster.problems_mentioned || []);
+  const tips     = (cluster.tips_mentioned || []);
+
+  const signalList = (signals || []).map(l => {
+    const s = l.signal;
+    if (!s) return '';
+    const url = s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="color:#60a5fa;font-size:11px">🔗 Source</a>` : '';
+    return `<div style="background:var(--bg-hover);border-radius:6px;padding:10px;margin-bottom:8px">
+      <div style="font-size:12px;font-weight:500">${esc(s.topic || '—')}</div>
+      <div style="font-size:11px;color:#9ca3af;margin-top:2px">${esc(s.platform||'?')} · ${esc(s.caption_summary || '')} ${url}</div>
+    </div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <h2 style="margin:0 0 4px;font-size:17px">${esc(cluster.title)}</h2>
+    ${cluster.plant_or_product ? `<div style="font-size:13px;color:#9ca3af;margin-bottom:12px">🌱 ${esc(cluster.plant_or_product)}</div>` : ''}
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+      <span style="font-size:12px;font-weight:600;color:${statusColor[cluster.status]||'#888'}">${esc(cluster.status)}</span>
+      ${cluster.novelty_status && cluster.novelty_status !== 'Unclear' ? `<span style="font-size:12px;color:#d97706">${esc(cluster.novelty_status)}</span>` : ''}
+      ${cluster.contradiction_status === 'Detected' ? '<span style="font-size:12px;color:#e74c3c">⚡ Contradiction</span>' : ''}
+    </div>
+    ${cluster.summary ? `<p style="font-size:13.5px;line-height:1.6;color:#ccc;margin-bottom:16px">${esc(cluster.summary)}</p>` : ''}
+    ${cluster.primary_question ? `<div style="background:#1e293b;border-radius:6px;padding:10px 12px;margin-bottom:16px"><span style="font-size:12px;color:#94a3b8">Primary question:</span><div style="font-style:italic;margin-top:4px">"${esc(cluster.primary_question)}"</div></div>` : ''}
+    ${wording.length ? `<div style="margin-bottom:12px"><div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Audience wording</div><div style="display:flex;flex-wrap:wrap;gap:6px">${wording.map(w => `<span style="background:#1e293b;border-radius:12px;padding:3px 10px;font-size:12px;font-style:italic">"${esc(w)}"</span>`).join('')}</div></div>` : ''}
+    ${problems.length ? `<div style="margin-bottom:12px"><div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Problems mentioned</div>${problems.map(p => `<div style="font-size:13px;color:#fbbf24">• ${esc(p)}</div>`).join('')}</div>` : ''}
+    ${tips.length ? `<div style="margin-bottom:12px"><div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Tips &amp; claims</div>${tips.map(t => `<div style="font-size:13px;color:#34d399">• ${esc(t)}</div>`).join('')}</div>` : ''}
+    <div style="display:flex;gap:20px;font-size:12px;color:#9ca3af;margin-bottom:16px;flex-wrap:wrap">
+      <span>📊 ${cluster.signal_count||0} signals</span>
+      <span>❓ ${cluster.question_count||0} questions</span>
+      <span>🔗 ${cluster.distinct_source_count||0} sources</span>
+      <span>📱 ${(cluster.platforms||[]).join(', ')||'—'}</span>
+    </div>
+    <div style="font-size:12px;color:#6b7280;margin-bottom:20px">
+      First seen: ${cluster.first_seen_at ? new Date(cluster.first_seen_at).toLocaleDateString() : '—'} ·
+      Last seen:  ${cluster.last_seen_at  ? new Date(cluster.last_seen_at).toLocaleDateString()  : '—'}
+    </div>
+    <div style="margin-bottom:20px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:10px">Reviewer actions</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary" onclick="updateClusterStatus('${cluster.id}','Keep watching')">👁 Keep watching</button>
+        <button class="btn btn-secondary" onclick="updateClusterStatus('${cluster.id}','Content review ready')">→ Content Review</button>
+        <button class="btn btn-secondary" onclick="pinCluster('${cluster.id}')">📌 Pin</button>
+        <button class="btn btn-secondary" onclick="dismissCluster('${cluster.id}')">✕ Dismiss</button>
+      </div>
+      <div style="margin-top:10px">
+        <input id="disc-reviewer-note-${cluster.id}" type="text" placeholder="Add reviewer note…" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
+        <button class="btn btn-primary" style="margin-top:6px;font-size:12px" onclick="saveClusterNote('${cluster.id}')">Save note</button>
+      </div>
+    </div>
+    ${signalList ? `<div><div style="font-size:13px;font-weight:600;margin-bottom:8px">Source signals (${signals?.length||0})</div>${signalList}</div>` : ''}
+  `;
+}
+
+function closeDiscoveryPanel() {
+  document.getElementById('discovery-detail-panel').style.display = 'none';
+}
+
+async function updateClusterStatus(id, status) {
+  await sb.from('discovery_clusters').update({ status, reviewer_status: status === 'Content review ready' ? 'Moved to content review' : 'Unreviewed' }).eq('id', id);
+  toast(status === 'Content review ready' ? '✅ Moved to Content Review' : `Status: ${status}`);
+  loadDiscovery();
+  if (status === 'Content review ready') loadContentReview();
+}
+
+async function moveClusterToReview(id, evt) {
+  evt.stopPropagation();
+  await updateClusterStatus(id, 'Content review ready');
+}
+
+async function pinCluster(id) {
+  await sb.from('discovery_clusters').update({ reviewer_status: 'Pinned' }).eq('id', id);
+  toast('📌 Cluster pinned');
+  loadDiscovery();
+}
+
+async function dismissCluster(id) {
+  await sb.from('discovery_clusters').update({ status: 'Closed', reviewer_status: 'Dismissed' }).eq('id', id);
+  toast('Cluster dismissed');
+  closeDiscoveryPanel();
+  loadDiscovery();
+}
+
+async function saveClusterNote(id) {
+  const note = document.getElementById(`disc-reviewer-note-${id}`)?.value;
+  if (!note) return;
+  await sb.from('discovery_clusters').update({ reviewer_note: note }).eq('id', id);
+  toast('Note saved');
+}
+
+
+// ── CONTENT REVIEW ────────────────────────────────────────────────────
+async function loadContentReview() {
+  const status = document.getElementById('cr-status-filter')?.value;
+  const risk   = document.getElementById('cr-risk-filter')?.value;
+
+  let q = sb.from('content_review_candidates')
+    .select('*, cluster:discovery_clusters(id,title,signal_count,novelty_status,platforms,audience_wording)')
+    .not('status', 'in', '("Dismissed","Already covered")')
+    .order('created_at', { ascending: false })
+    .limit(80);
+  if (status) q = q.eq('status', status);
+  if (risk)   q = q.eq('repetition_risk', risk);
+
+  const { data, error } = await q;
+
+  if (error) {
+    document.getElementById('content-review-list').innerHTML =
+      `<div style="color:#e74c3c;padding:40px;text-align:center">Error: ${esc(error.message)}</div>`;
+    return;
+  }
+
+  const all = data || [];
+
+  // Stats
+  document.getElementById('cr-ready').textContent    = all.filter(c => c.status === 'Ready for review').length;
+  document.getElementById('cr-followup').textContent = all.filter(c => c.status === 'Recommended follow-up').length;
+  document.getElementById('cr-research').textContent = all.filter(c => c.status === 'Needs research').length;
+  document.getElementById('cr-approved').textContent = all.filter(c => c.status === 'Approved for brief').length;
+  document.getElementById('badge-review').textContent = all.filter(c => ['Ready for review','Recommended follow-up'].includes(c.status)).length;
+
+  if (!all.length) {
+    document.getElementById('content-review-list').innerHTML =
+      '<div style="color:var(--text-muted);padding:40px;text-align:center">No candidates yet. Clusters will appear here once they meet a qualification threshold.</div>';
+    return;
+  }
+
+  const riskColor = { Low:'#059669', Medium:'#d97706', High:'#e74c3c', Block:'#7f1d1d', 'Needs reviewer check':'#6b7280' };
+  const statusColor = {
+    'Ready for review':       '#059669',
+    'Recommended follow-up':  '#2563eb',
+    'Needs research':         '#d97706',
+    'Needs reviewer check':   '#6b7280',
+    'Hold for repetition':    '#e74c3c',
+    'Approved for brief':     '#10b981',
+  };
+
+  document.getElementById('content-review-list').innerHTML = all.map(c => {
+    const wording = (c.representative_wording || []).slice(0, 3);
+    const dirs    = (c.possible_directions || []).slice(0, 4);
+    const firstSeen = c.first_seen_at ? new Date(c.first_seen_at).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—';
+    const lastSeen  = c.last_seen_at  ? new Date(c.last_seen_at).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—';
+    const cluster = c.cluster;
+
+    return `
+    <div class="stat-card" style="border-left:3px solid ${statusColor[c.status]||'#444'}">
+      <!-- Header -->
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px">
+        <h3 style="margin:0;font-size:15px;line-height:1.3">${esc(c.title)}</h3>
+        <div style="display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+          <span style="font-size:11px;font-weight:600;color:${statusColor[c.status]||'#888'}">${esc(c.status)}</span>
+          ${c.repetition_risk ? `<span style="font-size:11px;font-weight:600;color:${riskColor[c.repetition_risk]||'#888'}">Risk: ${esc(c.repetition_risk)}</span>` : ''}
+        </div>
+      </div>
+
+      <!-- Meta stats -->
+      <div style="display:flex;gap:12px;font-size:12px;color:#9ca3af;margin-bottom:10px;flex-wrap:wrap">
+        <span>📊 ${c.signal_count||0} signals</span>
+        ${(c.question_count||0) > 0 ? `<span>❓ ${c.question_count} questions</span>` : ''}
+        ${(c.distinct_source_count||0) > 0 ? `<span>🔗 ${c.distinct_source_count} sources</span>` : ''}
+        ${(c.platforms||[]).length ? `<span>📱 ${c.platforms.join(', ')}</span>` : ''}
+        <span>📅 ${firstSeen} → ${lastSeen}</span>
+      </div>
+
+      <!-- What people are saying -->
+      ${c.what_people_are_saying ? `<p style="font-size:13px;line-height:1.6;color:#ccc;margin-bottom:10px">${esc(c.what_people_are_saying)}</p>` : ''}
+
+      <!-- Audience wording chips -->
+      ${wording.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">${wording.map(w => `<span style="background:#1e293b;border-radius:12px;padding:3px 10px;font-size:12px;font-style:italic">"${esc(w)}"</span>`).join('')}</div>` : ''}
+
+      <!-- What's new -->
+      ${c.what_appears_new ? `<div style="margin-bottom:8px"><span style="font-size:12px;color:#94a3b8">What's new: </span><span style="font-size:13px">${esc(c.what_appears_new)}</span></div>` : ''}
+
+      <!-- Repetition check -->
+      ${c.closest_published_title ? `<div style="background:#1e293b;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12.5px">
+        <div style="color:#94a3b8;margin-bottom:3px">Closest published content</div>
+        <div style="font-weight:500">${esc(c.closest_published_title)}</div>
+        <div style="color:#9ca3af;margin-top:2px">${c.closest_published_date ? new Date(c.closest_published_date).toLocaleDateString('en-US', {year:'numeric',month:'short'}) : '—'}${c.days_since_similar ? ` · ${c.days_since_similar} days ago` : ''}</div>
+        ${c.freshness_reason ? `<div style="color:#d1d5db;margin-top:4px;font-style:italic">${esc(c.freshness_reason)}</div>` : ''}
+      </div>` : ''}
+
+      <!-- Possible directions -->
+      ${dirs.length ? `<div style="margin-bottom:12px">
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Possible directions</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">${dirs.map(d => `<span style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:3px 10px;font-size:12px">${esc(d)}</span>`).join('')}</div>
+      </div>` : ''}
+
+      <!-- Claims / contradictions flags -->
+      ${c.claims_needing_verification ? `<div style="font-size:12px;color:#fbbf24;margin-bottom:6px">⚠️ Needs verification: ${esc(c.claims_needing_verification)}</div>` : ''}
+      ${c.contradictory_advice ? `<div style="font-size:12px;color:#f87171;margin-bottom:6px">⚡ Conflicting advice: ${esc(c.contradictory_advice)}</div>` : ''}
+
+      <!-- Reviewer decision -->
+      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">Reviewer decision</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <button class="btn btn-primary"    style="font-size:12px" onclick="crDecision('${c.id}','Approved for brief',null)">✅ Approve direction</button>
+          <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Needs research',null)">🔬 Needs research</button>
+          <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Hold for repetition',null)">⏸ Hold</button>
+          <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Already covered',null)">✓ Already covered</button>
+          <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Dismissed',null)">✕ Dismiss</button>
+        </div>
+        <div style="display:flex;gap:8px">
+          <input id="cr-direction-${c.id}" type="text" placeholder="Approved direction or note…" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
+          <button class="btn btn-secondary" style="font-size:12px" onclick="crDecision('${c.id}','Approved for brief',document.getElementById('cr-direction-${c.id}').value)">Save</button>
+        </div>
+        ${c.reviewer_note ? `<div style="font-size:12px;color:#9ca3af;margin-top:6px">Note: ${esc(c.reviewer_note)}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function crDecision(id, status, direction) {
+  const updates = { status, reviewed_at: new Date().toISOString() };
+  if (direction) updates.approved_direction = direction;
+  if (document.getElementById(`cr-direction-${id}`)?.value && !direction) {
+    updates.reviewer_note = document.getElementById(`cr-direction-${id}`).value;
+  }
+  await sb.from('content_review_candidates').update(updates).eq('id', id);
+
+  if (status === 'Approved for brief') {
+    toast('✅ Approved — run second content check before creating brief');
+  } else {
+    toast(`Status updated: ${status}`);
+  }
+  loadContentReview();
+}
+
 
 // ── INIT ──────────────────────────────────────────────────────────────
 initAuth();
