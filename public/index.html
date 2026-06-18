@@ -2328,30 +2328,39 @@ async function dismissCluster(id) {
 }
 
 async function deleteCluster(id, title) {
-  if (!confirm(`Delete "${title}"?\n\nThis will:\n• Delete the cluster\n• Mark all linked signals as Noise (won't be re-clustered)\n• Remove all cluster links\n\nCannot be undone.`)) return;
+  // Only for clearly irrelevant content (spam, luxury food, celebrity, non-plant).
+  // For weak signals, already-covered topics, or ideas not to publish → use Dismiss instead.
+  if (!confirm(`Block "${title}" as irrelevant?\n\nUse this ONLY for content clearly outside the monitoring scope (spam, luxury food, celebrity, non-plant content).\n\nFor plant signals you don't want to publish, use Dismiss instead.`)) return;
+
+  const blockReason = prompt('Short block reason (e.g. "luxury cake trend", "celebrity gossip", "spam"):');
+  if (blockReason === null) return; // user cancelled
 
   // 1. Find all signals linked to this cluster
   const { data: links } = await sb.from('signal_cluster_links')
     .select('signal_id').eq('cluster_id', id);
   const signalIds = (links || []).map(l => l.signal_id);
 
-  // 2. Mark signals as Noise so they're skipped in future clustering
+  // 2. Mark linked signals as Noise (won't be re-clustered)
   if (signalIds.length) {
     await sb.from('signals')
       .update({ status: 'Noise' })
       .in('id', signalIds);
   }
 
-  // 3. Delete cluster links (also cascades via FK, but explicit is safer)
-  await sb.from('signal_cluster_links').delete().eq('cluster_id', id);
+  // 3. Dismiss any content review candidates for this cluster
+  await sb.from('content_review_candidates')
+    .update({ status: 'Dismissed' })
+    .eq('cluster_id', id);
 
-  // 4. Delete any content review candidates for this cluster
-  await sb.from('content_review_candidates').delete().eq('cluster_id', id);
+  // 4. Mark cluster as Blocked irrelevant (kept for audit; not deleted)
+  await sb.from('discovery_clusters')
+    .update({
+      status:       'Blocked irrelevant',
+      block_reason: blockReason || 'Marked irrelevant',
+    })
+    .eq('id', id);
 
-  // 5. Delete the cluster itself
-  await sb.from('discovery_clusters').delete().eq('id', id);
-
-  toast(`🗑 Deleted — ${signalIds.length} signal(s) marked as Noise`);
+  toast(`🚫 Blocked — ${signalIds.length} signal(s) marked as Noise`);
   closeDiscoveryPanel();
   loadDiscovery();
 }
