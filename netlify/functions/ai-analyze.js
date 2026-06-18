@@ -144,9 +144,19 @@ exports.handler = async (event) => {
       const signalId = data.id;
       if (!signalId) return { statusCode: 400, headers, body: JSON.stringify({ error: "signal id required for clustering" }) };
 
-      // Step 1: Extract structured meaning from the signal
+      // Step 1: Extract structured meaning + relevance check
       const extractPrompt = buildExtractionPrompt(data);
       const extracted = await callClaude(extractPrompt);
+
+      // If AI says signal is not relevant to plants/succulents, mark as Noise and stop
+      if (extracted.relevant === false) {
+        await supabase.from("signals").update({ status: "Noise" }).eq("id", signalId);
+        return { statusCode: 200, headers, body: JSON.stringify({
+          success: true,
+          analysis: { cluster_id: null, match_type: "noise", signal_count: 0,
+                       qualifies: false, reason: extracted.noise_reason || "Not relevant to succulents/plants" }
+        })};
+      }
 
       // Step 2: Fetch existing clusters to find a match
       const { data: existingClusters } = await supabase
@@ -572,13 +582,22 @@ Platform: ${signal.platform || "unknown"}
 Source URL: ${signal.source_url || "not provided"}
 Content: ${signal.raw_input || signal.caption_summary || signal.topic || "not provided"}
 
-Extract what the audience is actually saying. Preserve their exact wording where possible.
+First decide if this signal is relevant to Succulents Box — a succulent and cactus plant subscription company.
+
+Relevant = about succulents, cacti, houseplants, plant care, propagation, watering, soil, pots, plant products, or anything a plant hobbyist would care about.
+NOT relevant = food, fashion, travel, celebrities, unrelated viral trends, non-plant topics that happen to use a plant hashtag by accident.
+
+If NOT relevant, return:
+{ "relevant": false, "noise_reason": "one sentence why this is irrelevant" }
+
+If relevant, extract what the audience is actually saying. Preserve their exact wording where possible.
 Do NOT invent information. Only extract what is clearly present.
 
 Evidence types: Question | Problem report | Tip | Claim | Personal experience | Disagreement | Follow-up request | General mention
 
 Return ONLY valid JSON:
 {
+  "relevant": true,
   "cluster_title": "plain-language title summarizing what this signal is about, using audience wording when possible",
   "summary": "1-2 sentence plain description of the pattern",
   "plant": "plant or product name, null if not clear",
