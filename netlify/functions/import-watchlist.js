@@ -49,8 +49,10 @@ exports.handler = async (event) => {
   try { body = JSON.parse(event.body); }
   catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
 
-  const { csv } = body;
+  const { csv, products } = body;
   if (!csv) return { statusCode: 400, headers, body: JSON.stringify({ error: "csv field required" }) };
+  // products: { [tabName/genusName]: string[] } — optional, from XLSX genus tabs
+  const productsMap = products || {};
 
   // Parse CSV
   const rows = parseCSV(csv);
@@ -59,7 +61,7 @@ exports.handler = async (event) => {
   // Map to plant_watchlist rows
   const now = new Date().toISOString();
   const plants = rows
-    .map(r => mapRow(r, now))
+    .map(r => mapRow(r, now, productsMap))
     .filter(r => r && r.plant_name && r.plant_name.trim() !== "" && r.plant_name.toLowerCase() !== "genus");
 
   if (plants.length === 0) {
@@ -143,16 +145,21 @@ function revenueTier(totalSales) {
   return "Watch";
 }
 
-function mapRow(r, now) {
+function mapRow(r, now, productsMap) {
   // Handle both "genus" and "plant name" header variants
   const name = r["genus"] || r["plant name"] || r["plant_name"] || "";
-  if (!name || name.toLowerCase() === "genus" || name.toLowerCase() === "total") return null;
+  const nameLow = name.toLowerCase().trim();
+  if (!name || nameLow === "genus" || nameLow.includes("total") || nameLow.startsWith("(no ") || nameLow === "") return null;
 
   const totalSales = parseMoney(r["total sales"] || r["total_sales"] || r["h"] || "");
   const netSales   = parseMoney(r["net sales"]   || r["net_sales"]   || r["g"] || "");
   const skus       = parseNum(r["products (skus)"] || r["products"] || r["skus"] || r["b"] || "");
   const netItems   = parseNum(r["net items sold"] || r["net_items_sold"] || r["c"] || "");
   const pct        = parsePct(r["% of total revenue"] || r["pct"] || r["i"] || "");
+
+  // Match genus name to a tab in productsMap (case-insensitive)
+  const matchedTab = Object.keys(productsMap).find(tab => tab.toLowerCase() === nameLow);
+  const topProducts = matchedTab ? productsMap[matchedTab].join(" || ") : null;
 
   return {
     plant_name:        name,
@@ -163,6 +170,7 @@ function mapRow(r, now) {
     pct_total_revenue: pct,
     revenue_tier:      revenueTier(totalSales),
     search_keywords:   name.toLowerCase(),
+    top_products:      topProducts,
     last_imported_at:  now,
     updated_at:        now,
   };
