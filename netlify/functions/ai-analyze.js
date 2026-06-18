@@ -315,7 +315,10 @@ exports.handler = async (event) => {
             possible_directions:      candidateResult.possible_directions || [],
             ai_confidence:            candidateResult.ai_confidence || "Medium",
             surfaced_reason:          qualifies.reason,
-            status:                   candidateResult.candidate_status || "Ready for review",
+            // Force "Needs research" when qualification was triggered by a new claim
+            status: (qualifies.reason && qualifies.reason.includes("needs verification"))
+              ? "Needs research"
+              : (candidateResult.candidate_status || "Ready for review"),
           });
 
           await supabase.from("discovery_clusters")
@@ -725,19 +728,44 @@ Return ONLY valid JSON:
 
 // ── PATTERN QUALIFICATION ─────────────────────────────────────────────────────
 // Returns { qualifies: true, reason } or false
+// Rules per spec v2:
+//   Rule 1: 3+ independent question signals
+//   Rule 2: 3+ independent signals across 2+ sources (same pattern)
+//   Rule 3a: 2+ distinct sources + meaningful growth (rc >= 2x pc AND rc >= 3)
+//   Rule 3b: 2+ distinct sources + new tip or claim
+//   Rule 3c: 2+ distinct sources + contradiction detected
+//   Rule 4: Reviewer manually pinned
+// NOTE: 2 distinct sources alone does NOT qualify for Content Review.
 function checkQualification(cluster) {
-  const sc = cluster.signal_count || 0;
-  const qc = cluster.question_count || 0;
+  const sc = cluster.signal_count          || 0;
+  const qc = cluster.question_count        || 0;
   const dc = cluster.distinct_source_count || 0;
-  const rc = cluster.recent_mention_count || 0;
+  const rc = cluster.recent_mention_count  || 0;
   const pc = cluster.previous_mention_count || 0;
 
-  if (qc >= 3)  return { qualifies: true, reason: `${qc} independent question signals` };
-  if (dc >= 2)  return { qualifies: true, reason: `${dc} distinct sources` };
-  if (pc > 0 && rc >= pc * 2) return { qualifies: true, reason: `Mention count doubled: ${pc} → ${rc}` };
-  if (cluster.novelty_status === "New tip or claim") return { qualifies: true, reason: "New tip or claim needs verification" };
-  if (cluster.contradiction_status === "Detected") return { qualifies: true, reason: "Conflicting advice detected" };
-  if (cluster.reviewer_status === "Pinned") return { qualifies: true, reason: "Manually pinned by reviewer" };
+  // Rule 1: 3+ independent question signals
+  if (qc >= 3)
+    return { qualifies: true, reason: `${qc} independent question signals` };
+
+  // Rule 2: 3+ independent signals across 2+ distinct sources
+  if (sc >= 3 && dc >= 2)
+    return { qualifies: true, reason: `${sc} independent signals across ${dc} sources` };
+
+  // Rule 3a: 2+ sources + meaningful growth (at least double AND at least 3 recent)
+  if (dc >= 2 && rc >= 3 && pc > 0 && rc >= pc * 2)
+    return { qualifies: true, reason: `Growth: ${pc} → ${rc} mentions across ${dc} sources` };
+
+  // Rule 3b: 2+ sources + new tip or claim (routes to Needs research)
+  if (dc >= 2 && cluster.novelty_status === "New tip or claim")
+    return { qualifies: true, reason: `New tip or claim across ${dc} sources — needs verification` };
+
+  // Rule 3c: 2+ sources + contradiction
+  if (dc >= 2 && cluster.contradiction_status === "Detected")
+    return { qualifies: true, reason: `Conflicting advice detected across ${dc} sources` };
+
+  // Rule 4: Reviewer manually pinned
+  if (cluster.reviewer_status === "Pinned")
+    return { qualifies: true, reason: "Manually pinned by reviewer" };
 
   return false;
 }
