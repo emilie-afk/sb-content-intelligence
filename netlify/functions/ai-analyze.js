@@ -45,10 +45,15 @@ exports.handler = async (event) => {
     // Fetch plant watchlist for revenue priority matching
     const { data: watchlist } = await supabase
       .from("plant_watchlist")
-      .select("plant_name, revenue_tier, priority_level, stock_status")
+      .select("plant_name, revenue_tier, priority_level, stock_status, top_products")
       .order("revenue", { ascending: false });
     const watchlistText = watchlist?.length
-      ? watchlist.map(p => `${p.plant_name} (${p.revenue_tier}, stock: ${p.stock_status})`).join(", ")
+      ? watchlist.map(p => {
+          const products = p.top_products
+            ? p.top_products.split(" || ").slice(0, 8).join(", ")
+            : null;
+          return `${p.plant_name}${products ? ` — known products: ${products}` : ""}`;
+        }).join("\n")
       : "No watchlist loaded yet";
 
     if (type === "signal") {
