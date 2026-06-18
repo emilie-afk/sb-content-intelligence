@@ -2558,6 +2558,7 @@ async function clusterAllSignals() {
   btn.textContent = '🔍 Cluster all';
   toast(`✅ Clustered ${done} signals${errors ? ` (${errors} errors)` : ''} — check Discovery Board`);
   loadDiscovery();
+  loadCommandCenter(); // refresh all nav badges
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────
