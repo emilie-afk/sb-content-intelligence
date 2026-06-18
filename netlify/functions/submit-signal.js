@@ -111,7 +111,8 @@ exports.handler = async (event) => {
   }
 
   // ── 5. Batch insert ──────────────────────────────────────────
-  const { error: insertErr } = await supabase.from("signals").insert(newRows);
+  const { data: inserted, error: insertErr } = await supabase
+    .from("signals").insert(newRows).select("id, topic, platform, source_url, caption_summary, plant_or_product");
 
   if (insertErr) {
     console.error("Insert error:", insertErr);
@@ -122,6 +123,21 @@ exports.handler = async (event) => {
     .from("submission_tokens")
     .update({ last_used_at: new Date().toISOString() })
     .eq("id", tokenRow.id);
+
+  // ── 6. Auto-cluster (fire and forget) ────────────────────────
+  // Don't await — clustering runs in background so submit stays fast
+  if (inserted?.length && process.env.CLAUDE_API_KEY) {
+    const netlifyUrl = process.env.URL || "https://sb-content-intelligence.netlify.app";
+    Promise.allSettled(
+      inserted.map((sig) =>
+        fetch(`${netlifyUrl}/.netlify/functions/ai-analyze`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ type: "cluster", data: sig }),
+        })
+      )
+    ).catch((e) => console.warn("Auto-cluster batch failed:", e.message));
+  }
 
   return {
     statusCode: 200,
