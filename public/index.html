@@ -243,6 +243,7 @@ tbody tr:hover { background: #fafffe; }
       <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
       Sign in with Google
     </button>
+
     <div class="auth-error" id="auth-error"></div>
   </div>
 </div>
@@ -298,6 +299,12 @@ tbody tr:hover { background: #fafffe; }
       </div>
       <div class="nav-item" data-view="watchlist" onclick="showView('watchlist',this)">
         <span class="icon">🌿</span> Plant Watchlist
+      </div>
+      <div class="nav-item" data-view="competitor-activity" onclick="showView('competitor-activity',this)">
+        <span class="icon">🔍</span> Competitor Activity
+      </div>
+      <div class="nav-item" data-view="market-watch" onclick="showView('market-watch',this)">
+        <span class="icon">📈</span> Market Watch
       </div>
       <div class="nav-item" data-view="activity-log" onclick="showView('activity-log',this)">
         <span class="icon">📜</span> Activity Log
@@ -627,6 +634,63 @@ tbody tr:hover { background: #fafffe; }
         </tr></thead>
         <tbody id="watchlist-table"><tr><td colspan="8"><div class="empty"><div class="icon">🌿</div><p>No plants yet. Import the revenue CSV to populate.</p></div></td></tr></tbody>
       </table>
+    </div>
+
+    <!-- ── COMPETITOR ACTIVITY ── -->
+    <div id="view-competitor-activity" class="view">
+      <div class="view-header">
+        <h1>Competitor Activity</h1>
+        <p>Promotions, giveaways, launches, and showcases from competitors and third parties</p>
+      </div>
+      <div class="filters" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <select class="filter-select" id="ca-status-filter" onchange="loadCompetitorActivity()">
+          <option value="">All Statuses</option>
+          <option value="New">New</option>
+          <option value="Reviewed">Reviewed</option>
+          <option value="Flagged">Flagged</option>
+          <option value="Dismissed">Dismissed</option>
+        </select>
+        <select class="filter-select" id="ca-catalog-filter" onchange="loadCompetitorActivity()">
+          <option value="">All Catalog Statuses</option>
+          <option value="Catalog match">Catalog match</option>
+          <option value="Catalog family match">Catalog family match</option>
+          <option value="Not in catalog">Not in catalog</option>
+          <option value="Needs catalog review">Needs catalog review</option>
+        </select>
+        <select class="filter-select" id="ca-type-filter" onchange="loadCompetitorActivity()">
+          <option value="">All Activity Types</option>
+          <option value="Giveaway or contest">Giveaway or contest</option>
+          <option value="Sale or promotion">Sale or promotion</option>
+          <option value="Product launch">Product launch</option>
+          <option value="Collaboration">Collaboration</option>
+          <option value="Product showcase">Product showcase</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" onclick="loadCompetitorActivity()">↻ Refresh</button>
+      </div>
+      <div id="ca-list" style="display:flex;flex-direction:column;gap:12px">
+        <div class="empty"><div class="icon">🔍</div><p>Loading competitor activity…</p></div>
+      </div>
+    </div>
+
+    <!-- ── MARKET WATCH ── -->
+    <div id="view-market-watch" class="view">
+      <div class="view-header">
+        <h1>Market Watch</h1>
+        <p>Non-catalog plants receiving audience attention — potential future opportunities</p>
+      </div>
+      <div class="filters" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <select class="filter-select" id="mw-reviewer-filter" onchange="loadMarketWatch()">
+          <option value="">All Reviewer Statuses</option>
+          <option value="Unreviewed">Unreviewed</option>
+          <option value="Watching">Watching</option>
+          <option value="Flag for merchandising">Flag for merchandising</option>
+          <option value="Dismissed">Dismissed</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" onclick="loadMarketWatch()">↻ Refresh</button>
+      </div>
+      <div id="mw-list" style="display:flex;flex-direction:column;gap:12px">
+        <div class="empty"><div class="icon">📈</div><p>Loading market watch plants…</p></div>
+      </div>
     </div>
 
     <!-- ── ACTIVITY LOG ── -->
@@ -1098,8 +1162,10 @@ function showView(viewId, el) {
     'brand-rules':    loadBrandRules,
     'activity-log':   loadActivityLog,
     'watchlist':      loadWatchlist,
-    'discovery':      loadDiscovery,
-    'content-review': loadContentReview,
+    'discovery':            loadDiscovery,
+    'content-review':       loadContentReview,
+    'competitor-activity':  loadCompetitorActivity,
+    'market-watch':         loadMarketWatch,
   };
   if (loaders[viewId]) loaders[viewId]();
 }
@@ -2194,19 +2260,24 @@ function renderDiscoveryClusters(all) {
 
   grid.innerHTML = data.map(c => {
     const nb = noveltyBadge[c.novelty_status] || null;
-    const wording = (c.audience_wording || []).slice(0, 3);
+    const wording = (c.audience_wording || []).slice(0, 2);
     const lastSeen = c.last_seen_at ? new Date(c.last_seen_at).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—';
     const platforms = (c.platforms || []).join(', ') || '—';
     const reviewReadyBtn = c.status === 'Pattern detected'
       ? `<button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="moveClusterToReview('${c.id}',event)">→ Content Review</button>`
       : '';
+    // Extract relevant conditions from ai_reason (format: "... | Conditions: x, y")
+    const condMatch = (c.ai_reason || '').match(/Conditions:\s*([^|]+)/);
+    const conditions = condMatch ? condMatch[1].trim() : null;
     return `
     <div class="stat-card" style="cursor:pointer;border-left:3px solid ${statusColor[c.status]||'#444'}" onclick="openDiscoveryPanel('${c.id}')">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px">
         <div style="font-weight:600;font-size:14px;line-height:1.3">${esc(c.title)}</div>
         <span style="font-size:11px;color:${statusColor[c.status]||'#888'};white-space:nowrap;font-weight:500">${esc(c.status)}</span>
       </div>
-      ${c.plant_or_product ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">🌱 ${esc(c.plant_or_product)}</div>` : ''}
+      ${c.summary ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:5px;line-height:1.4">${esc(c.summary)}</div>` : ''}
+      ${c.plant_or_product ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:5px">🌱 ${esc(c.plant_or_product)}</div>` : ''}
+      ${conditions ? `<div style="font-size:11px;color:#7c3aed;margin-bottom:6px">📍 ${esc(conditions)}</div>` : ''}
       <div style="display:flex;gap:12px;font-size:12px;color:var(--text-muted);margin-bottom:8px">
         <span title="Signals">📊 ${c.signal_count||0}</span>
         ${(c.question_count||0) > 0 ? `<span title="Questions">❓ ${c.question_count}</span>` : ''}
@@ -2256,6 +2327,9 @@ async function openDiscoveryPanel(clusterId) {
     </div>`;
   }).join('');
 
+  const inputStyle = 'width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:13px;box-sizing:border-box';
+  const labelStyle = 'font-size:11px;color:#94a3b8;margin-bottom:4px;display:block;font-weight:500';
+
   content.innerHTML = `
     <h2 style="margin:0 0 4px;font-size:17px">${esc(cluster.title)}</h2>
     ${cluster.plant_or_product ? `<div style="font-size:13px;color:#9ca3af;margin-bottom:12px">🌱 ${esc(cluster.plant_or_product)}</div>` : ''}
@@ -2279,6 +2353,44 @@ async function openDiscoveryPanel(clusterId) {
       First seen: ${cluster.first_seen_at ? new Date(cluster.first_seen_at).toLocaleDateString() : '—'} ·
       Last seen:  ${cluster.last_seen_at  ? new Date(cluster.last_seen_at).toLocaleDateString()  : '—'}
     </div>
+
+    <!-- ── EDIT CLUSTER ── -->
+    <details style="margin-bottom:20px">
+      <summary style="font-size:13px;font-weight:600;cursor:pointer;user-select:none;margin-bottom:12px">✏️ Edit cluster</summary>
+      <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
+        <div>
+          <label style="${labelStyle}">Title</label>
+          <input id="edit-title" style="${inputStyle}" value="${esc(cluster.title)}">
+        </div>
+        <div>
+          <label style="${labelStyle}">Plant or product</label>
+          <input id="edit-plant" style="${inputStyle}" value="${esc(cluster.plant_or_product||'')}">
+        </div>
+        <div>
+          <label style="${labelStyle}">Summary (core issue)</label>
+          <textarea id="edit-summary" style="${inputStyle};resize:vertical;min-height:60px">${esc(cluster.summary||'')}</textarea>
+        </div>
+        <div>
+          <label style="${labelStyle}">Primary question</label>
+          <input id="edit-question" style="${inputStyle}" value="${esc(cluster.primary_question||'')}">
+        </div>
+        <div>
+          <label style="${labelStyle}">Novelty status</label>
+          <select id="edit-novelty" style="${inputStyle}">
+            ${['Known recurring topic','New audience wording','New question about a known topic','New tip or claim','New contradiction','New plant connected to a known problem','Unclear'].map(v =>
+              `<option${cluster.novelty_status === v ? ' selected' : ''}>${v}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div>
+          <label style="${labelStyle}">Audience wording (one per line)</label>
+          <textarea id="edit-wording" style="${inputStyle};resize:vertical;min-height:70px">${(cluster.audience_wording||[]).join('\n')}</textarea>
+        </div>
+        <button class="btn btn-primary" style="font-size:13px" onclick="saveClusterEdit('${cluster.id}')">💾 Save changes</button>
+      </div>
+    </details>
+
+    <!-- ── REVIEWER ACTIONS ── -->
     <div style="margin-bottom:20px">
       <div style="font-size:13px;font-weight:600;margin-bottom:10px">Reviewer actions</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -2289,7 +2401,7 @@ async function openDiscoveryPanel(clusterId) {
         <button class="btn btn-secondary" style="color:#e74c3c;border-color:#e74c3c" onclick="deleteCluster('${cluster.id}','${cluster.title.replace(/'/g,"\\'")}')">🗑 Delete + block</button>
       </div>
       <div style="margin-top:10px">
-        <input id="disc-reviewer-note-${cluster.id}" type="text" placeholder="Add reviewer note…" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
+        <input id="disc-reviewer-note-${cluster.id}" type="text" placeholder="Add reviewer note…" value="${esc(cluster.reviewer_note||'')}" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
         <button class="btn btn-primary" style="margin-top:6px;font-size:12px" onclick="saveClusterNote('${cluster.id}')">Save note</button>
       </div>
     </div>
@@ -2370,6 +2482,31 @@ async function saveClusterNote(id) {
   if (!note) return;
   await sb.from('discovery_clusters').update({ reviewer_note: note }).eq('id', id);
   toast('Note saved');
+}
+
+async function saveClusterEdit(id) {
+  const title    = document.getElementById('edit-title')?.value.trim();
+  const plant    = document.getElementById('edit-plant')?.value.trim();
+  const summary  = document.getElementById('edit-summary')?.value.trim();
+  const question = document.getElementById('edit-question')?.value.trim();
+  const novelty  = document.getElementById('edit-novelty')?.value;
+  const wording  = (document.getElementById('edit-wording')?.value || '')
+    .split('\n').map(s => s.trim()).filter(Boolean);
+
+  if (!title) { toast('Title is required'); return; }
+
+  await sb.from('discovery_clusters').update({
+    title,
+    plant_or_product: plant || null,
+    summary:          summary || null,
+    primary_question: question || null,
+    novelty_status:   novelty,
+    audience_wording: wording,
+  }).eq('id', id);
+
+  toast('✅ Cluster updated');
+  openDiscoveryPanel(id); // reload panel with new values
+  loadDiscovery();        // refresh cards
 }
 
 
@@ -2568,6 +2705,160 @@ async function clusterAllSignals() {
   toast(`✅ Clustered ${done} signals${errors ? ` (${errors} errors)` : ''} — check Discovery Board`);
   loadDiscovery();
   loadCommandCenter(); // refresh all nav badges
+}
+
+// ── COMPETITOR ACTIVITY ───────────────────────────────────────────────
+async function loadCompetitorActivity() {
+  const el = document.getElementById('ca-list');
+  el.innerHTML = '<div class="empty"><div class="icon">⏳</div><p>Loading…</p></div>';
+
+  const status  = document.getElementById('ca-status-filter')?.value  || '';
+  const catalog = document.getElementById('ca-catalog-filter')?.value || '';
+  const type    = document.getElementById('ca-type-filter')?.value    || '';
+
+  let q = sb.from('competitor_activity')
+    .select('*')
+    .order('observed_at', { ascending: false })
+    .limit(100);
+  if (status)  q = q.eq('status', status);
+  if (catalog) q = q.eq('catalog_match_status', catalog);
+  if (type)    q = q.eq('activity_type', type);
+
+  const { data: rows, error } = await q;
+  if (error || !rows?.length) {
+    el.innerHTML = '<div class="empty"><div class="icon">🔍</div><p>No competitor activity recorded yet. Submit signals to start building this view.</p></div>';
+    return;
+  }
+
+  const catalogBadge = s => {
+    const map = { 'Catalog match':'#4CAF50','Catalog family match':'#81c784','Not in catalog':'#e57373','Needs catalog review':'#ffa726' };
+    return `<span style="background:${map[s]||'#6b7280'};color:#fff;border-radius:4px;padding:2px 6px;font-size:11px">${esc(s||'Unknown')}</span>`;
+  };
+  const statusBadge = s => {
+    const map = { 'New':'#3b82f6','Reviewed':'#10b981','Flagged':'#f59e0b','Dismissed':'#6b7280' };
+    return `<span style="background:${map[s]||'#6b7280'};color:#fff;border-radius:4px;padding:2px 6px;font-size:11px">${esc(s||'—')}</span>`;
+  };
+
+  el.innerHTML = rows.map(r => {
+    const dates = [
+      r.published_at ? 'Published: ' + new Date(r.published_at).toLocaleDateString() : '',
+      r.event_dates_claimed?.length ? 'Event dates: ' + r.event_dates_claimed.join(', ') : '',
+    ].filter(Boolean).join(' · ');
+
+    return `
+    <div class="card" style="padding:16px">
+      <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+            ${statusBadge(r.status)}
+            ${catalogBadge(r.catalog_match_status)}
+            ${r.activity_type ? `<span class="badge badge-low">${esc(r.activity_type)}</span>` : ''}
+          </div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:4px">
+            ${r.source_account_handle ? `<span style="color:#a78bfa">@${esc(r.source_account_handle)}</span> · ` : ''}${esc(r.plant_name || 'Unknown plant')}
+          </div>
+          ${r.ai_summary ? `<div style="color:#9ca3af;font-size:13px;margin-bottom:6px">${esc(r.ai_summary)}</div>` : ''}
+          ${r.source_marketing_wording?.length ? `<div style="color:#fbbf24;font-size:12px;font-style:italic;margin-bottom:4px">"${esc(r.source_marketing_wording[0])}"</div>` : ''}
+          ${dates ? `<div style="color:#6b7280;font-size:12px">${esc(dates)}</div>` : ''}
+          ${r.collaborator_accounts?.length ? `<div style="color:#6b7280;font-size:12px">Collaborators: ${r.collaborator_accounts.map(c=>`@${esc(c)}`).join(', ')}</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          ${r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" class="btn btn-secondary btn-sm">View →</a>` : ''}
+          <select style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:4px;padding:3px 6px;font-size:12px"
+            onchange="updateCaStatus('${r.id}', this.value)">
+            <option value="New"      ${r.status==='New'      ?'selected':''}>New</option>
+            <option value="Reviewed" ${r.status==='Reviewed' ?'selected':''}>Reviewed</option>
+            <option value="Flagged"  ${r.status==='Flagged'  ?'selected':''}>Flagged</option>
+            <option value="Dismissed"${r.status==='Dismissed'?'selected':''}>Dismissed</option>
+          </select>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function updateCaStatus(id, status) {
+  await sb.from('competitor_activity').update({ status }).eq('id', id);
+  toast('✅ Status updated');
+}
+
+// ── MARKET WATCH ───────────────────────────────────────────────────────
+async function loadMarketWatch() {
+  const el = document.getElementById('mw-list');
+  el.innerHTML = '<div class="empty"><div class="icon">⏳</div><p>Loading…</p></div>';
+
+  const reviewer = document.getElementById('mw-reviewer-filter')?.value || '';
+
+  let q = sb.from('market_watch_plants')
+    .select('*')
+    .neq('reviewer_status', 'Dismissed')
+    .order('signal_count', { ascending: false })
+    .limit(100);
+  if (reviewer) q = q.eq('reviewer_status', reviewer);
+
+  const { data: rows, error } = await q;
+  if (error || !rows?.length) {
+    el.innerHTML = '<div class="empty"><div class="icon">📈</div><p>No non-catalog plants tracked yet. Submit signals to start building this view.</p></div>';
+    return;
+  }
+
+  const opBadge = s => {
+    const map = { 'High':'#4CAF50','Medium':'#81c784','Low':'#ffa726','No':'#6b7280' };
+    return s && s !== 'No' ? `<span style="background:${map[s]||'#6b7280'};color:#fff;border-radius:4px;padding:2px 6px;font-size:11px">Opportunity: ${esc(s)}</span>` : '';
+  };
+
+  el.innerHTML = rows.map(r => {
+    const wordingPreview = (r.audience_wording || []).slice(0, 2).map(w => `"${esc(w)}"`).join(' · ');
+    const competitors = (r.competitors_featuring || []).map(c => `@${esc(c)}`).join(', ');
+    return `
+    <div class="card" style="padding:16px">
+      <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+            ${opBadge(r.potential_catalog_opportunity)}
+            <span class="badge badge-low">${esc(r.verification_status||'Unverified')}</span>
+          </div>
+          <div style="font-size:16px;font-weight:700;margin-bottom:2px">${esc(r.plant_name)}</div>
+          ${r.scientific_name ? `<div style="color:#9ca3af;font-size:12px;font-style:italic;margin-bottom:4px">${esc(r.scientific_name)}</div>` : ''}
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px">
+            <span style="font-size:12px;color:#9ca3af">📊 ${r.signal_count||0} signals</span>
+            <span style="font-size:12px;color:#9ca3af">❓ ${r.question_count||0} questions</span>
+            <span style="font-size:12px;color:#9ca3af">🛒 ${r.purchase_intent_count||0} purchase intent</span>
+            <span style="font-size:12px;color:#9ca3af">🌐 ${r.distinct_source_count||0} sources</span>
+          </div>
+          ${wordingPreview ? `<div style="color:#e2e8f0;font-size:12px;font-style:italic;margin-bottom:4px">${wordingPreview}</div>` : ''}
+          ${competitors ? `<div style="color:#a78bfa;font-size:12px;margin-bottom:4px">Featured by: ${competitors}</div>` : ''}
+          ${r.closest_catalog_alternative ? `<div style="color:#6b7280;font-size:12px">Closest SB alternative: ${esc(r.closest_catalog_alternative)}</div>` : ''}
+          ${r.last_seen_at ? `<div style="color:#4a5568;font-size:11px;margin-top:4px">Last seen ${new Date(r.last_seen_at).toLocaleDateString()}</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          <select style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:4px;padding:3px 6px;font-size:12px"
+            onchange="updateMwStatus('${r.id}', this.value)">
+            <option value="Unreviewed"           ${r.reviewer_status==='Unreviewed'?'selected':''}>Unreviewed</option>
+            <option value="Watching"             ${r.reviewer_status==='Watching'?'selected':''}>Watching</option>
+            <option value="Flag for merchandising"${r.reviewer_status==='Flag for merchandising'?'selected':''}>Flag for merch</option>
+            <option value="Dismissed"            ${r.reviewer_status==='Dismissed'?'selected':''}>Dismissed</option>
+          </select>
+          <select style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:4px;padding:3px 6px;font-size:12px"
+            onchange="updateMwOpportunity('${r.id}', this.value)">
+            <option value="No"     ${r.potential_catalog_opportunity==='No'?'selected':''}>Opportunity: No</option>
+            <option value="Low"    ${r.potential_catalog_opportunity==='Low'?'selected':''}>Opportunity: Low</option>
+            <option value="Medium" ${r.potential_catalog_opportunity==='Medium'?'selected':''}>Opportunity: Medium</option>
+            <option value="High"   ${r.potential_catalog_opportunity==='High'?'selected':''}>Opportunity: High</option>
+          </select>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function updateMwStatus(id, reviewer_status) {
+  await sb.from('market_watch_plants').update({ reviewer_status }).eq('id', id);
+  toast('✅ Status updated');
+}
+async function updateMwOpportunity(id, potential_catalog_opportunity) {
+  await sb.from('market_watch_plants').update({ potential_catalog_opportunity }).eq('id', id);
+  toast('✅ Opportunity updated');
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────
