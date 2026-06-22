@@ -456,7 +456,7 @@ tbody tr:hover { background: #fafffe; }
             <option value="weekly">Weekly</option>
           </select>
           <button class="btn btn-primary" id="generate-briefing-btn"
-            onclick="generateBriefing(document.getElementById('briefing-type-select').value)">
+            onclick="generateBriefing(document.getElementById('briefing-type-select').value,this)">
             ✨ Generate Briefing
           </button>
         </div>
@@ -796,7 +796,7 @@ tbody tr:hover { background: #fafffe; }
         </select>
         <button class="btn btn-secondary" onclick="loadDiscovery()">↺ Refresh</button>
         <button class="btn btn-secondary" id="maintenance-btn" onclick="runMaintenance()" title="Re-run qualification checks on all existing clusters">⚙️ Run Maintenance</button>
-        <button class="btn btn-primary" onclick="generateBriefing('on-demand')" title="Generate AI briefing and populate Today board">✨ AI Briefing</button>
+        <button class="btn btn-primary" onclick="generateBriefing('on-demand',this)" title="Generate AI briefing and populate Today board">✨ AI Briefing</button>
       </div>
 
       <!-- Cluster cards -->
@@ -1409,7 +1409,7 @@ async function loadToday() {
           research need, cleanup decision, market change, or competitor alert.
         </p>
         <button class="btn btn-primary" style="margin-top:20px"
-          onclick="generateBriefing(document.getElementById('briefing-type-select').value)">
+          onclick="generateBriefing(document.getElementById('briefing-type-select').value,this)">
           ✨ Generate Briefing Now
         </button>
       </div>`;
@@ -1569,9 +1569,10 @@ async function todayItemDecide(itemId, status) {
   loadToday();
 }
 
-async function generateBriefing(type = 'on-demand') {
-  const btn = document.getElementById('generate-briefing-btn');
+async function generateBriefing(type = 'on-demand', callerBtn) {
+  const btn = callerBtn || document.getElementById('generate-briefing-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
+  toast('⏳ Generating briefing… this can take 20–30 seconds');
   try {
     const resp = await fetch('/.netlify/functions/ai-briefing', {
       method: 'POST',
@@ -1585,7 +1586,7 @@ async function generateBriefing(type = 'on-demand') {
   } catch (err) {
     toast('Briefing failed: ' + err.message, true);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '✨ Generate Briefing'; }
+    if (btn) { btn.disabled = false; btn.textContent = '✨ AI Briefing'; }
   }
 }
 
