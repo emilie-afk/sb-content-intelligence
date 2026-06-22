@@ -17,6 +17,7 @@ const supabase = createClient(
 
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
+const PROMPT_VERSION = "extract-v2";
 
 exports.handler = async (event) => {
   const headers = {
@@ -144,7 +145,7 @@ exports.handler = async (event) => {
       const signalId = data.id;
       if (!signalId) return { statusCode: 400, headers, body: JSON.stringify({ error: "signal id required for clustering" }) };
 
-      // Step 1: Extract structured meaning + relevance check
+      // Step 1: Extract one or more distinct ideas + relevance check
       const extractPrompt = buildExtractionPrompt(data);
       const extracted = await callClaude(extractPrompt);
 
@@ -158,188 +159,417 @@ exports.handler = async (event) => {
         })};
       }
 
-      // Step 2: Fetch existing clusters to find a match
-      const { data: existingClusters } = await supabase
+      // Write source attribution + dates back to the signals table
+      const attr  = extracted.attribution || {};
+      const dates = extracted.dates || {};
+      const firstIdea = (extracted.ideas || [])[0] || {};
+      await supabase.from("signals").update({
+        source_account_handle:  attr.source_account_handle  || null,
+        source_account_name:    attr.source_account_name    || null,
+        collaborator_accounts:  attr.collaborator_accounts  || null,
+        ownership_type:         attr.ownership_type         || "Unknown",
+        ownership_confidence:   attr.ownership_confidence   || "Low",
+        published_at:           dates.published_at          || null,
+        published_at_estimated: dates.published_at_estimated ?? false,
+        event_dates_claimed:    dates.event_dates_claimed   || null,
+        event_date_labels:      dates.event_date_labels     || null,
+        signal_purpose:         firstIdea.signal_purpose    || null,
+        section_route:          firstIdea.section_route     || null,
+        catalog_match_status:   firstIdea.catalog_match_status || null,
+        matched_catalog_name:   firstIdea.matched_catalog_name || null,
+        source_marketing_wording: firstIdea.source_marketing_wording || null,
+      }).eq("id", signalId);
+
+      // Support both old single-object format and new multi-idea array format
+      const ideas = Array.isArray(extracted.ideas) && extracted.ideas.length > 0
+        ? extracted.ideas
+        : [extracted]; // fallback: treat the whole object as one idea
+
+      // Step 2: Fetch existing clusters once — we'll append newly created ones as we go
+      const { data: fetchedClusters } = await supabase
         .from("discovery_clusters")
         .select("id, title, primary_question, plant_or_product, problems_mentioned, tips_mentioned, audience_wording, signal_count, status")
-        .not("status", "eq", "Closed")
+        .not("status", "in", '("Closed","Blocked irrelevant")')
         .order("signal_count", { ascending: false })
-        .limit(40);
+        .limit(50);
+      const knownClusters = [...(fetchedClusters || [])];
 
-      // Step 3: Ask Claude to match or create
-      const matchPrompt = buildClusterMatchPrompt(extracted, existingClusters || []);
-      const matchResult = await callClaude(matchPrompt);
+      // Fetch owned-channel history once (shared across all ideas for this signal)
+      let sheetEntries = [];
+      try {
+        const { data: setting } = await supabase
+          .from("settings").select("value").eq("key", "calendar_script_url").single();
+        const scriptUrl = setting?.value?.url;
+        if (scriptUrl) {
+          const sheetResp = await fetch(scriptUrl, { method: "GET", redirect: "follow" });
+          const sheetData = await sheetResp.json();
+          sheetEntries = sheetData?.entries || [];
+        }
+      } catch (e) { console.warn("Sheet fetch failed:", e.message); }
 
-      let clusterId;
-      let cluster;
+      const { data: dbPublished } = await supabase
+        .from("published_videos")
+        .select("video_title, topic, plant_or_product, hook_used, angle_used, platform, publish_date, performance_summary, audience_followup_questions")
+        .order("publish_date", { ascending: false }).limit(30);
 
-      if (matchResult.match_type === "existing" && matchResult.cluster_id) {
-        // Attach to existing cluster
-        clusterId = matchResult.cluster_id;
-        const { data: existing } = await supabase
-          .from("discovery_clusters").select("*").eq("id", clusterId).single();
-        cluster = existing;
+      // Step 3: Process each extracted idea independently
+      const clusterResults = [];
 
-        // Merge new audience wording + evidence
-        const mergedWording  = [...new Set([...(cluster.audience_wording || []), ...(extracted.audience_wording || [])])].slice(0, 20);
-        const mergedProblems = [...new Set([...(cluster.problems_mentioned || []), ...(extracted.problems || [])])].slice(0, 10);
-        const mergedTips     = [...new Set([...(cluster.tips_mentioned || []), ...(extracted.tips || [])])].slice(0, 10);
-        const mergedEvidenceTypes = [...new Set([...(cluster.evidence_types || []), extracted.evidence_type].filter(Boolean))];
+      for (const idea of ideas) {
+        const route = idea.section_route || "";
 
-        await supabase.from("discovery_clusters").update({
-          signal_count:         (cluster.signal_count || 0) + 1,
-          question_count:       extracted.evidence_type === "Question" ? (cluster.question_count || 0) + 1 : cluster.question_count,
-          last_seen_at:         new Date().toISOString(),
-          audience_wording:     mergedWording,
-          problems_mentioned:   mergedProblems,
-          tips_mentioned:       mergedTips,
-          evidence_types:       mergedEvidenceTypes,
-          recent_mention_count: (cluster.recent_mention_count || 0) + 1,
-        }).eq("id", clusterId);
+        // ── COMPETITOR ACTIVITY routing ────────────────────────────────────────
+        if (route === "Competitor Activity" || idea.processing_path === "Competitor routed") {
+          const caPayload = {
+            signal_id:              signalId,
+            source_url:             data.source_url || null,
+            source_platform:        data.platform   || null,
+            source_account_name:    attr.source_account_name   || null,
+            source_account_handle:  attr.source_account_handle || null,
+            collaborator_accounts:  attr.collaborator_accounts || null,
+            ownership_type:         attr.ownership_type        || "Unknown",
+            observed_at:            dates.observed_at          || new Date().toISOString(),
+            published_at:           dates.published_at         || null,
+            published_at_estimated: dates.published_at_estimated ?? false,
+            event_dates_claimed:    dates.event_dates_claimed  || null,
+            event_date_labels:      dates.event_date_labels    || null,
+            activity_type:          idea.signal_purpose        || null,
+            signal_purpose:         idea.signal_purpose        || null,
+            ai_summary:             idea.summary               || null,
+            plant_name:             idea.plant                 || null,
+            catalog_match_status:   idea.catalog_match_status  || "Needs catalog review",
+            matched_catalog_name:   idea.matched_catalog_name  || null,
+            match_confidence:       idea.match_confidence      || null,
+            source_marketing_wording: idea.source_marketing_wording || null,
+            status:                 "New",
+          };
+          await supabase.from("competitor_activity").insert(caPayload);
 
-      } else {
-        // Create new cluster
-        const { data: newCluster, error: clusterErr } = await supabase
-          .from("discovery_clusters")
-          .insert({
-            title:               extracted.cluster_title || extracted.question || data.topic || "Untitled cluster",
-            summary:             extracted.summary,
-            plant_or_product:    extracted.plant || data.plant_or_product,
-            primary_question:    extracted.question,
-            problems_mentioned:  extracted.problems || [],
-            tips_mentioned:      extracted.tips || [],
-            audience_wording:    extracted.audience_wording || [],
-            evidence_types:      extracted.evidence_type ? [extracted.evidence_type] : [],
-            signal_count:        1,
-            question_count:      extracted.evidence_type === "Question" ? 1 : 0,
-            distinct_source_count: 1,
-            platforms:           data.platform ? [data.platform] : [],
-            first_seen_at:       new Date().toISOString(),
-            last_seen_at:        new Date().toISOString(),
-            recent_mention_count: 1,
-            novelty_status:      extracted.novelty_status || "Unclear",
-            revenue_priority_match: extracted.revenue_priority_match || "Needs check",
-            ai_confidence:       extracted.confidence || "Medium",
-            ai_reason:           "Auto-created from signal " + signalId,
-          })
-          .select().single();
-        if (clusterErr) throw new Error("Could not create cluster: " + clusterErr.message);
-        clusterId = newCluster.id;
-        cluster   = newCluster;
-      }
-
-      // Link signal to cluster (ignore duplicate link errors)
-      await supabase.from("signal_cluster_links").upsert({
-        signal_id:    signalId,
-        cluster_id:   clusterId,
-        match_reason: matchResult.match_reason || "Auto-matched",
-        is_duplicate: matchResult.is_duplicate || false,
-      }, { onConflict: "signal_id,cluster_id", ignoreDuplicates: true });
-
-      // Update signal status
-      await supabase.from("signals").update({ status: "Clustered" }).eq("id", signalId);
-
-      // Refresh cluster from DB
-      const { data: refreshed } = await supabase
-        .from("discovery_clusters").select("*").eq("id", clusterId).single();
-      cluster = refreshed;
-
-      // Step 4: Check pattern qualification
-      const qualifies = checkQualification(cluster);
-
-      if (qualifies && cluster.status === "Collecting") {
-        await supabase.from("discovery_clusters")
-          .update({ status: "Pattern detected" }).eq("id", clusterId);
-      }
-
-      // Step 5+6: If pattern qualifies and no active candidate exists, create one
-      if (qualifies) {
-        const { data: existingCandidate } = await supabase
-          .from("content_review_candidates")
-          .select("id, status")
-          .eq("cluster_id", clusterId)
-          .not("status", "in", '("Dismissed","Already covered")')
-          .single();
-
-        if (!existingCandidate) {
-          // Fetch owned-channel history for repetition check
-          let sheetEntries = [];
-          try {
-            const { data: setting } = await supabase
-              .from("settings").select("value").eq("key", "calendar_script_url").single();
-            const scriptUrl = setting?.value?.url;
-            if (scriptUrl) {
-              const sheetResp = await fetch(scriptUrl, { method: "GET", redirect: "follow" });
-              const sheetData = await sheetResp.json();
-              sheetEntries = sheetData?.entries || [];
-            }
-          } catch (e) { console.warn("Sheet fetch failed:", e.message); }
-
-          const { data: dbPublished } = await supabase
-            .from("published_videos")
-            .select("video_title, topic, plant_or_product, hook_used, angle_used, platform, publish_date, performance_summary, audience_followup_questions")
-            .order("publish_date", { ascending: false }).limit(30);
-
-          const candidatePrompt = buildCandidatePrompt(cluster, sheetEntries, dbPublished || [], watchlistText);
-          const candidateResult = await callClaude(candidatePrompt);
-
-          await supabase.from("content_review_candidates").insert({
-            cluster_id:               clusterId,
-            title:                    candidateResult.title || cluster.title,
-            what_people_are_saying:   candidateResult.what_people_are_saying,
-            representative_wording:   candidateResult.representative_wording || [],
-            signal_count:             cluster.signal_count,
-            question_count:           cluster.question_count,
-            distinct_source_count:    cluster.distinct_source_count,
-            platforms:                cluster.platforms,
-            first_seen_at:            cluster.first_seen_at,
-            last_seen_at:             cluster.last_seen_at,
-            pattern_growth:           candidateResult.pattern_growth,
-            evidence_urls:            candidateResult.evidence_urls || [],
-            what_appears_new:         candidateResult.what_appears_new,
-            claims_needing_verification: candidateResult.claims_needing_verification,
-            contradictory_advice:     candidateResult.contradictory_advice,
-            closest_published_title:  candidateResult.closest_published_title,
-            closest_published_urls:   candidateResult.closest_published_urls || [],
-            closest_published_date:   candidateResult.closest_published_date || null,
-            days_since_similar:       candidateResult.days_since_similar || null,
-            previous_performance:     candidateResult.previous_performance,
-            audience_followup_demand: candidateResult.audience_followup_demand,
-            repetition_risk:          candidateResult.repetition_risk || "Needs reviewer check",
-            freshness_reason:         candidateResult.freshness_reason,
-            same_topic:               candidateResult.same_topic ?? null,
-            same_plant:               candidateResult.same_plant ?? null,
-            same_question:            candidateResult.same_question ?? null,
-            same_advice:              candidateResult.same_advice ?? null,
-            same_hook_or_angle:       candidateResult.same_hook_or_angle ?? null,
-            possible_directions:      candidateResult.possible_directions || [],
-            ai_confidence:            candidateResult.ai_confidence || "Medium",
-            surfaced_reason:          qualifies.reason,
-            // Force "Needs research" when qualification was triggered by a new claim
-            status: (qualifies.reason && qualifies.reason.includes("needs verification"))
-              ? "Needs research"
-              : (candidateResult.candidate_status || "Ready for review"),
+          clusterResults.push({
+            processing_path: "Competitor routed",
+            cluster_id:      null,
+            cluster_title:   null,
+            match_type:      "competitor_activity",
+            qualifies:       false,
+            discovery_reason: "Routed to Competitor Activity",
           });
 
-          await supabase.from("discovery_clusters")
-            .update({ status: "Content review ready" }).eq("id", clusterId);
-        } else {
-          // Update existing candidate counts
-          await supabase.from("content_review_candidates").update({
-            signal_count:   cluster.signal_count,
-            question_count: cluster.question_count,
-            last_seen_at:   cluster.last_seen_at,
-          }).eq("id", existingCandidate.id);
+          // If the plant is also not in catalog, fall through to Market Watch too
+          if (idea.catalog_match_status !== "Catalog match" && idea.catalog_match_status !== "Catalog family match" && idea.plant) {
+            await upsertMarketWatchPlant(supabase, idea, signalId, data, attr);
+          }
+          continue;
         }
+
+        // ── MARKET WATCH routing ───────────────────────────────────────────────
+        if (route === "Market Watch" || idea.processing_path === "Market Watch") {
+          await upsertMarketWatchPlant(supabase, idea, signalId, data, attr);
+          clusterResults.push({
+            processing_path: "Market Watch",
+            cluster_id:      null,
+            cluster_title:   null,
+            match_type:      "market_watch",
+            qualifies:       false,
+            discovery_reason: "Routed to Market Watch",
+          });
+          continue;
+        }
+
+        // ── NEEDS CATALOG REVIEW ───────────────────────────────────────────────
+        if (route === "Needs Catalog Review") {
+          // Flag signal for human review; don't cluster
+          await supabase.from("signals").update({ status: "Needs cleanup" }).eq("id", signalId);
+          clusterResults.push({
+            processing_path: "Needs review",
+            cluster_id:      null,
+            cluster_title:   null,
+            match_type:      "needs_catalog_review",
+            qualifies:       false,
+            discovery_reason: "Catalog match uncertain — needs human review",
+          });
+          continue;
+        }
+
+        // Skip ideas that are Mention only or Noise — no discovery cluster needed
+        if (idea.processing_path === "Mention only" || idea.processing_path === "Noise") {
+          clusterResults.push({
+            processing_path:  idea.processing_path,
+            cluster_id:       null,
+            cluster_title:    null,
+            match_type:       "skipped",
+            qualifies:        false,
+            discovery_reason: idea.discovery_reason || null,
+          });
+          continue;
+        }
+
+        // ── CATALOG DISCOVERY (default) ────────────────────────────────────────
+        // Step 3a: Match idea against known clusters
+        const matchPrompt = buildClusterMatchPrompt(idea, knownClusters);
+        const matchResult = await callClaude(matchPrompt);
+
+        let clusterId;
+        let cluster;
+
+        if (matchResult.match_type === "existing" && matchResult.cluster_id) {
+          // Attach to existing cluster
+          clusterId = matchResult.cluster_id;
+          const { data: existing } = await supabase
+            .from("discovery_clusters").select("*").eq("id", clusterId).single();
+          cluster = existing;
+
+          // Merge new audience wording + evidence
+          const mergedWording      = [...new Set([...(cluster.audience_wording || []), ...(idea.audience_wording || [])])].slice(0, 20);
+          const mergedProblems     = [...new Set([...(cluster.problems_mentioned || []), ...(idea.problems || [])])].slice(0, 10);
+          const mergedTips         = [...new Set([...(cluster.tips_mentioned || []), ...(idea.tips || [])])].slice(0, 10);
+          const mergedEvidenceTypes = [...new Set([...(cluster.evidence_types || []), idea.evidence_type].filter(Boolean))];
+
+          const now = new Date().toISOString();
+          const newSignalCount = (cluster.signal_count || 0) + 1;
+          const newSinceReview = (cluster.new_signals_since_review || 0) + 1;
+
+          // Build a short update summary describing what changed
+          const updateParts = [`+1 signal (total: ${newSignalCount})`];
+          if (idea.evidence_type === "Question") updateParts.push("new question");
+          if ((idea.audience_wording || []).some(w => !(cluster.audience_wording || []).includes(w))) updateParts.push("new audience wording");
+          if ((idea.problems || []).some(p => !(cluster.problems_mentioned || []).includes(p))) updateParts.push("new problem noted");
+          if ((idea.tips || []).some(t => !(cluster.tips_mentioned || []).includes(t))) updateParts.push("new tip noted");
+          const aiUpdateSummary = updateParts.join(", ");
+
+          await supabase.from("discovery_clusters").update({
+            signal_count:            newSignalCount,
+            question_count:          idea.evidence_type === "Question" ? (cluster.question_count || 0) + 1 : cluster.question_count,
+            last_seen_at:            now,
+            audience_wording:        mergedWording,
+            problems_mentioned:      mergedProblems,
+            tips_mentioned:          mergedTips,
+            evidence_types:          mergedEvidenceTypes,
+            recent_mention_count:    (cluster.recent_mention_count || 0) + 1,
+            last_ai_updated_at:      now,
+            new_signals_since_review: newSinceReview,
+            ai_update_summary:       aiUpdateSummary,
+            prompt_version:          PROMPT_VERSION,
+          }).eq("id", clusterId);
+
+          // Audit log — record the signal addition
+          await supabase.from("cluster_audit_log").insert({
+            cluster_id:    clusterId,
+            field_changed: "signal_count",
+            previous_value: String(cluster.signal_count || 0),
+            new_value:      String(newSignalCount),
+            reason:         aiUpdateSummary,
+            trigger:        "new_signal",
+            ai_model:       CLAUDE_MODEL,
+            prompt_version: PROMPT_VERSION,
+            is_automatic:   true,
+          });
+
+        } else {
+          // Create new cluster for this idea
+          const clusterNow = new Date().toISOString();
+          const { data: newCluster, error: clusterErr } = await supabase
+            .from("discovery_clusters")
+            .insert({
+              title:                  idea.normalized_cluster_title || idea.cluster_title || idea.question || data.topic || "Untitled cluster",
+              summary:                idea.core_issue || idea.summary,
+              plant_or_product:       idea.plant || data.plant_or_product,
+              primary_question:       idea.question,
+              problems_mentioned:     idea.problems || [],
+              tips_mentioned:         idea.tips || [],
+              audience_wording:       idea.audience_wording || [],
+              evidence_types:         idea.evidence_type ? [idea.evidence_type] : [],
+              signal_count:           1,
+              question_count:         idea.evidence_type === "Question" ? 1 : 0,
+              distinct_source_count:  1,
+              platforms:              data.platform ? [data.platform] : [],
+              first_seen_at:          clusterNow,
+              last_seen_at:           clusterNow,
+              recent_mention_count:   1,
+              novelty_status:         idea.novelty_status || "Unclear",
+              revenue_priority_match: idea.revenue_priority_match || "Needs check",
+              ai_confidence:          idea.confidence || "Medium",
+              ai_reason:              [
+                "Auto-created from signal " + signalId,
+                idea.relevant_conditions?.length ? "Conditions: " + idea.relevant_conditions.join(", ") : null,
+                idea.location_materiality && idea.location_materiality !== "Not provided" ? "Location: " + idea.location_materiality : null,
+              ].filter(Boolean).join(" | "),
+              // v12 maintenance fields
+              maintenance_status:      "Collecting",
+              last_ai_updated_at:      clusterNow,
+              new_signals_since_review: 1,
+              ai_update_summary:       "Cluster created from signal " + signalId,
+              prompt_version:          PROMPT_VERSION,
+            })
+            .select().single();
+          if (clusterErr) throw new Error("Could not create cluster: " + clusterErr.message);
+          clusterId = newCluster.id;
+          cluster   = newCluster;
+
+          // Audit log — record cluster creation
+          await supabase.from("cluster_audit_log").insert({
+            cluster_id:    clusterId,
+            field_changed: "status",
+            previous_value: null,
+            new_value:      "Collecting",
+            reason:         "New cluster auto-created from signal " + signalId,
+            trigger:        "new_signal",
+            ai_model:       CLAUDE_MODEL,
+            prompt_version: PROMPT_VERSION,
+            is_automatic:   true,
+          });
+
+          // Add newly created cluster to the known list so later ideas can match against it
+          knownClusters.push({
+            id: newCluster.id, title: newCluster.title,
+            primary_question: newCluster.primary_question,
+            plant_or_product: newCluster.plant_or_product,
+            problems_mentioned: newCluster.problems_mentioned,
+            tips_mentioned: newCluster.tips_mentioned,
+            audience_wording: newCluster.audience_wording,
+            signal_count: 1, status: newCluster.status,
+          });
+        }
+
+        // Step 3b: Link this signal to this cluster (one idea = one link)
+        await supabase.from("signal_cluster_links").upsert({
+          signal_id:    signalId,
+          cluster_id:   clusterId,
+          match_reason: matchResult.match_reason || "Auto-matched",
+          is_duplicate: matchResult.is_duplicate || false,
+        }, { onConflict: "signal_id,cluster_id", ignoreDuplicates: true });
+
+        // Step 3c: Refresh cluster and check qualification
+        const { data: refreshed } = await supabase
+          .from("discovery_clusters").select("*").eq("id", clusterId).single();
+        cluster = refreshed;
+
+        const qualifies = checkQualification(cluster);
+
+        if (qualifies && cluster.status === "Collecting") {
+          await supabase.from("discovery_clusters")
+            .update({ status: "Pattern detected", maintenance_status: "Pattern detected" }).eq("id", clusterId);
+          await supabase.from("cluster_audit_log").insert({
+            cluster_id:     clusterId,
+            field_changed:  "status",
+            previous_value: "Collecting",
+            new_value:      "Pattern detected",
+            reason:         qualifies.reason,
+            trigger:        "new_signal",
+            ai_model:       CLAUDE_MODEL,
+            prompt_version: PROMPT_VERSION,
+            is_automatic:   true,
+          });
+        }
+
+        // Step 3d: Create Content Review candidate if qualifies and none exists
+        if (qualifies) {
+          const { data: existingCandidate } = await supabase
+            .from("content_review_candidates")
+            .select("id, status")
+            .eq("cluster_id", clusterId)
+            .not("status", "in", '("Dismissed","Already covered")')
+            .maybeSingle();
+
+          if (!existingCandidate) {
+            const candidatePrompt = buildCandidatePrompt(cluster, sheetEntries, dbPublished || [], watchlistText);
+            const candidateResult = await callClaude(candidatePrompt);
+
+            await supabase.from("content_review_candidates").insert({
+              cluster_id:               clusterId,
+              title:                    candidateResult.title || cluster.title,
+              what_people_are_saying:   candidateResult.what_people_are_saying,
+              representative_wording:   candidateResult.representative_wording || [],
+              signal_count:             cluster.signal_count,
+              question_count:           cluster.question_count,
+              distinct_source_count:    cluster.distinct_source_count,
+              platforms:                cluster.platforms,
+              first_seen_at:            cluster.first_seen_at,
+              last_seen_at:             cluster.last_seen_at,
+              pattern_growth:           candidateResult.pattern_growth,
+              evidence_urls:            candidateResult.evidence_urls || [],
+              what_appears_new:         candidateResult.what_appears_new,
+              claims_needing_verification: candidateResult.claims_needing_verification,
+              contradictory_advice:     candidateResult.contradictory_advice,
+              closest_published_title:  candidateResult.closest_published_title,
+              closest_published_urls:   candidateResult.closest_published_urls || [],
+              closest_published_date:   candidateResult.closest_published_date || null,
+              days_since_similar:       candidateResult.days_since_similar || null,
+              previous_performance:     candidateResult.previous_performance,
+              audience_followup_demand: candidateResult.audience_followup_demand,
+              repetition_risk:          candidateResult.repetition_risk || "Needs reviewer check",
+              freshness_reason:         candidateResult.freshness_reason,
+              same_topic:               candidateResult.same_topic ?? null,
+              same_plant:               candidateResult.same_plant ?? null,
+              same_question:            candidateResult.same_question ?? null,
+              same_advice:              candidateResult.same_advice ?? null,
+              same_hook_or_angle:       candidateResult.same_hook_or_angle ?? null,
+              possible_directions:      candidateResult.possible_directions || [],
+              ai_confidence:            candidateResult.ai_confidence || "Medium",
+              surfaced_reason:          qualifies.reason,
+              // Force "Needs research" when qualification was triggered by a new claim
+              status: (qualifies.reason && qualifies.reason.includes("needs verification"))
+                ? "Needs research"
+                : (candidateResult.candidate_status || "Ready for review"),
+            });
+
+            await supabase.from("discovery_clusters")
+              .update({ status: "Content review ready", maintenance_status: "Pattern detected" }).eq("id", clusterId);
+            await supabase.from("cluster_audit_log").insert({
+              cluster_id:     clusterId,
+              field_changed:  "status",
+              previous_value: cluster.status,
+              new_value:      "Content review ready",
+              reason:         qualifies.reason,
+              trigger:        "new_signal",
+              ai_model:       CLAUDE_MODEL,
+              prompt_version: PROMPT_VERSION,
+              is_automatic:   true,
+            });
+          } else {
+            // Update existing candidate counts
+            await supabase.from("content_review_candidates").update({
+              signal_count:   cluster.signal_count,
+              question_count: cluster.question_count,
+              last_seen_at:   cluster.last_seen_at,
+            }).eq("id", existingCandidate.id);
+          }
+        }
+
+        clusterResults.push({
+          processing_path:      idea.processing_path || "Discovery eligible",
+          cluster_id:           clusterId,
+          cluster_title:        cluster.title,
+          match_type:           matchResult.match_type,
+          signal_count:         cluster.signal_count,
+          qualifies:            !!qualifies,
+          qualification_reason: qualifies?.reason || null,
+          relevant_conditions:  idea.relevant_conditions || [],
+        });
+      } // end ideas loop
+
+      // Mark signal status:
+      // - Any cluster link → Clustered
+      // - All ideas Mention only → "Mention only" (processed, tracked, not clustered)
+      // - All ideas competitor/market routed → "Watch" (filed in other tables)
+      // - All ideas Noise → already marked Noise above (shouldn't reach here)
+      const hasClusterLink  = clusterResults.some(r => r.cluster_id !== null);
+      const allMentionOnly  = clusterResults.every(r => r.processing_path === "Mention only");
+      const allRouted       = clusterResults.every(r =>
+        ["Competitor routed", "Market Watch", "needs_catalog_review"].includes(r.match_type));
+      if (hasClusterLink) {
+        await supabase.from("signals").update({ status: "Clustered" }).eq("id", signalId);
+      } else if (allMentionOnly) {
+        await supabase.from("signals").update({ status: "Mention only" }).eq("id", signalId);
+      } else if (allRouted) {
+        await supabase.from("signals").update({ status: "Watch" }).eq("id", signalId);
       }
 
+      // Return summary of all clusters touched
+      const primaryResult = clusterResults[0] || {};
       result = {
-        cluster_id:    clusterId,
-        cluster_title: cluster.title,
-        match_type:    matchResult.match_type,
-        signal_count:  cluster.signal_count,
-        qualifies:     !!qualifies,
-        qualification_reason: qualifies?.reason || null,
+        ...primaryResult,
+        ideas_extracted: ideas.length,
+        clusters:        clusterResults,
         extracted,
       };
 
@@ -354,6 +584,80 @@ exports.handler = async (event) => {
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
   }
 };
+
+
+// ── MARKET WATCH UPSERT HELPER ────────────────────────────────────────────────
+// Creates or updates a market_watch_plants row and adds a signal link.
+async function upsertMarketWatchPlant(supabase, idea, signalId, signal, attr) {
+  const plantName = idea.plant;
+  if (!plantName) return;
+
+  // Try to find existing plant row
+  const { data: existing } = await supabase
+    .from("market_watch_plants")
+    .select("id, signal_count, question_count, purchase_intent_count, distinct_source_count, platforms, competitors_featuring, audience_wording")
+    .eq("plant_name", plantName)
+    .maybeSingle();
+
+  if (existing) {
+    const mergedPlatforms    = [...new Set([...(existing.platforms || []), signal.platform].filter(Boolean))];
+    const mergedWording      = [...new Set([...(existing.audience_wording || []), ...(idea.audience_wording || [])])].slice(0, 20);
+    const mergedCompetitors  = [...new Set([...(existing.competitors_featuring || []),
+      ...(attr.source_account_handle ? [attr.source_account_handle] : [])].filter(Boolean))];
+
+    await supabase.from("market_watch_plants").update({
+      signal_count:          (existing.signal_count || 0) + 1,
+      question_count:        idea.evidence_type === "Question" ? (existing.question_count || 0) + 1 : existing.question_count,
+      purchase_intent_count: idea.evidence_type === "Purchase intent" ? (existing.purchase_intent_count || 0) + 1 : existing.purchase_intent_count,
+      distinct_source_count: (existing.distinct_source_count || 0) + 1,
+      platforms:             mergedPlatforms,
+      competitors_featuring: mergedCompetitors,
+      audience_wording:      mergedWording,
+      last_seen_at:          new Date().toISOString(),
+      recent_mention_count:  (existing.recent_mention_count || 0) + 1,
+    }).eq("id", existing.id);
+
+    await supabase.from("market_watch_signal_links").upsert({
+      plant_id:      existing.id,
+      signal_id:     signalId,
+      source_url:    signal.source_url || null,
+      source_handle: attr.source_account_handle || null,
+      signal_purpose: idea.signal_purpose || null,
+    }, { onConflict: "plant_id,signal_id", ignoreDuplicates: true });
+
+  } else {
+    const { data: newPlant } = await supabase
+      .from("market_watch_plants")
+      .insert({
+        plant_name:            plantName,
+        signal_count:          1,
+        question_count:        idea.evidence_type === "Question" ? 1 : 0,
+        purchase_intent_count: idea.evidence_type === "Purchase intent" ? 1 : 0,
+        distinct_source_count: 1,
+        platforms:             signal.platform ? [signal.platform] : [],
+        competitors_featuring: attr.source_account_handle ? [attr.source_account_handle] : [],
+        audience_wording:      idea.audience_wording || [],
+        closest_catalog_alternative: idea.matched_catalog_name || null,
+        potential_catalog_opportunity: "No",
+        verification_status:   "Unverified",
+        reviewer_status:       "Unreviewed",
+        first_seen_at:         new Date().toISOString(),
+        last_seen_at:          new Date().toISOString(),
+        recent_mention_count:  1,
+      })
+      .select().single();
+
+    if (newPlant) {
+      await supabase.from("market_watch_signal_links").insert({
+        plant_id:      newPlant.id,
+        signal_id:     signalId,
+        source_url:    signal.source_url || null,
+        source_handle: attr.source_account_handle || null,
+        signal_purpose: idea.signal_purpose || null,
+      });
+    }
+  }
+}
 
 
 // ── SIGNAL PROMPT ─────────────────────────────────────────────────────────────
@@ -576,42 +880,158 @@ async function callClaude(prompt, maxTokens = 1024) {
 
 
 // ── EXTRACTION PROMPT ─────────────────────────────────────────────────────────
-// Step 1: Extract structured meaning from a raw signal
+// Full extraction: source attribution → dates → ideas → routing
 function buildExtractionPrompt(signal) {
   return `You are analyzing a social listening signal for Succulents Box, a succulent plant subscription company.
 
 RAW SIGNAL:
-Platform: ${signal.platform || "unknown"}
+Platform:   ${signal.platform || "unknown"}
 Source URL: ${signal.source_url || "not provided"}
-Content: ${signal.raw_input || signal.caption_summary || signal.topic || "not provided"}
+Content:    ${signal.raw_input || signal.caption_summary || signal.topic || "not provided"}
 
-First decide if this signal is relevant to Succulents Box — a succulent and cactus plant subscription company.
+═══════════════════════════════════════════════════
+STEP 1 — SOURCE ATTRIBUTION
+═══════════════════════════════════════════════════
+Identify who published this content BEFORE reading its meaning.
 
-Relevant = about succulents, cacti, houseplants, plant care, propagation, watering, soil, pots, plant products, or anything a plant hobbyist would care about.
-NOT relevant = food, fashion, travel, celebrities, unrelated viral trends, non-plant topics that happen to use a plant hashtag by accident.
+Succulents Box official handles: @succulentsbox (Instagram, TikTok, Facebook).
+Any other account is NOT owned content, even if it tags or collaborates with Succulents Box.
 
-If NOT relevant, return:
-{ "relevant": false, "noise_reason": "one sentence why this is irrelevant" }
+ownership_type values:
+  Owned content       — published by an official Succulents Box account
+  Competitor content  — plant seller, nursery, or direct competitor
+  Community content   — plant hobbyist, grower community, non-commercial creator
+  Customer content    — a customer of Succulents Box
+  Third-party media   — blogger, media outlet, aggregator
+  Unknown             — cannot be determined from available information
 
-If relevant, extract what the audience is actually saying. Preserve their exact wording where possible.
-Do NOT invent information. Only extract what is clearly present.
+Rules:
+- Never infer ownership from the monitoring account, scraper URL, or dashboard.
+- Collaborator status does not make content "owned" unless an official SB account is the publisher.
+- If account cannot be identified, use Unknown.
 
-Evidence types: Question | Problem report | Tip | Claim | Personal experience | Disagreement | Follow-up request | General mention
+═══════════════════════════════════════════════════
+STEP 2 — DATE EXTRACTION
+═══════════════════════════════════════════════════
+Separate these three date types:
+
+  published_at        — platform publication timestamp (ISO 8601). If only relative ("3 hours ago"), estimate from observed_at and mark estimated: true.
+  observed_at         — when this system collected the signal (use ${new Date().toISOString()}).
+  event_dates_claimed — dates mentioned INSIDE the caption, image, or transcript (entry deadlines, sale dates, event dates). These are NOT publication dates.
+
+Never use an event date as the publication date.
+
+═══════════════════════════════════════════════════
+STEP 3 — RELEVANCE CHECK
+═══════════════════════════════════════════════════
+Is this signal relevant to the plant/succulent market?
+Relevant = succulents, cacti, houseplants, plant care, propagation, watering, soil, pots, plant products, or anything a plant hobbyist would care about.
+NOT relevant = unrelated food, fashion, travel, celebrities, non-plant viral trends.
+
+If NOT relevant:
+{ "relevant": false, "noise_reason": "one sentence why" }
+
+═══════════════════════════════════════════════════
+STEP 4 — EXTRACT IDEAS + ROUTING
+═══════════════════════════════════════════════════
+If relevant, extract EVERY distinct idea. Most signals have 1. A post with two plants or two issues produces 2 ideas.
+
+For each idea:
+
+A) Context normalization
+  core_issue          — the reusable question, problem, tip, or claim (stripped of incidental details)
+  relevant_conditions — conditions that materially change the care answer (frost zone, humidity, indoor/outdoor, season)
+  incidental_context  — details that describe the source but don't define the issue (city, personal story, promo language)
+  Location rule: keep location only when it changes the meaning. Never put a country/city in normalized_cluster_title unless the cluster is genuinely about that region.
+
+B) Plant and catalog matching
+  plant               — plant or product name extracted from the signal
+  catalog_match_status:
+    Catalog match        — plant clearly matches an SB product (by scientific name, common name, cultivar, product title, or known alias)
+    Catalog family match — matches a genus or family SB carries but specific variety unclear
+    Not in catalog       — plant is confirmed outside current SB catalog
+    Needs catalog review — name is ambiguous or uncertain
+    No plant identified  — no plant mentioned
+
+C) Signal purpose
+  signal_purpose — what the source is doing:
+    Audience question | Problem report | Care tip | Care claim | Comparison | Disagreement | Follow-up request |
+    Product showcase | Giveaway or contest | Sale or promotion | Product launch | Availability announcement |
+    Collaboration | General sentiment | Lifestyle post | Other
+
+  IMPORTANT: Marketing copy from the source account is NOT audience wording.
+  audience_wording = public comments, viewer questions, community phrases.
+  source_marketing_wording = promotional captions, contest instructions, seller claims.
+
+D) Section routing (assign based on ownership + purpose + catalog status)
+  section_route:
+    Catalog Discovery    — catalog match AND (question | problem | tip | claim | comparison | disagreement | purchase intent)
+    Competitor Activity  — competitor/third-party AND (giveaway | sale | launch | showcase | collaboration | promotion)
+    Market Watch         — not in catalog AND relevant audience interest or competitor feature
+    Mention Tracking     — catalog match BUT only showcase/sentiment/lifestyle with no audience issue
+    Needs Catalog Review — catalog match uncertain
+    Noise                — unrelated to plants/market
+
+  A single post can produce ideas with different routes. Route each idea independently.
+  Competitor Activity and Market Watch can both apply to the same idea (store the idea once, link to both).
+
+E) Processing path (for Discovery pipeline)
+  processing_path:
+    Discovery eligible — catalog match + discovery-worthy content → creates/updates a cluster
+    Mention only       — catalog match + mention only → updates mention tracking only
+    Competitor routed  — goes to competitor_activity table, not Discovery
+    Market Watch       — goes to market_watch_plants table, not Discovery
+    Noise              — discard
+    Needs review       — hold for human
+
+Evidence types (for Discovery eligible): Question | Problem report | Tip | Claim | Personal experience | Disagreement | Follow-up request | Purchase intent | General mention
 
 Return ONLY valid JSON:
 {
   "relevant": true,
-  "cluster_title": "plain-language title summarizing what this signal is about, using audience wording when possible",
-  "summary": "1-2 sentence plain description of the pattern",
-  "plant": "plant or product name, null if not clear",
-  "question": "the exact question being asked, or null if not a question",
-  "problems": ["problem or symptom mentioned"],
-  "tips": ["any care tip or recommendation"],
-  "audience_wording": ["exact or near-exact phrases from the audience that should be preserved"],
-  "evidence_type": "the single most fitting evidence type from the list above",
-  "novelty_status": "Known recurring topic | New audience wording | New question about a known topic | New tip or claim | New contradiction | New plant connected to a known problem | Unclear",
-  "revenue_priority_match": "Yes | No | Needs check",
-  "confidence": "High | Medium | Low"
+  "attribution": {
+    "source_account_handle": "@handle or null",
+    "source_account_name": "Display name or null",
+    "collaborator_accounts": ["@handle"],
+    "ownership_type": "Owned content | Competitor content | Community content | Customer content | Third-party media | Unknown",
+    "ownership_confidence": "High | Medium | Low"
+  },
+  "dates": {
+    "published_at": "ISO 8601 or null",
+    "published_at_estimated": false,
+    "observed_at": "${new Date().toISOString()}",
+    "event_dates_claimed": ["July 10", "July 11"],
+    "event_date_labels": ["Last day to enter", "Winner drawn live"],
+    "date_confidence": "High | Medium | Low"
+  },
+  "ideas": [
+    {
+      "section_route": "Catalog Discovery | Competitor Activity | Market Watch | Mention Tracking | Needs Catalog Review | Noise",
+      "processing_path": "Discovery eligible | Mention only | Competitor routed | Market Watch | Noise | Needs review",
+      "signal_purpose": "one value from the list above",
+      "discovery_reason": "why discovery-eligible or why not, or null",
+      "normalized_cluster_title": "reusable issue in audience language, no incidental location",
+      "core_issue": "the reusable question, problem, tip, or claim",
+      "relevant_conditions": ["conditions that materially affect the answer"],
+      "incidental_context": ["details kept as evidence only"],
+      "summary": "1-2 sentence description",
+      "plant": "plant or product name, or null",
+      "catalog_match_status": "Catalog match | Catalog family match | Not in catalog | Needs catalog review | No plant identified",
+      "matched_catalog_name": "matched SB product name or null",
+      "match_confidence": "High | Medium | Low | null",
+      "question": "exact question if present, or null",
+      "problems": ["problem or symptom"],
+      "tips": ["care tip or recommendation"],
+      "audience_wording": ["exact phrases from the audience, NOT from the source account's promotional copy"],
+      "source_marketing_wording": ["promotional language from the source account"],
+      "evidence_type": "single best-fit evidence type, or null",
+      "novelty_status": "Known recurring topic | New audience wording | New question about a known topic | New tip or claim | New contradiction | New plant connected to a known problem | Unclear",
+      "revenue_priority_match": "Yes | No | Needs check",
+      "relevant_conditions": ["conditions that materially affect the care answer"],
+      "location_materiality": "Material | Incidental | Unclear | Not provided",
+      "confidence": "High | Medium | Low"
+    }
+  ]
 }`;
 }
 
