@@ -181,6 +181,35 @@ tbody tr:hover { background: #fafffe; }
 .board-field p { font-size: 13px; color: #333; }
 .board-card-actions { padding: 12px 20px 16px; display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid #f5f5f5; }
 
+/* ── TODAY BOARD ── */
+.today-summary-panel {
+  background: linear-gradient(135deg, #1a2e1a 0%, #2d5a27 100%);
+  border-radius: 12px; padding: 18px 24px; margin-bottom: 24px; color: white;
+}
+.today-summary-label { font-size: 11px; font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px; }
+.today-summary-text { margin-top: 6px; font-size: 14px; line-height: 1.5; opacity: 0.9; }
+.today-summary-stats { display: flex; gap: 20px; margin-top: 12px; flex-wrap: wrap; }
+.today-summary-stats span { font-size: 12px; opacity: 0.75; background: rgba(255,255,255,0.1); padding: 3px 10px; border-radius: 20px; }
+.today-section { margin-bottom: 28px; }
+.today-section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #f0f0f0; }
+.today-section-icon { font-size: 18px; }
+.today-section-header h3 { font-size: 15px; font-weight: 700; color: #1a2e1a; flex: 1; }
+.today-section-count { background: #1a2e1a; color: white; font-size: 11px; font-weight: 700; border-radius: 10px; padding: 2px 8px; }
+.today-section-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px,1fr)); gap: 12px; }
+.today-item {
+  background: white; border-radius: 12px; padding: 16px 18px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07); border-left: 4px solid #e0e0e0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.today-item:has(.badge-new) { border-left-color: #4CAF50; }
+.today-item-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.today-item-title { font-size: 14px; font-weight: 600; color: #1a2e1a; margin-top: 4px; line-height: 1.3; }
+.today-item-summary { font-size: 13px; color: #444; line-height: 1.4; }
+.today-item-why { font-size: 12px; color: #666; }
+.today-item-evidence { font-size: 12px; color: #888; }
+.today-item-action { font-size: 12px; color: #2d5a27; font-weight: 500; }
+.today-item-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; padding-top: 8px; border-top: 1px solid #f5f5f5; }
+
 /* ── FILTERS ── */
 .filters { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
 .filter-select {
@@ -267,8 +296,8 @@ tbody tr:hover { background: #fafffe; }
         <span class="nav-badge" id="badge-inbox">0</span>
       </div>
       <div class="nav-item" data-view="daily-board" onclick="showView('daily-board',this)">
-        <span class="icon">⭐</span> Daily Board
-        <span class="nav-badge" id="badge-board">0</span>
+        <span class="icon">📅</span> Today
+        <span class="nav-badge" id="badge-board"></span>
       </div>
       <div class="nav-item" data-view="discovery" onclick="showView('discovery',this)">
         <span class="icon">🔍</span> Discovery
@@ -346,8 +375,8 @@ tbody tr:hover { background: #fafffe; }
       </div>
 
       <div class="section-header">
-        <h2>Today's Top Opportunities</h2>
-        <button class="btn btn-secondary btn-sm" onclick="showView('daily-board', document.querySelector('[data-view=daily-board]'))">See All →</button>
+        <h2>Today's Decisions</h2>
+        <button class="btn btn-secondary btn-sm" onclick="showView('daily-board', document.querySelector('[data-view=daily-board]'))">Open Today →</button>
       </div>
       <div class="table-wrap" style="margin-bottom:24px">
         <table>
@@ -413,13 +442,26 @@ tbody tr:hover { background: #fafffe; }
       </div>
     </div>
 
-    <!-- ── DAILY BOARD ── -->
+    <!-- ── TODAY BOARD ── -->
     <div id="view-daily-board" class="view">
-      <div class="view-header">
-        <h1>Daily Review Board</h1>
-        <p>Top opportunities awaiting your decision</p>
+      <div class="view-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div>
+          <h1>Today</h1>
+          <p>Decisions that need you today — auto-populated by AI from Discovery clusters</p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+          <select class="filter-select" id="briefing-type-select" style="font-size:13px">
+            <option value="on-demand">On-demand</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <button class="btn btn-primary" id="generate-briefing-btn"
+            onclick="generateBriefing(document.getElementById('briefing-type-select').value)">
+            ✨ Generate Briefing
+          </button>
+        </div>
       </div>
-      <div class="board-grid" id="board-cards">
+      <div id="today-view-body">
         <div class="loading">Loading…</div>
       </div>
     </div>
@@ -753,6 +795,7 @@ tbody tr:hover { background: #fafffe; }
           <option>Collecting</option><option>Pattern detected</option><option>Content review ready</option><option>Keep watching</option>
         </select>
         <button class="btn btn-secondary" onclick="loadDiscovery()">↺ Refresh</button>
+        <button class="btn btn-primary" onclick="generateBriefing('on-demand')" title="Generate AI briefing and populate Today board">✨ AI Briefing</button>
       </div>
 
       <!-- Cluster cards -->
@@ -1190,7 +1233,7 @@ function showView(viewId, el) {
   const loaders = {
     'command-center': loadCommandCenter,
     'inbox':          loadInbox,
-    'daily-board':    loadDailyBoard,
+    'daily-board':    loadToday,
     'briefs':         loadBriefs,
     'published':      loadPublished,
     'learning':       loadLearning,
@@ -1303,55 +1346,175 @@ async function loadInbox() {
 }
 
 // ── DAILY BOARD ───────────────────────────────────────────────────────
-async function loadDailyBoard() {
-  const { data } = await sb.from('opportunities').select('*')
-    .is('reviewer_decision', null).order('total_ai_score', {ascending:false}).limit(10);
-  const container = document.getElementById('board-cards');
-  if (!data?.length) {
-    container.innerHTML = '<div class="empty"><div class="icon">⭐</div><p>No opportunities pending review. Add signals to the Inbox and promote them.</p></div>';
+// ── TODAY BOARD ───────────────────────────────────────────────────────────────
+async function loadToday() {
+  const today = new Date().toISOString().slice(0, 10);
+  const container = document.getElementById('today-view-body');
+  container.innerHTML = '<div class="loading">Loading…</div>';
+
+  // Latest briefing for summary strip
+  const { data: briefings } = await sb.from('discovery_briefings')
+    .select('id,briefing_type,summary,signal_count,cluster_count,cleanup_counts,generated_at')
+    .order('generated_at', { ascending: false }).limit(1);
+  const latestBriefing = briefings?.[0] || null;
+
+  // Today's unresolved board items
+  const { data: items } = await sb.from('today_board_items')
+    .select('*').eq('board_date', today)
+    .not('status', 'in', '("Resolved","Cleanup confirmed","Already covered")')
+    .order('rank', { ascending: true });
+  const todayItems = items || [];
+
+  // Badge
+  const badge = document.getElementById('badge-board');
+  badge.textContent = todayItems.length || '';
+  badge.style.display = todayItems.length ? '' : 'none';
+
+  // Summary strip
+  let summaryHtml = '';
+  if (latestBriefing) {
+    const genDate = new Date(latestBriefing.generated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const cc = latestBriefing.cleanup_counts || {};
+    const cleanupTotal = (cc.dismiss||0) + (cc.reroute||0) + (cc.merge||0) + (cc.split||0);
+    summaryHtml = `
+      <div class="today-summary-panel">
+        <div class="today-summary-label">AI Briefing · ${latestBriefing.briefing_type} · ${genDate}</div>
+        <p class="today-summary-text">${esc(latestBriefing.summary || 'Briefing generated.')}</p>
+        <div class="today-summary-stats">
+          <span>${latestBriefing.signal_count || 0} signals reviewed</span>
+          <span>${latestBriefing.cluster_count || 0} active clusters</span>
+          ${cleanupTotal ? `<span>${cleanupTotal} cleanup suggestions</span>` : ''}
+          <span>${todayItems.length} decisions today</span>
+        </div>
+      </div>`;
+  }
+
+  // Empty state
+  if (!todayItems.length) {
+    container.innerHTML = summaryHtml + `
+      <div class="empty" style="margin-top:32px">
+        <div class="icon">🌱</div>
+        <p>Nothing needs your decision today.</p>
+        <p style="font-size:13px;color:#999;margin-top:8px;max-width:420px;margin-left:auto;margin-right:auto">
+          Signals and clusters will appear here automatically when AI finds a strong pattern,
+          research need, cleanup decision, market change, or competitor alert.
+        </p>
+        <button class="btn btn-primary" style="margin-top:20px"
+          onclick="generateBriefing(document.getElementById('briefing-type-select').value)">
+          ✨ Generate Briefing Now
+        </button>
+      </div>`;
     return;
   }
-  container.innerHTML = data.map((o, i) => `
-    <div class="board-card priority-${(o.priority||'low').toLowerCase()}">
-      <div class="board-card-header">
-        <div class="board-rank">${i+1}</div>
-        <div class="board-card-title">
-          <h3>${esc(o.topic)}</h3>
-          <div class="meta">
-            ${esc(o.plant_or_product||'')} · Score: ${o.total_ai_score||0} · ${o.shelf_life||'—'}
-            ${o.revenue_priority_match === 'Yes' ? `<span class="badge badge-high" style="margin-left:6px;font-size:10px" title="${esc(o.revenue_priority_note||'')}">💰 High-revenue match</span>` : o.revenue_priority_match === 'Needs check' ? `<span class="badge badge-pending" style="margin-left:6px;font-size:10px">🔍 Needs stock check</span>` : ''}
-          </div>
+
+  // Render sections
+  const sections = [
+    { key: 'Prominent Topics',    icon: '📌', actions: 'watch' },
+    { key: 'Content Candidates',  icon: '🎬', actions: 'content' },
+    { key: 'Needs Research',      icon: '🔬', actions: 'research' },
+    { key: 'Cleanup Review',      icon: '🧹', actions: 'cleanup' },
+    { key: 'Market Watch Alerts', icon: '📈', actions: 'watch' },
+    { key: 'Competitor Alerts',   icon: '🕵️', actions: 'watch' },
+  ];
+
+  let sectionsHtml = '';
+  for (const sec of sections) {
+    const secItems = todayItems.filter(i => i.section === sec.key);
+    if (!secItems.length) continue;
+    sectionsHtml += `
+      <div class="today-section">
+        <div class="today-section-header">
+          <span class="today-section-icon">${sec.icon}</span>
+          <h3>${sec.key}</h3>
+          <span class="today-section-count">${secItems.length}</span>
         </div>
-        <span class="score-pill ${o.total_ai_score>=65?'score-high':o.total_ai_score>=40?'score-medium':'score-low'}" style="flex-shrink:0">${o.total_ai_score||0}</span>
+        <div class="today-section-items">
+          ${secItems.map(item => renderTodayItem(item, sec.actions)).join('')}
+        </div>
+      </div>`;
+  }
+
+  container.innerHTML = summaryHtml + sectionsHtml;
+}
+
+function renderTodayItem(item, actionType) {
+  const confColor = { High: '#059669', Medium: '#f59e0b', Low: '#9ca3af' }[item.ai_confidence] || '#9ca3af';
+  const isNew = item.status === 'New today';
+
+  let actionBtns = '';
+  if (actionType === 'content') {
+    actionBtns = `
+      <button class="btn btn-primary btn-sm" onclick="todayItemDecide('${item.id}','Move to Content Review')">🗂 Content Review</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs research')">🔬 Research</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Already covered')">✓ Covered</button>`;
+  } else if (actionType === 'cleanup') {
+    actionBtns = `
+      <button class="btn btn-primary btn-sm" onclick="todayItemDecide('${item.id}','Cleanup confirmed')">✓ Confirm</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">Keep unchanged</button>`;
+  } else if (actionType === 'research') {
+    actionBtns = `
+      <button class="btn btn-primary btn-sm" onclick="todayItemDecide('${item.id}','Needs research')">🔬 Start research</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Resolved</button>`;
+  } else {
+    actionBtns = `
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs decision')">📋 Mark for review</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Done</button>`;
+  }
+
+  return `
+    <div class="today-item" id="today-item-${item.id}">
+      <div class="today-item-header">
+        <div style="flex:1">
+          ${isNew ? `<span class="badge badge-new" style="font-size:10px;margin-bottom:4px;display:inline-block">New today</span>` : `<span class="badge badge-pending" style="font-size:10px;margin-bottom:4px;display:inline-block">${esc(item.status)}</span>`}
+          <div class="today-item-title">${esc(item.title)}</div>
+        </div>
+        <span style="color:${confColor};font-size:11px;font-weight:600;flex-shrink:0;margin-top:2px">${item.ai_confidence || ''}</span>
       </div>
-      <div class="board-card-body">
-        ${o.why_now ? `<div class="board-field"><label>Why Now</label><p>${esc(o.why_now)}</p></div>` : ''}
-        ${o.evidence_summary ? `<div class="board-field"><label>Evidence</label><p>${esc(o.evidence_summary)}</p></div>` : ''}
-        ${o.suggested_hook ? `<div class="board-field"><label>Hook</label><p>${esc(o.suggested_hook)}</p></div>` : ''}
-        ${o.suggested_format ? `<div class="board-field"><label>Format</label><p>${esc(o.suggested_format)}</p></div>` : ''}
-        ${o.historical_memory_note ? `<div class="board-field" style="grid-column:1/-1"><label>🧠 Memory</label><p style="color:#666;font-style:italic">${esc(o.historical_memory_note)}</p></div>` : ''}
-        ${o.recommended_deadline ? `<div class="board-field"><label>Deadline</label><p>${o.recommended_deadline}</p></div>` : ''}
-        ${o.repetition_risk ? `<div class="board-field" style="grid-column:1/-1">
-          <label>🔁 Repetition check</label>
-          <p>
-            <span class="badge ${o.repetition_risk==='Low'?'badge-low':o.repetition_risk==='Medium'?'badge-pending':o.repetition_risk==='High'?'badge-medium':'badge-reject'}" style="margin-right:6px">${o.repetition_risk} risk</span>
-            ${esc(o.freshness_reason||'')}
-            ${o.days_since_similar ? ` · ${o.days_since_similar}d since similar post` : ''}
-          </p>
-          ${o.repetition_recommendation ? `<p style="font-size:12px;color:#666;font-style:italic">${esc(o.repetition_recommendation)}</p>` : ''}
-        </div>` : ''}
-        <div id="rep-result-${o.id}"></div>
+      ${item.summary ? `<p class="today-item-summary">${esc(item.summary)}</p>` : ''}
+      ${item.why_today ? `<p class="today-item-why"><strong>Why today:</strong> ${esc(item.why_today)}</p>` : ''}
+      ${item.evidence_summary ? `<p class="today-item-evidence">📊 ${esc(item.evidence_summary)}</p>` : ''}
+      ${item.recommended_action ? `<p class="today-item-action">→ ${esc(item.recommended_action)}</p>` : ''}
+      <div class="today-item-actions">
+        ${actionBtns}
+        ${item.cluster_id ? `<button class="btn btn-secondary btn-sm" onclick="showView('discovery',document.querySelector('[data-view=discovery]'))">🔍 Cluster</button>` : ''}
       </div>
-      <div class="board-card-actions">
-        <button class="btn btn-primary btn-sm" onclick="decideOpportunity('${o.id}','Approve brief')">✅ Approve Brief</button>
-        <button class="btn btn-warning btn-sm" onclick="decideOpportunity('${o.id}','Watch')">👀 Watch</button>
-        <button class="btn btn-secondary btn-sm" onclick="decideOpportunity('${o.id}','Needs more evidence')">🔍 Need More</button>
-        <button class="btn btn-secondary btn-sm" onclick="decideOpportunity('${o.id}','Move to evergreen')">🌿 Evergreen</button>
-        <button class="btn btn-danger btn-sm" onclick="decideOpportunity('${o.id}','Reject')">✕ Reject</button>
-        <button class="btn btn-secondary btn-sm" onclick="runRepetitionCheck('${o.id}')">🔁 Rep. Check</button>
-        <button class="btn btn-secondary btn-sm" style="background:#1B5E20;color:#fff;border-color:#1B5E20" onclick="openPublishedModal('${o.id}','${esc(o.topic||'')}','${esc(o.platform||'')}','${esc(o.suggested_format||'')}')">📤 Published</button>
-      </div>
-    </div>`).join('');
+    </div>`;
+}
+
+async function todayItemDecide(itemId, status) {
+  const terminal = ['Resolved','Cleanup confirmed','Already covered','Move to Content Review'];
+  const { error } = await sb.from('today_board_items').update({
+    status,
+    reviewer_id:  currentUser?.id,
+    resolved_at:  terminal.includes(status) ? new Date().toISOString() : null,
+    updated_at:   new Date().toISOString(),
+  }).eq('id', itemId);
+  if (error) { toast('Error: ' + error.message, true); return; }
+  toast('Saved: ' + status);
+  loadToday();
+}
+
+async function generateBriefing(type = 'on-demand') {
+  const btn = document.getElementById('generate-briefing-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
+  try {
+    const resp = await fetch('/.netlify/functions/ai-briefing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ briefing_type: type || 'on-demand', generated_by: currentUser?.id || 'user' }),
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || 'Unknown error');
+    toast(`✨ Briefing ready — ${result.today_items_count || 0} items on Today board, ${result.suggestions_count || 0} cleanup suggestions`);
+    loadToday();
+  } catch (err) {
+    toast('Briefing failed: ' + err.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Generate Briefing'; }
+  }
 }
 
 // ── BRIEFS ────────────────────────────────────────────────────────────
@@ -1450,7 +1613,7 @@ async function decideOpportunity(id, decision) {
   }).eq('id', id);
   if (error) { toast('Error: ' + error.message, true); return; }
   toast('Decision saved: ' + decision);
-  loadDailyBoard();
+  loadToday();
   loadCommandCenter();
 }
 
@@ -1495,7 +1658,7 @@ async function submitPublished() {
     if (!result.success && result.errors?.length) throw new Error(result.errors.join('; '));
     toast('✅ Logged to Video Tracker');
     closeModal('modal-published');
-    loadDailyBoard();
+    loadToday();
   } catch (err) {
     toast('❌ ' + err.message, true);
   } finally {
@@ -1567,7 +1730,7 @@ async function saveOpportunity() {
   if (error) { toast('Error: ' + error.message, true); return; }
   toast('Opportunity added to Daily Board');
   closeModal('modal-opportunity');
-  loadDailyBoard();
+  loadToday();
 }
 
 async function saveBrief() {
@@ -2233,7 +2396,7 @@ async function runRepetitionCheck(opportunityId) {
     if (!result.success) { resultEl.innerHTML = `<div style="color:#e74c3c;font-size:13px">Error: ${esc(result.error)}</div>`; return; }
     resultEl.innerHTML = renderRepetitionAnalysis(result.analysis);
     // Refresh card so saved fields show next time
-    loadDailyBoard();
+    loadToday();
   } catch (err) {
     resultEl.innerHTML = '<div style="color:#e74c3c;font-size:13px">Could not reach AI. Check CLAUDE_API_KEY.</div>';
   }
