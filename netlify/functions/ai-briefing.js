@@ -21,7 +21,7 @@ const supabase = createClient(
 );
 
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
-const CLAUDE_MODEL   = "claude-sonnet-4-6";  // Sonnet for briefing (richer reasoning)
+const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";  // Haiku: fast enough for 10s Netlify timeout
 const PROMPT_VERSION = "briefing-v1";
 
 exports.handler = async (event) => {
@@ -68,96 +68,65 @@ exports.handler = async (event) => {
       }
     }
 
-    // ── 2. FETCH DATA FROM SUPABASE ───────────────────────────────────────────
+    // ── 2. FETCH DATA FROM SUPABASE (all in parallel) ────────────────────────
 
-    // 2a. Active discovery clusters
     let clusterQuery = supabase
       .from("discovery_clusters")
-      .select(`
-        id, title, summary, plant_or_product, primary_question,
+      .select(`id, title, summary, plant_or_product, primary_question,
         signal_count, question_count, distinct_source_count,
         platforms, audience_wording, problems_mentioned, tips_mentioned,
         first_seen_at, last_seen_at, recent_mention_count, previous_mention_count,
         novelty_status, contradiction_status, ai_confidence, status,
         maintenance_status, review_required, last_ai_updated_at, new_signals_since_review,
-        ai_update_summary, revenue_priority_match
-      `)
+        ai_update_summary, revenue_priority_match`)
       .not("status", "in", '("Closed","Blocked irrelevant")')
       .order("signal_count", { ascending: false })
-      .limit(100);
+      .limit(60);
+    if (filterState.platform) clusterQuery = clusterQuery.contains("platforms", [filterState.platform]);
+    if (filterState.status)   clusterQuery = clusterQuery.eq("status", filterState.status);
 
-    if (filterState.platform) {
-      clusterQuery = clusterQuery.contains("platforms", [filterState.platform]);
-    }
-    if (filterState.status) {
-      clusterQuery = clusterQuery.eq("status", filterState.status);
-    }
+    const [
+      { data: clusters },
+      { data: recentSignals },
+      { data: changedClusters },
+      { data: prevBriefings },
+      { data: competitorActivity },
+      { data: marketWatch },
+      { data: ownedContent },
+      { data: watchlist },
+    ] = await Promise.all([
+      clusterQuery,
+      supabase.from("signals")
+        .select("id, raw_input, platform, source_url, status, created_at, signal_purpose, section_route")
+        .gte("created_at", periodStart).order("created_at", { ascending: false }).limit(100),
+      supabase.from("discovery_clusters")
+        .select("id, title, last_seen_at, new_signals_since_review, ai_update_summary")
+        .gte("last_seen_at", periodStart).not("status", "in", '("Closed","Blocked irrelevant")').limit(50),
+      supabase.from("discovery_briefings")
+        .select("id, briefing_type, summary, prominent_topics, generated_at")
+        .eq("briefing_type", briefingType).order("generated_at", { ascending: false }).limit(1),
+      supabase.from("competitor_activity")
+        .select("id, plant_name, activity_type, ai_summary, source_account_name, observed_at, status")
+        .gte("observed_at", periodStart).order("observed_at", { ascending: false }).limit(10),
+      supabase.from("market_watch_plants")
+        .select("id, plant_name, signal_count, question_count, purchase_intent_count, distinct_source_count, platforms, last_seen_at, reviewer_status")
+        .gte("last_seen_at", periodStart).order("signal_count", { ascending: false }).limit(10),
+      supabase.from("published_videos")
+        .select("video_title, topic, plant_or_product, platform, publish_date, performance_summary, audience_followup_questions")
+        .order("publish_date", { ascending: false }).limit(15),
+      supabase.from("plant_watchlist")
+        .select("plant_name, top_products").order("priority_level", { ascending: true }).limit(30),
+    ]);
 
-    const { data: clusters } = await clusterQuery;
-    const activeClusters = clusters || [];
-
-    // 2b. Signals added since period start (to know what's "new")
-    const { data: recentSignals } = await supabase
-      .from("signals")
-      .select("id, raw_input, platform, source_url, status, created_at, signal_purpose, section_route")
-      .gte("created_at", periodStart)
-      .order("created_at", { ascending: false })
-      .limit(200);
-    const newSignals = recentSignals || [];
-
-    // 2c. Clusters that changed in the period (updated in this window)
-    const { data: changedClusters } = await supabase
-      .from("discovery_clusters")
-      .select("id, title, last_seen_at, new_signals_since_review, ai_update_summary")
-      .gte("last_seen_at", periodStart)
-      .not("status", "in", '("Closed","Blocked irrelevant")');
-    const clustersChanged = changedClusters || [];
-
-    // 2d. Previous briefing (for "changes since last time")
-    const { data: prevBriefings } = await supabase
-      .from("discovery_briefings")
-      .select("id, briefing_type, summary, prominent_topics, generated_at")
-      .eq("briefing_type", briefingType)
-      .order("generated_at", { ascending: false })
-      .limit(1);
-    const previousBriefing = prevBriefings?.[0] || null;
-
-    // 2e. Recent competitor activity
-    const { data: competitorActivity } = await supabase
-      .from("competitor_activity")
-      .select("id, plant_name, activity_type, ai_summary, source_account_name, observed_at, status")
-      .gte("observed_at", periodStart)
-      .order("observed_at", { ascending: false })
-      .limit(20);
+    const activeClusters   = clusters          || [];
+    const newSignals        = recentSignals     || [];
+    const clustersChanged   = changedClusters   || [];
+    const previousBriefing  = prevBriefings?.[0] || null;
     const recentCompetitors = competitorActivity || [];
-
-    // 2f. Market watch plants with recent activity
-    const { data: marketWatch } = await supabase
-      .from("market_watch_plants")
-      .select("id, plant_name, signal_count, question_count, purchase_intent_count, distinct_source_count, platforms, last_seen_at, reviewer_status")
-      .gte("last_seen_at", periodStart)
-      .order("signal_count", { ascending: false })
-      .limit(20);
-    const marketWatchPlants = marketWatch || [];
-
-    // 2g. Owned published content (for repetition context)
-    const { data: ownedContent } = await supabase
-      .from("published_videos")
-      .select("video_title, topic, plant_or_product, platform, publish_date, performance_summary, audience_followup_questions")
-      .order("publish_date", { ascending: false })
-      .limit(20);
-    const published = ownedContent || [];
-
-    // 2h. Plant watchlist (revenue priority context only — no tiers in prompt)
-    const { data: watchlist } = await supabase
-      .from("plant_watchlist")
-      .select("plant_name, top_products")
-      .order("priority_level", { ascending: true })
-      .limit(50);
-    const catalogPlants = (watchlist || []).map(p => {
-      const products = p.top_products
-        ? p.top_products.split(" || ").slice(0, 5).join(", ")
-        : null;
+    const marketWatchPlants = marketWatch        || [];
+    const published         = ownedContent       || [];
+    const catalogPlants     = (watchlist || []).map(p => {
+      const products = p.top_products ? p.top_products.split(" || ").slice(0, 5).join(", ") : null;
       return products ? `${p.plant_name} (${products})` : p.plant_name;
     });
 
@@ -170,7 +139,7 @@ exports.handler = async (event) => {
     });
 
     // ── 4. CALL CLAUDE ────────────────────────────────────────────────────────
-    const briefingResult = await callClaude(prompt, 4096);
+    const briefingResult = await callClaude(prompt, 2048);
 
     // ── 5. SAVE BRIEFING RECORD ───────────────────────────────────────────────
     const { data: savedBriefing, error: briefingErr } = await supabase
@@ -488,7 +457,7 @@ Return ONLY valid JSON — no markdown, no explanation:
 
 
 // ── CALL CLAUDE ────────────────────────────────────────────────────────────────
-async function callClaude(prompt, maxTokens = 4096) {
+async function callClaude(prompt, maxTokens = 2048) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method:  "POST",
     headers: {
