@@ -838,6 +838,43 @@ tbody tr:hover { background: #fafffe; }
   </div>
 </div>
 
+<!-- Mark as Published Modal -->
+<div class="modal-overlay" id="modal-published">
+  <div class="modal">
+    <h2>📤 Mark as Published</h2>
+    <p style="color:#666;font-size:13px;margin-bottom:16px">This will add a row to the Video Tracker sheet so you can log performance metrics later.</p>
+    <input type="hidden" id="pub-opportunity-id">
+    <div class="form-group"><label>Post URL <span style="color:red">*</span></label><input type="url" id="pub-post-url" placeholder="https://www.instagram.com/reel/..."></div>
+    <div class="form-group"><label>Platform</label>
+      <select id="pub-platform">
+        <option value="Instagram">Instagram</option>
+        <option value="TikTok">TikTok</option>
+        <option value="Facebook">Facebook</option>
+        <option value="YouTube">YouTube</option>
+        <option value="Pinterest">Pinterest</option>
+        <option value="Other">Other</option>
+      </select>
+    </div>
+    <div class="form-group"><label>Format</label>
+      <select id="pub-format">
+        <option value="Reel">Reel</option>
+        <option value="TikTok">TikTok</option>
+        <option value="Carousel">Carousel</option>
+        <option value="Static">Static</option>
+        <option value="YouTube Short">YouTube Short</option>
+        <option value="Story">Story</option>
+        <option value="Other">Other</option>
+      </select>
+    </div>
+    <div class="form-group"><label>Published on</label><input type="date" id="pub-published-on"></div>
+    <div class="form-group"><label>Topic</label><input type="text" id="pub-topic-display" readonly style="background:#f5f5f5;color:#666"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button class="btn btn-secondary" onclick="closeModal('modal-published')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitPublished()">📤 Log to Video Tracker</button>
+    </div>
+  </div>
+</div>
+
 <!-- Add Opportunity Modal -->
 <div class="modal-overlay" id="modal-opportunity">
   <div class="modal">
@@ -1312,6 +1349,7 @@ async function loadDailyBoard() {
         <button class="btn btn-secondary btn-sm" onclick="decideOpportunity('${o.id}','Move to evergreen')">🌿 Evergreen</button>
         <button class="btn btn-danger btn-sm" onclick="decideOpportunity('${o.id}','Reject')">✕ Reject</button>
         <button class="btn btn-secondary btn-sm" onclick="runRepetitionCheck('${o.id}')">🔁 Rep. Check</button>
+        <button class="btn btn-secondary btn-sm" style="background:#1B5E20;color:#fff;border-color:#1B5E20" onclick="openPublishedModal('${o.id}','${esc(o.topic||'')}','${esc(o.platform||'')}','${esc(o.suggested_format||'')}')">📤 Published</button>
       </div>
     </div>`).join('');
 }
@@ -1414,6 +1452,55 @@ async function decideOpportunity(id, decision) {
   toast('Decision saved: ' + decision);
   loadDailyBoard();
   loadCommandCenter();
+}
+
+function openPublishedModal(opportunityId, topic, platform, format) {
+  document.getElementById('pub-opportunity-id').value = opportunityId;
+  document.getElementById('pub-topic-display').value  = topic;
+  document.getElementById('pub-post-url').value       = '';
+  document.getElementById('pub-published-on').value   = new Date().toISOString().slice(0,10);
+  // Pre-select platform
+  const platSel = document.getElementById('pub-platform');
+  for (let o of platSel.options) { if (o.value === platform) { platSel.value = platform; break; } }
+  // Pre-select format (map suggested_format to dropdown values)
+  const fmtSel = document.getElementById('pub-format');
+  const fmtMap = { 'reel':'Reel','tiktok':'TikTok','carousel':'Carousel','static':'Static','short':'YouTube Short','story':'Story' };
+  const fmtKey = (format||'').toLowerCase();
+  const matched = Object.entries(fmtMap).find(([k]) => fmtKey.includes(k));
+  if (matched) fmtSel.value = matched[1];
+  openModal('modal-published');
+}
+
+async function submitPublished() {
+  const postUrl = document.getElementById('pub-post-url').value.trim();
+  if (!postUrl) { toast('Post URL is required', true); return; }
+
+  const btn = document.querySelector('#modal-published .btn-primary');
+  btn.disabled = true; btn.textContent = '⏳ Logging…';
+
+  try {
+    const res = await fetch('/.netlify/functions/log-published', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        opportunityId: document.getElementById('pub-opportunity-id').value,
+        postUrl,
+        platform:    document.getElementById('pub-platform').value,
+        format:      document.getElementById('pub-format').value,
+        publishedOn: document.getElementById('pub-published-on').value,
+        topic:       document.getElementById('pub-topic-display').value,
+      }),
+    });
+    const result = await res.json();
+    if (!result.success && result.errors?.length) throw new Error(result.errors.join('; '));
+    toast('✅ Logged to Video Tracker');
+    closeModal('modal-published');
+    loadDailyBoard();
+  } catch (err) {
+    toast('❌ ' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = '📤 Log to Video Tracker';
+  }
 }
 
 async function updateSignalStatus(id, status) {
