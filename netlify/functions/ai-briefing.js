@@ -461,13 +461,9 @@ Generate the briefing. Rules:
 8. AI must NOT merge, dismiss, or approve anything automatically — only suggest.
 9. Revenue context is business context only — do not use it as proof of audience demand.
 
-PROMINENT TOPICS: Pick the 5–8 strongest patterns by evidence volume, question volume, source diversity, and growth.
-ATTENTION ITEMS: Pick up to 8 items needing a reviewer decision.
-CLEANUP SUGGESTIONS: Flag clusters for Dismiss, Reroute, Merge, Split, Needs research, etc.
-TODAY ITEMS: Select 5–10 items for the Today board — one decision per item, ranked by urgency.
-
-today_items sections allowed:
-  "Prominent Topics" | "Content Candidates" | "Needs Research" | "Cleanup Review" | "Market Watch Alerts" | "Competitor Alerts"
+PROMINENT TOPICS: Pick the 3–5 strongest patterns by evidence volume, question volume, source diversity, and growth.
+ATTENTION ITEMS: Pick up to 5 items needing a reviewer decision.
+CLEANUP SUGGESTIONS: Flag up to 5 clusters for Dismiss, Reroute, Merge, Split, Needs research, etc.
 
 attention_items recommended_action values:
   "Move to Content Review" | "Needs research" | "Keep watching" | "Review owned-content match" |
