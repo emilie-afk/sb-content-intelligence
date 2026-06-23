@@ -1,12 +1,12 @@
 /**
  * Netlify Function: maintenance-run
  *
- * Runs qualification checks on all existing Collecting clusters,
- * promotes those that meet pattern thresholds, and creates
- * Content Review candidates for qualifying ones.
+ * Fast DB-only qualification pass — no Claude calls.
+ * Promotes Collecting → Pattern detected for clusters that meet thresholds.
+ * Writes audit log entries for each promotion.
  *
  * POST /.netlify/functions/maintenance-run
- * Body: { limit: 100 }  (optional — how many clusters to process)
+ * Body: { limit: 200 }  (optional)
  */
 
 const { createClient } = require("@supabase/supabase-js");
@@ -16,8 +16,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
-const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const PROMPT_VERSION = "extract-v2";
 
 exports.handler = async (event) => {
@@ -51,150 +49,53 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ success: true, message: "No clusters to process", promoted: 0, candidates_created: 0 }) };
     }
 
-    // ── 2. FETCH SHARED CONTEXT ONCE ─────────────────────────────────────────
-
-    // Plant watchlist (for candidate prompts)
-    const { data: watchlist } = await supabase
-      .from("plant_watchlist")
-      .select("plant_name, top_products")
-      .limit(50);
-    const watchlistText = (watchlist || []).map(p => {
-      const products = p.top_products ? p.top_products.split(" || ").slice(0, 5).join(", ") : null;
-      return products ? `${p.plant_name} (${products})` : p.plant_name;
-    }).join("\n");
-
-    // Owned published content
-    const { data: dbPublished } = await supabase
-      .from("published_videos")
-      .select("video_title, topic, plant_or_product, hook_used, angle_used, platform, publish_date, performance_summary, audience_followup_questions")
-      .order("publish_date", { ascending: false })
-      .limit(30);
-
-    // Calendar sheet (optional)
-    let sheetEntries = [];
-    try {
-      const { data: setting } = await supabase
-        .from("settings").select("value").eq("key", "calendar_script_url").single();
-      const scriptUrl = setting?.value?.url;
-      if (scriptUrl) {
-        const resp = await fetch(scriptUrl, { method: "GET", redirect: "follow" });
-        const json = await resp.json();
-        sheetEntries = json?.entries || [];
-      }
-    } catch (e) { console.warn("Sheet fetch skipped:", e.message); }
-
-    // ── 3. PROCESS EACH CLUSTER ───────────────────────────────────────────────
+    // ── 2. QUALIFY AND PROMOTE (no Claude calls — fast DB-only pass) ─────────
     let promoted = 0;
-    let candidatesCreated = 0;
-    const results = [];
+    const qualifyingIds = [];
+    const now = new Date().toISOString();
 
-    for (const cluster of clusters) {
+    // Build batched updates — all DB writes in parallel per cluster
+    const updatePromises = clusters.map(async (cluster) => {
       const qualifies = checkQualification(cluster);
 
-      // Promote Collecting → Pattern detected
       if (qualifies && cluster.status === "Collecting") {
-        await supabase.from("discovery_clusters")
-          .update({
+        await Promise.all([
+          supabase.from("discovery_clusters").update({
             status:             "Pattern detected",
             maintenance_status: "Pattern detected",
-            last_ai_updated_at: new Date().toISOString(),
-            ai_update_summary:  "Promoted by maintenance run: " + qualifies.reason,
+            last_ai_updated_at: now,
+            ai_update_summary:  "Promoted: " + qualifies.reason,
             prompt_version:     PROMPT_VERSION,
-          })
-          .eq("id", cluster.id);
-
-        await supabase.from("cluster_audit_log").insert({
-          cluster_id:     cluster.id,
-          field_changed:  "status",
-          previous_value: "Collecting",
-          new_value:      "Pattern detected",
-          reason:         qualifies.reason,
-          trigger:        "daily_maintenance",
-          ai_model:       CLAUDE_MODEL,
-          prompt_version: PROMPT_VERSION,
-          is_automatic:   true,
-        });
-
+          }).eq("id", cluster.id),
+          supabase.from("cluster_audit_log").insert({
+            cluster_id:     cluster.id,
+            field_changed:  "status",
+            previous_value: "Collecting",
+            new_value:      "Pattern detected",
+            reason:         qualifies.reason,
+            trigger:        "daily_maintenance",
+            ai_model:       "none",
+            prompt_version: PROMPT_VERSION,
+            is_automatic:   true,
+          }),
+        ]);
         promoted++;
-        cluster.status = "Pattern detected"; // update local copy for next step
       }
 
-      // Create Content Review candidate if qualifies and none exists
-      if (qualifies) {
-        const { data: existing } = await supabase
-          .from("content_review_candidates")
-          .select("id")
-          .eq("cluster_id", cluster.id)
-          .not("status", "in", '("Dismissed","Already covered")')
-          .maybeSingle();
+      if (qualifies) qualifyingIds.push(cluster.id);
 
-        if (!existing && CLAUDE_API_KEY) {
-          try {
-            const candidatePrompt = buildCandidatePrompt(cluster, sheetEntries, dbPublished || [], watchlistText);
-            const candidateResult = await callClaude(candidatePrompt);
-
-            await supabase.from("content_review_candidates").insert({
-              cluster_id:               cluster.id,
-              title:                    candidateResult.title || cluster.title,
-              what_people_are_saying:   candidateResult.what_people_are_saying,
-              representative_wording:   candidateResult.representative_wording || [],
-              signal_count:             cluster.signal_count,
-              question_count:           cluster.question_count,
-              distinct_source_count:    cluster.distinct_source_count,
-              platforms:                cluster.platforms,
-              first_seen_at:            cluster.first_seen_at,
-              last_seen_at:             cluster.last_seen_at,
-              pattern_growth:           candidateResult.pattern_growth,
-              evidence_urls:            candidateResult.evidence_urls || [],
-              what_appears_new:         candidateResult.what_appears_new,
-              claims_needing_verification: candidateResult.claims_needing_verification,
-              contradictory_advice:     candidateResult.contradictory_advice,
-              closest_published_title:  candidateResult.closest_published_title,
-              closest_published_urls:   candidateResult.closest_published_urls || [],
-              closest_published_date:   candidateResult.closest_published_date || null,
-              days_since_similar:       candidateResult.days_since_similar || null,
-              previous_performance:     candidateResult.previous_performance,
-              audience_followup_demand: candidateResult.audience_followup_demand,
-              repetition_risk:          candidateResult.repetition_risk || "Needs reviewer check",
-              freshness_reason:         candidateResult.freshness_reason,
-              same_topic:               candidateResult.same_topic ?? null,
-              same_plant:               candidateResult.same_plant ?? null,
-              same_question:            candidateResult.same_question ?? null,
-              same_advice:              candidateResult.same_advice ?? null,
-              same_hook_or_angle:       candidateResult.same_hook_or_angle ?? null,
-              possible_directions:      candidateResult.possible_directions || [],
-              ai_confidence:            candidateResult.ai_confidence || "Medium",
-              surfaced_reason:          qualifies.reason,
-              status: (qualifies.reason && qualifies.reason.includes("needs verification"))
-                ? "Needs research"
-                : (candidateResult.candidate_status || "Ready for review"),
-            });
-
-            await supabase.from("discovery_clusters")
-              .update({
-                status:             "Content review ready",
-                maintenance_status: "Pattern detected",
-                last_ai_updated_at: new Date().toISOString(),
-                ai_update_summary:  "Content Review candidate created by maintenance run",
-              })
-              .eq("id", cluster.id);
-
-            candidatesCreated++;
-          } catch (candidateErr) {
-            console.warn("Candidate creation failed for", cluster.id, candidateErr.message);
-          }
-        }
-      }
-
-      results.push({
+      return {
         id:       cluster.id,
         title:    cluster.title,
         signals:  cluster.signal_count,
         sources:  cluster.distinct_source_count,
         qualifies: !!qualifies,
         reason:   qualifies?.reason || "Does not yet meet threshold",
-      });
-    }
+      };
+    });
+
+    const results = await Promise.all(updatePromises);
+    const candidatesCreated = 0; // candidate creation now happens via AI Briefing
 
     return {
       statusCode: 200,
@@ -240,7 +141,7 @@ function checkQualification(cluster) {
 }
 
 
-// ── CANDIDATE PROMPT ──────────────────────────────────────────────────────────
+// ── CANDIDATE PROMPT (kept for reference — not called in maintenance-run) ─────
 function buildCandidatePrompt(cluster, sheetEntries, dbPublished, watchlistText) {
   const historyLines = [];
   sheetEntries.forEach(e => {
