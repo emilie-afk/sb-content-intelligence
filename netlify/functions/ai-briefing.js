@@ -130,16 +130,32 @@ exports.handler = async (event) => {
       return products ? `${p.plant_name} (${products})` : p.plant_name;
     });
 
-    // ── 3. BUILD CLAUDE PROMPT ────────────────────────────────────────────────
-    const prompt = buildBriefingPrompt({
+    // ── 3. BUILD SHARED CONTEXT STRINGS ──────────────────────────────────────
+    const sharedCtx = buildSharedContext({
       briefingType, periodStart, periodEnd,
       activeClusters, newSignals, clustersChanged,
       previousBriefing, recentCompetitors, marketWatchPlants,
       published, catalogPlants, filterState,
     });
 
-    // ── 4. CALL CLAUDE ────────────────────────────────────────────────────────
-    const briefingResult = await callClaude(prompt, 2048);
+    // ── 4. CALL CLAUDE — TWO FOCUSED CALLS ───────────────────────────────────
+    // Call 1: summary + prominent topics (~600 token output)
+    const topicsResult = await callClaude(buildTopicsPrompt(sharedCtx), 800);
+
+    // Call 2: attention items + cleanup suggestions (~800 token output)
+    // passes prominent_topics from Call 1 as context
+    const actionsResult = await callClaude(buildActionsPrompt(sharedCtx, topicsResult.prominent_topics || []), 1200);
+
+    // Merge both results
+    const briefingResult = {
+      summary:             topicsResult.summary             || "",
+      signal_count:        topicsResult.signal_count        || newSignals.length,
+      cluster_count:       topicsResult.cluster_count       || activeClusters.length,
+      clusters_changed:    topicsResult.clusters_changed    || clustersChanged.length,
+      prominent_topics:    topicsResult.prominent_topics    || [],
+      attention_items:     actionsResult.attention_items    || [],
+      cleanup_suggestions: actionsResult.cleanup_suggestions || [],
+    };
 
     // ── 5. SAVE BRIEFING RECORD ───────────────────────────────────────────────
     const { data: savedBriefing, error: briefingErr } = await supabase
@@ -349,8 +365,8 @@ exports.handler = async (event) => {
 };
 
 
-// ── BRIEFING PROMPT ────────────────────────────────────────────────────────────
-function buildBriefingPrompt(ctx) {
+// ── SHARED CONTEXT BUILDER ─────────────────────────────────────────────────────
+function buildSharedContext(ctx) {
   const {
     briefingType, periodStart, periodEnd,
     activeClusters, newSignals, clustersChanged,
@@ -358,27 +374,21 @@ function buildBriefingPrompt(ctx) {
     published, catalogPlants, filterState,
   } = ctx;
 
-  // Summarise clusters for the prompt (avoid sending full 100-row dump)
-  const clusterSummaries = activeClusters.slice(0, 60).map(c => {
-    const wording = (c.audience_wording || []).slice(0, 3).join(" / ");
-    const platforms = (c.platforms || []).join(", ");
+  const clusterSummaries = activeClusters.slice(0, 40).map(c => {
+    const platforms = (c.platforms || []).join("/");
     return [
       `ID:${c.id}`,
       `"${c.title}"`,
       `plant:${c.plant_or_product || "?"}`,
-      `signals:${c.signal_count}`,
-      `questions:${c.question_count}`,
-      `sources:${c.distinct_source_count}`,
-      `platforms:${platforms || "?"}`,
+      `sig:${c.signal_count}`,
+      `q:${c.question_count}`,
+      `src:${c.distinct_source_count}`,
+      `plat:${platforms || "?"}`,
       `status:${c.status}`,
-      `novelty:${c.novelty_status || "?"}`,
-      wording ? `audience:"${wording}"` : null,
-      c.primary_question ? `question:"${c.primary_question}"` : null,
+      c.novelty_status && c.novelty_status !== "None" ? `novelty:${c.novelty_status}` : null,
+      c.primary_question ? `q:"${c.primary_question.slice(0, 60)}"` : null,
     ].filter(Boolean).join(" | ");
   }).join("\n");
-
-  const newSignalCount = newSignals.length;
-  const changedCount   = clustersChanged.length;
 
   const competitorText = recentCompetitors.length
     ? recentCompetitors.map(a =>
@@ -394,7 +404,7 @@ function buildBriefingPrompt(ctx) {
 
   const publishedText = published.length
     ? published.map(p =>
-        `"${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | ${p.publish_date || "?"} | Perf: ${p.performance_summary || "not recorded"} | Follow-up: ${p.audience_followup_questions || "none"}`
+        `"${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | ${p.publish_date || "?"} | Perf: ${p.performance_summary || "not recorded"}`
       ).join("\n")
     : "No owned published content yet";
 
@@ -404,80 +414,52 @@ function buildBriefingPrompt(ctx) {
 
   const catalogText = catalogPlants.join(", ") || "Catalog not loaded";
 
-  return `You are generating an AI Discovery Briefing for Succulents Box, a succulent plant subscription company.
-This briefing is for the internal content team. It summarises cluster patterns, flags items needing attention, and prepares a cleanup queue.
-The reviewer will use this to make decisions — they should not need to scan all ${activeClusters.length} clusters.
+  return {
+    briefingType, periodStart, periodEnd, filterState,
+    clusterSummaries: clusterSummaries || "No active clusters",
+    totalClusters: activeClusters.length,
+    newSignalCount: newSignals.length,
+    changedCount: clustersChanged.length,
+    competitorText, marketWatchText, publishedText, prevSummary, catalogText,
+  };
+}
 
-BRIEFING TYPE: ${briefingType}
-PERIOD: ${periodStart?.slice(0,10)} to ${periodEnd?.slice(0,10)}
-FILTERS ACTIVE: ${JSON.stringify(filterState) || "none"}
 
-═══════════════════════════════════════════════════
-ACTIVE CLUSTERS (${activeClusters.length} total, top 60 shown):
-═══════════════════════════════════════════════════
-${clusterSummaries || "No active clusters"}
+// ── CALL 1: TOPICS PROMPT (~600 token output) ──────────────────────────────────
+function buildTopicsPrompt(ctx) {
+  const { briefingType, periodStart, periodEnd, filterState,
+    clusterSummaries, totalClusters, newSignalCount, changedCount,
+    competitorText, marketWatchText, publishedText, prevSummary, catalogText } = ctx;
 
-═══════════════════════════════════════════════════
-RECENT ACTIVITY:
-New signals in period: ${newSignalCount}
-Clusters that changed: ${changedCount}
-═══════════════════════════════════════════════════
+  return `You are generating Part 1 of an AI Discovery Briefing for Succulents Box (succulent plant subscriptions).
+Internal use only. Identify the strongest patterns from this data.
 
-═══════════════════════════════════════════════════
-COMPETITOR ACTIVITY (this period):
-${competitorText}
-═══════════════════════════════════════════════════
+BRIEFING TYPE: ${briefingType} | PERIOD: ${periodStart?.slice(0,10)} to ${periodEnd?.slice(0,10)}
 
-═══════════════════════════════════════════════════
-MARKET WATCH — non-catalog plants gaining attention:
-${marketWatchText}
-═══════════════════════════════════════════════════
+ACTIVE CLUSTERS (${totalClusters} total, top 40 shown):
+${clusterSummaries}
 
-═══════════════════════════════════════════════════
-OWNED PUBLISHED CONTENT (most recent 20):
-${publishedText}
-═══════════════════════════════════════════════════
+RECENT ACTIVITY: ${newSignalCount} new signals | ${changedCount} clusters changed
 
-═══════════════════════════════════════════════════
-CATALOG PLANTS (Succulents Box products):
-${catalogText}
-═══════════════════════════════════════════════════
+COMPETITOR ACTIVITY: ${competitorText}
 
-PREVIOUS BRIEFING:
-${prevSummary}
+MARKET WATCH (non-catalog plants): ${marketWatchText}
 
-═══════════════════════════════════════════════════
-INSTRUCTIONS
-═══════════════════════════════════════════════════
+OWNED CONTENT (recent): ${publishedText}
 
-Generate the briefing. Rules:
-1. Summarize only evidence present in the data above. Do not invent demand.
-2. Link every conclusion to specific cluster IDs (use the ID:xxx values).
-3. Separate audience discovery from competitor activity.
-4. Separate catalog Discovery from Market Watch.
-5. Identify changes since the previous briefing.
-6. State confidence and evidence strength for every item.
-7. Preserve minority and contradictory signals — do not hide them.
-8. AI must NOT merge, dismiss, or approve anything automatically — only suggest.
-9. Revenue context is business context only — do not use it as proof of audience demand.
+CATALOG PLANTS: ${catalogText}
 
-PROMINENT TOPICS: Pick the 3–5 strongest patterns by evidence volume, question volume, source diversity, and growth.
-ATTENTION ITEMS: Pick up to 5 items needing a reviewer decision.
-CLEANUP SUGGESTIONS: Flag up to 5 clusters for Dismiss, Reroute, Merge, Split, Needs research, etc.
+PREVIOUS BRIEFING: ${prevSummary}
 
-attention_items recommended_action values:
-  "Move to Content Review" | "Needs research" | "Keep watching" | "Review owned-content match" |
-  "Review catalog match" | "Send to Market Watch" | "Send to Competitor Activity" | "No action yet"
+Rules: Only cite evidence from the data above. Link conclusions to cluster IDs. Do not invent demand.
 
-cleanup suggestion_type values:
-  "Dismiss" | "Reroute" | "Merge" | "Split" | "Keep watching" |
-  "Needs research" | "Needs catalog review" | "Needs source review" | "Move to Content Review"
+Pick the 3–5 strongest patterns by signal volume, question volume, source diversity, and growth.
 
-Return ONLY valid JSON — no markdown, no explanation:
+Return ONLY valid JSON — no markdown:
 {
-  "summary": "2-4 sentence plain-English briefing summary",
+  "summary": "2-3 sentence plain-English briefing summary",
   "signal_count": ${newSignalCount},
-  "cluster_count": ${activeClusters.length},
+  "cluster_count": ${totalClusters},
   "clusters_changed": ${changedCount},
   "prominent_topics": [
     {
@@ -489,13 +471,52 @@ Return ONLY valid JSON — no markdown, no explanation:
       "catalog_plants": ["plant name"],
       "platforms": ["Instagram"],
       "change_from_prior": "new | growing | stable | declining | not in prior briefing",
-      "related_owned_content": "title of related published content, or null",
-      "why_prominent": "1-2 sentences explaining the evidence"
+      "related_owned_content": "title or null",
+      "why_prominent": "1-2 sentences"
     }
-  ],
+  ]
+}`;
+}
+
+
+// ── CALL 2: ACTIONS PROMPT (~800 token output) ─────────────────────────────────
+function buildActionsPrompt(ctx, prominentTopics) {
+  const { clusterSummaries, totalClusters } = ctx;
+
+  const topicsText = prominentTopics.length
+    ? prominentTopics.map(t =>
+        `- "${t.theme}" (cluster_ids: ${(t.cluster_ids || []).join(", ")}): ${t.why_prominent}`
+      ).join("\n")
+    : "None identified yet";
+
+  // Compact cluster list for actions context (ID + title + status only)
+  const compactClusters = clusterSummaries;
+
+  return `You are generating Part 2 of an AI Discovery Briefing for Succulents Box (succulent plant subscriptions).
+Part 1 already identified the prominent topics. Now flag what needs a reviewer decision and what should be cleaned up.
+
+PROMINENT TOPICS FROM PART 1:
+${topicsText}
+
+CLUSTERS (for reference — ID, title, signals, status):
+${compactClusters}
+
+Rules:
+- AI must NOT merge, dismiss, or approve anything automatically — only suggest.
+- Link every item to a specific cluster ID.
+- Preserve minority and contradictory signals.
+
+ATTENTION ITEMS: Up to 5 clusters needing a reviewer decision (prioritize high signal + no action taken).
+recommended_action values: "Move to Content Review" | "Needs research" | "Keep watching" | "Review owned-content match" | "Review catalog match" | "Send to Market Watch" | "Send to Competitor Activity" | "No action yet"
+
+CLEANUP SUGGESTIONS: Up to 5 clusters to dismiss, merge, reroute, or flag.
+suggestion_type values: "Dismiss" | "Reroute" | "Merge" | "Split" | "Keep watching" | "Needs research" | "Needs catalog review" | "Needs source review" | "Move to Content Review"
+
+Return ONLY valid JSON — no markdown:
+{
   "attention_items": [
     {
-      "reason": "short reason label e.g. Repeated audience question",
+      "reason": "short reason label",
       "cluster_id": "uuid or null",
       "title": "plain-language title",
       "evidence_strength": "Strong | Moderate | Weak",
@@ -509,11 +530,11 @@ Return ONLY valid JSON — no markdown, no explanation:
       "cluster_id": "uuid",
       "cluster_title": "cluster title",
       "suggestion_type": "one value from the list above",
-      "suggested_destination": "target section name, or null",
-      "suggested_match_cluster_id": "uuid to merge into, or null",
+      "suggested_destination": "target section or null",
+      "suggested_match_cluster_id": "uuid to merge into or null",
       "reason": "why this action is suggested",
       "confidence": "High | Medium | Low",
-      "evidence_preview": "short excerpt from the cluster that supports this suggestion"
+      "evidence_preview": "short excerpt supporting this suggestion"
     }
   ]
 }`;
