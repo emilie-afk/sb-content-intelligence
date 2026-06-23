@@ -1423,7 +1423,7 @@ async function loadToday() {
     { key: 'Needs Research',      icon: '🔬', actions: 'research' },
     { key: 'Cleanup Review',      icon: '🧹', actions: 'cleanup' },
     { key: 'Market Watch Alerts', icon: '📈', actions: 'watch' },
-    { key: 'Competitor Alerts',   icon: '🕵️', actions: 'watch' },
+    { key: 'Competitor Alerts',   icon: '🕵️', actions: 'competitor' },
   ];
 
   let sectionsHtml = '';
@@ -1529,6 +1529,12 @@ function renderTodayItem(item, actionType) {
       <button class="btn btn-primary btn-sm" onclick="todayItemDecide('${item.id}','Needs research')">🔬 Start research</button>
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Resolved</button>`;
+  } else if (actionType === 'competitor') {
+    actionBtns = `
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs decision')">📋 Mark for review</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
+      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Done</button>
+      ${item.cluster_id ? `<button class="btn btn-secondary btn-sm" style="color:#ef4444" onclick="deleteCompetitorActivity('${item.cluster_id}','${item.id}')">🗑 Delete</button>` : ''}`;
   } else {
     actionBtns = `
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs decision')">📋 Mark for review</button>
@@ -1566,6 +1572,15 @@ async function todayItemDecide(itemId, status) {
   }).eq('id', itemId);
   if (error) { toast('Error: ' + error.message, true); return; }
   toast('Saved: ' + status);
+  loadToday();
+}
+
+async function deleteCompetitorActivity(competitorActivityId, todayItemId) {
+  if (!confirm('Delete this competitor from the database? This cannot be undone.')) return;
+  const { error: caErr } = await sb.from('competitor_activity').delete().eq('id', competitorActivityId);
+  if (caErr) { toast('Error deleting competitor: ' + caErr.message, true); return; }
+  await sb.from('today_board_items').delete().eq('id', todayItemId);
+  toast('🗑 Competitor removed');
   loadToday();
 }
 
