@@ -94,6 +94,7 @@ exports.handler = async (event) => {
       { data: marketWatch },
       { data: ownedContent },
       { data: watchlist },
+      { data: sbProducts },
     ] = await Promise.all([
       clusterQuery,
       supabase.from("signals")
@@ -116,6 +117,9 @@ exports.handler = async (event) => {
         .order("publish_date", { ascending: false }).limit(15),
       supabase.from("plant_watchlist")
         .select("plant_name, top_products").order("priority_level", { ascending: true }).limit(30),
+      supabase.from("sb_products")
+        .select("handle, title, common_name, scientific_name, genus")
+        .eq("is_active", true),
     ]);
 
     const activeClusters   = clusters          || [];
@@ -131,45 +135,103 @@ exports.handler = async (event) => {
       return products ? `${p.plant_name} (${products})` : p.plant_name;
     });
 
-    // Helper: check if a plant is in the SB catalog
+    // ── CATALOG MATCHING ──────────────────────────────────────────────────────
+    // Built from live sb_products table (full Shopify catalog).
+    // Matching priority:
+    //   1. plant_watchlist  — top revenue plants (get score boost too)
+    //   2. sb_products      — exact title / common_name / scientific_name match
+    //   3. genus            — genus-level match from sb_products (general topic OK)
+    // General terms ("cactus", "succulent") always in-catalog.
+
+    const GENERAL_TERMS = ["cactus","succulent","air plant","tillandsia","houseplant","plant"];
+
+    // Build lookup sets from live sb_products data
+    const catalog = sbProducts || [];
+    const catalogTitles    = catalog.map(p => p.title.toLowerCase());
+    const catalogCommon    = catalog.map(p => (p.common_name || "").toLowerCase()).filter(Boolean);
+    const catalogSci       = catalog.map(p => (p.scientific_name || "").toLowerCase()).filter(Boolean);
+    const catalogGenera    = new Set(catalog.map(p => (p.genus || "").toLowerCase()).filter(Boolean));
+
+    // Normalise: strip scientific name in parens, lowercase
+    const norm = (s) => (s || "").toLowerCase().replace(/\s*\(.*?\)\s*/g, "").trim();
+
     const isInCatalog = (plantName) => {
+      if (!plantName) return true; // No specific plant = general topic, always relevant
+
+      const lc  = norm(plantName);
+      const lc2 = plantName.toLowerCase(); // also check raw (some common names have parens)
+
+      // General terms always match
+      if (GENERAL_TERMS.some(t => lc.includes(t))) return true;
+
+      // 1. plant_watchlist
+      if (catalogPlantNames.some(cp => lc.includes(cp) || cp.includes(lc))) return true;
+
+      // 2. Full product title match
+      if (catalogTitles.some(t => lc.includes(t) || t.includes(lc))) return true;
+
+      // 3. Common name match (title with scientific name stripped)
+      if (catalogCommon.some(c => c && (lc.includes(c) || c.includes(lc)))) return true;
+
+      // 4. Scientific name match
+      if (catalogSci.some(s => s && (lc.includes(s) || s.includes(lc)))) return true;
+
+      // 5. Genus-level match — cluster mentions a genus SB sells from
+      if (catalogGenera.has(lc.split(" ")[0])) return true;
+      if ([...catalogGenera].some(g => lc.includes(g))) return true;
+
+      return false;
+    };
+
+    // Helper: check if plant is in the priority watchlist
+    const isWatchlistPlant = (plantName) => {
       if (!plantName) return false;
-      const lc = plantName.toLowerCase();
+      const lc = norm(plantName);
       return catalogPlantNames.some(cp => lc.includes(cp) || cp.includes(lc));
     };
 
     // ── 3. GENERATE STRUCTURED DATA FROM CODE (no Claude JSON parsing) ────────
 
-    // Score each cluster: catalog plants score higher; non-catalog capped at Market Watch
-    const scoredClusters = activeClusters.map(c => ({
-      ...c,
-      _inCatalog: isInCatalog(c.plant_or_product),
-      _score: c.signal_count + c.question_count * 2 + (c.new_signals_since_review > 0 ? 3 : 0)
-        + (isInCatalog(c.plant_or_product) ? 10 : 0),  // catalog plants ranked higher
-    }));
+    // Score each cluster — watchlist plants get +5 priority boost
+    const scoredClusters = activeClusters.map(c => {
+      const inCatalog   = isInCatalog(c.plant_or_product);
+      const isWatchlist = inCatalog && isWatchlistPlant(c.plant_or_product);
+      return {
+        ...c,
+        _inCatalog:   inCatalog,
+        _isWatchlist: isWatchlist,
+        _score: c.signal_count + c.question_count * 2 +
+                (c.new_signals_since_review > 0 ? 3 : 0) +
+                (isWatchlist ? 5 : 0),
+      };
+    });
 
-    // Prominent Topics: catalog plants only (non-catalog go to Market Watch section)
+    // Prominent Topics: top clusters by signal score — all plants, labeled
     const prominentTopics = scoredClusters
-      .filter(c => (c.signal_count >= 3 || c.question_count >= 2) && c._inCatalog)
+      .filter(c => c.signal_count >= 3 || c.question_count >= 2)
       .sort((a, b) => b._score - a._score)
       .slice(0, 5)
-      .map(c => ({
-        theme:         c.title,
-        cluster_ids:   [c.id],
-        signal_count:  c.signal_count,
-        source_count:  c.distinct_source_count,
-        question_count: c.question_count,
-        catalog_plants: [c.plant_or_product],
-        platforms:     c.platforms || [],
-        change_from_prior: (c.new_signals_since_review || 0) > 0 ? "growing" : "stable",
-        related_owned_content: null,
-        why_prominent: `${c.signal_count} signals across ${c.distinct_source_count} sources` +
-          (c.question_count > 0 ? `, ${c.question_count} audience questions` : "") +
-          (c.novelty_status && c.novelty_status !== "None" ? ` · ${c.novelty_status}` : "") +
-          " · In SB catalog",
-      }));
+      .map(c => {
+        const catalogLabel = c._isWatchlist ? "⭐ Watchlist plant" :
+                             c._inCatalog  ? "In SB catalog"      : "⚠️ Not in catalog";
+        return {
+          theme:         c.title,
+          cluster_ids:   [c.id],
+          signal_count:  c.signal_count,
+          source_count:  c.distinct_source_count,
+          question_count: c.question_count,
+          catalog_plants: c.plant_or_product ? [c.plant_or_product] : [],
+          platforms:     c.platforms || [],
+          change_from_prior: (c.new_signals_since_review || 0) > 0 ? "growing" : "stable",
+          related_owned_content: null,
+          why_prominent: `${c.signal_count} signals across ${c.distinct_source_count} sources` +
+            (c.question_count > 0 ? `, ${c.question_count} audience questions` : "") +
+            (c.novelty_status && c.novelty_status !== "None" ? ` · ${c.novelty_status}` : "") +
+            ` · ${catalogLabel}`,
+        };
+      });
 
-    // Non-catalog clusters with enough signals → flag as Market Watch in today board
+    // Non-catalog clusters with enough signals → show in Market Watch section
     const nonCatalogClusters = scoredClusters
       .filter(c => (c.signal_count >= 3 || c.question_count >= 2) && !c._inCatalog)
       .sort((a, b) => b._score - a._score)
