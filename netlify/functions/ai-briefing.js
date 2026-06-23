@@ -130,31 +130,106 @@ exports.handler = async (event) => {
       return products ? `${p.plant_name} (${products})` : p.plant_name;
     });
 
-    // ── 3. BUILD SHARED CONTEXT STRINGS ──────────────────────────────────────
-    const sharedCtx = buildSharedContext({
+    // ── 3. GENERATE STRUCTURED DATA FROM CODE (no Claude JSON parsing) ────────
+
+    // Prominent Topics: top clusters by combined signal + question score
+    const prominentTopics = activeClusters
+      .filter(c => c.signal_count >= 3 || c.question_count >= 2)
+      .sort((a, b) =>
+        (b.signal_count + b.question_count * 2 + (b.new_signals_since_review > 0 ? 3 : 0)) -
+        (a.signal_count + a.question_count * 2 + (a.new_signals_since_review > 0 ? 3 : 0))
+      )
+      .slice(0, 5)
+      .map(c => ({
+        theme:         c.title,
+        cluster_ids:   [c.id],
+        signal_count:  c.signal_count,
+        source_count:  c.distinct_source_count,
+        question_count: c.question_count,
+        catalog_plants: c.plant_or_product ? [c.plant_or_product] : [],
+        platforms:     c.platforms || [],
+        change_from_prior: (c.new_signals_since_review || 0) > 0 ? "growing" : "stable",
+        related_owned_content: null,
+        why_prominent: `${c.signal_count} signals across ${c.distinct_source_count} sources` +
+          (c.question_count > 0 ? `, ${c.question_count} audience questions` : "") +
+          (c.novelty_status && c.novelty_status !== "None" ? ` · ${c.novelty_status}` : ""),
+      }));
+
+    // Attention Items: clusters needing reviewer action
+    const attentionItems = activeClusters
+      .filter(c => c.review_required || (c.new_signals_since_review || 0) >= 3 ||
+        c.contradiction_status === "Detected" || c.novelty_status === "New tip or claim")
+      .slice(0, 5)
+      .map(c => {
+        const reason = c.contradiction_status === "Detected" ? "Contradictory advice detected"
+          : c.novelty_status === "New tip or claim" ? "New unverified claim"
+          : (c.new_signals_since_review || 0) >= 3 ? `+${c.new_signals_since_review} signals since last review`
+          : "Review required";
+        const action = c.contradiction_status === "Detected" ? "Needs research"
+          : c.novelty_status === "New tip or claim" ? "Needs research"
+          : c.status === "Pattern detected" ? "Move to Content Review"
+          : "Keep watching";
+        return {
+          reason,
+          cluster_id: c.id,
+          title: c.title,
+          evidence_strength: c.signal_count >= 5 ? "Strong" : c.signal_count >= 3 ? "Moderate" : "Weak",
+          ai_confidence: c.ai_confidence || "Medium",
+          recommended_action: action,
+          detail: c.primary_question || c.summary || "",
+        };
+      });
+
+    // Cleanup Suggestions: stagnant or low-signal clusters
+    const sevenDaysAgo = new Date(now); sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const thirtyDaysAgo = new Date(now); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const cleanupSuggestions = activeClusters
+      .filter(c =>
+        (c.signal_count <= 1 && new Date(c.first_seen_at) < sevenDaysAgo) ||
+        (c.status === "Collecting" && new Date(c.first_seen_at) < thirtyDaysAgo && c.signal_count < 3)
+      )
+      .slice(0, 5)
+      .map(c => ({
+        cluster_id:     c.id,
+        cluster_title:  c.title,
+        suggestion_type: c.signal_count <= 1 ? "Dismiss" : "Keep watching",
+        suggested_destination: null,
+        suggested_match_cluster_id: null,
+        reason: c.signal_count <= 1
+          ? `Only ${c.signal_count} signal(s), no growth in 7+ days`
+          : `Collecting for 30+ days with only ${c.signal_count} signals`,
+        confidence: "Medium",
+        evidence_preview: c.summary ? c.summary.slice(0, 100) : null,
+      }));
+
+    // ── 4. CALL CLAUDE — PLAIN TEXT SUMMARY ONLY (no JSON parsing) ───────────
+    const summaryPrompt = buildSummaryPrompt({
+      totalClusters: activeClusters.length,
+      newSignalCount: newSignals.length,
+      changedCount: clustersChanged.length,
+      topTopics: prominentTopics.slice(0, 3).map(t => t.theme),
+      competitorCount: recentCompetitors.length,
+      marketWatchCount: marketWatchPlants.length,
       briefingType, periodStart, periodEnd,
-      activeClusters, newSignals, clustersChanged,
-      previousBriefing, recentCompetitors, marketWatchPlants,
-      published, catalogPlants, filterState,
     });
 
-    // ── 4. CALL CLAUDE — TWO FOCUSED CALLS ───────────────────────────────────
-    // Call 1: summary + prominent topics (~600 token output)
-    const topicsResult = await callClaude(buildTopicsPrompt(sharedCtx), 800);
+    let summaryText = "";
+    try {
+      summaryText = await callClaudeText(summaryPrompt, 150);
+    } catch (e) {
+      // Summary is non-critical — use a fallback if Claude fails
+      summaryText = `${activeClusters.length} active clusters with ${newSignals.length} new signals in this period. ` +
+        (prominentTopics.length > 0 ? `Top topics: ${prominentTopics.slice(0,3).map(t=>t.theme).join(", ")}.` : "");
+    }
 
-    // Call 2: attention items + cleanup suggestions (~800 token output)
-    // passes prominent_topics from Call 1 as context
-    const actionsResult = await callClaude(buildActionsPrompt(sharedCtx, topicsResult.prominent_topics || []), 1200);
-
-    // Merge both results
     const briefingResult = {
-      summary:             topicsResult.summary             || "",
-      signal_count:        topicsResult.signal_count        || newSignals.length,
-      cluster_count:       topicsResult.cluster_count       || activeClusters.length,
-      clusters_changed:    topicsResult.clusters_changed    || clustersChanged.length,
-      prominent_topics:    topicsResult.prominent_topics    || [],
-      attention_items:     actionsResult.attention_items    || [],
-      cleanup_suggestions: actionsResult.cleanup_suggestions || [],
+      summary:             summaryText,
+      signal_count:        newSignals.length,
+      cluster_count:       activeClusters.length,
+      clusters_changed:    clustersChanged.length,
+      prominent_topics:    prominentTopics,
+      attention_items:     attentionItems,
+      cleanup_suggestions: cleanupSuggestions,
     };
 
     // ── 5. SAVE BRIEFING RECORD ───────────────────────────────────────────────
@@ -365,7 +440,42 @@ exports.handler = async (event) => {
 };
 
 
-// ── SHARED CONTEXT BUILDER ─────────────────────────────────────────────────────
+// ── SUMMARY PROMPT (plain text only — no JSON) ────────────────────────────────
+function buildSummaryPrompt(ctx) {
+  const { totalClusters, newSignalCount, changedCount, topTopics,
+    competitorCount, marketWatchCount, briefingType, periodStart, periodEnd } = ctx;
+  return `Write 2 sentences summarizing this social listening briefing for Succulents Box (succulent plant subscriptions).
+
+Data: ${totalClusters} active discovery clusters, ${newSignalCount} new signals (${periodStart?.slice(0,10)} to ${periodEnd?.slice(0,10)}), ${changedCount} clusters updated.
+Top topics: ${topTopics.join(", ") || "none yet"}.
+Competitor activity: ${competitorCount} items. Market watch: ${marketWatchCount} plants.
+
+Write only the 2-sentence summary. No intro, no lists, no JSON.`;
+}
+
+
+// ── CALL CLAUDE: PLAIN TEXT (no JSON parsing) ─────────────────────────────────
+async function callClaudeText(prompt, maxTokens = 150) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method:  "POST",
+    headers: {
+      "x-api-key":         CLAUDE_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type":      "application/json",
+    },
+    body: JSON.stringify({
+      model:      CLAUDE_MODEL,
+      max_tokens: maxTokens,
+      messages:   [{ role: "user", content: prompt }],
+    }),
+  });
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+  return (data.content?.[0]?.text || "").trim();
+}
+
+
+// ── LEGACY SHARED CONTEXT BUILDER (kept for reference) ────────────────────────
 function buildSharedContext(ctx) {
   const {
     briefingType, periodStart, periodEnd,
@@ -542,7 +652,7 @@ Return ONLY valid JSON — no markdown:
 
 
 // ── CALL CLAUDE ────────────────────────────────────────────────────────────────
-async function callClaude(prompt, maxTokens = 2048) {
+async function callClaude(prompt, maxTokens = 1024) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method:  "POST",
     headers: {
@@ -561,12 +671,25 @@ async function callClaude(prompt, maxTokens = 2048) {
   if (data.error) throw new Error(data.error.message);
 
   const text = data.content?.[0]?.text || "";
-  const jsonMatch = text.match(/```json\n?([\s\S]*?)\n?```/) || text.match(/(\{[\s\S]*\})/);
-  if (!jsonMatch) throw new Error("Could not parse Claude response: " + text.slice(0, 200));
+  const stopReason = data.stop_reason || "unknown";
+
+  // Log to Netlify function logs for debugging
+  console.log("[callClaude] stop_reason:", stopReason, "| text_length:", text.length);
+  console.log("[callClaude] text_preview:", text.slice(0, 400));
+
+  if (stopReason === "max_tokens") {
+    throw new Error(`Claude output truncated (hit max_tokens=${maxTokens}). Text so far: ${text.slice(0, 300)}`);
+  }
+
+  // Extract JSON — try markdown block first, then bare object
+  const mdMatch  = text.match(/```json\n?([\s\S]*?)\n?```/);
+  const rawMatch = text.match(/\{[\s\S]*\}/);
+  const raw = mdMatch?.[1] || rawMatch?.[0];
+  if (!raw) throw new Error("No JSON found in Claude response. Raw: " + text.slice(0, 300));
 
   try {
-    return JSON.parse(jsonMatch[1] || jsonMatch[0]);
+    return JSON.parse(raw);
   } catch (e) {
-    throw new Error("Invalid JSON from Claude: " + e.message);
+    throw new Error("Invalid JSON from Claude: " + e.message + " | Raw snippet: " + raw.slice(0, 300));
   }
 }
