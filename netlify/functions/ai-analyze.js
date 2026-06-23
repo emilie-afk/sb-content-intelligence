@@ -964,11 +964,21 @@ C) Signal purpose
   source_marketing_wording = promotional captions, contest instructions, seller claims.
 
 D) Section routing (assign based on ownership + purpose + catalog status)
+
+  GEOGRAPHIC FILTER — APPLY FIRST:
+  Succulents Box ships within the US only. If the signal source clearly operates outside the US
+  (e.g., mentions UK delivery, ships to Australia/EU/Canada only, non-US currency, non-US location
+  in bio or caption such as "Norfolk", "London", "Sydney", "Toronto"), then:
+    → Set section_route to "Mention Tracking" regardless of content
+    → Set processing_path to "Mention only"
+  Do NOT route non-US sources to Competitor Activity or Market Watch — they are not relevant competition.
+  If location is ambiguous or unclear, treat the source as US-based (default to normal routing).
+
   section_route:
-    Catalog Discovery    — catalog match AND (question | problem | tip | claim | comparison | disagreement | purchase intent)
-    Competitor Activity  — competitor/third-party AND (giveaway | sale | launch | showcase | collaboration | promotion)
-    Market Watch         — not in catalog AND relevant audience interest or competitor feature
-    Mention Tracking     — catalog match BUT only showcase/sentiment/lifestyle with no audience issue
+    Catalog Discovery    — US source, catalog match AND (question | problem | tip | claim | comparison | disagreement | purchase intent)
+    Competitor Activity  — US source, competitor/third-party AND (giveaway | sale | launch | showcase | collaboration | promotion)
+    Market Watch         — US source, not in catalog AND relevant audience interest or competitor feature
+    Mention Tracking     — catalog match BUT only showcase/sentiment/lifestyle with no audience issue; OR non-US source
     Needs Catalog Review — catalog match uncertain
     Noise                — unrelated to plants/market
 

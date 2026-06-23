@@ -155,11 +155,20 @@ exports.handler = async (event) => {
     // Normalise: strip scientific name in parens, lowercase
     const norm = (s) => (s || "").toLowerCase().replace(/\s*\(.*?\)\s*/g, "").trim();
 
+    // Specific varieties confirmed NOT in SB catalog.
+    // Genus-level match alone isn't enough for highly specific varieties.
+    // Add a term here whenever a cluster surfaces a plant you've confirmed you don't carry.
+    const NOT_IN_CATALOG = [
+      "black widow",   // Gymnocalycium mihanovichii var. black widow — not in SB catalog
+    ];
+
     const isInCatalog = (plantName) => {
       if (!plantName) return true; // No specific plant = general topic, always relevant
 
-      const lc  = norm(plantName);
-      const lc2 = plantName.toLowerCase(); // also check raw (some common names have parens)
+      const lc = norm(plantName);
+
+      // 0. Explicit exclusions beat everything (genus match alone isn't sufficient)
+      if (NOT_IN_CATALOG.some(excl => lc.includes(excl))) return false;
 
       // General terms always match
       if (GENERAL_TERMS.some(t => lc.includes(t))) return true;
@@ -168,7 +177,7 @@ exports.handler = async (event) => {
       if (catalogPlantNames.some(cp => lc.includes(cp) || cp.includes(lc))) return true;
 
       // 2. Full product title match
-      if (catalogTitles.some(t => lc.includes(t) || t.includes(lc))) return true;
+      if (catalogTitles.some(t => t && (lc.includes(t) || t.includes(lc)))) return true;
 
       // 3. Common name match (title with scientific name stripped)
       if (catalogCommon.some(c => c && (lc.includes(c) || c.includes(lc)))) return true;
@@ -176,9 +185,10 @@ exports.handler = async (event) => {
       // 4. Scientific name match
       if (catalogSci.some(s => s && (lc.includes(s) || s.includes(lc)))) return true;
 
-      // 5. Genus-level match — cluster mentions a genus SB sells from
-      if (catalogGenera.has(lc.split(" ")[0])) return true;
-      if ([...catalogGenera].some(g => lc.includes(g))) return true;
+      // 5. Genus-level fallback — only if no specific variety name is present
+      //    (i.e. the cluster title is just the genus, not "Genus Species Cultivar")
+      const words = lc.split(/\s+/);
+      if (words.length <= 2 && catalogGenera.has(words[0])) return true;
 
       return false;
     };
@@ -206,9 +216,10 @@ exports.handler = async (event) => {
       };
     });
 
-    // Prominent Topics: top clusters by signal score — all plants, labeled
+    // Prominent Topics: in-catalog plants only, ranked by score
+    // Non-catalog plants go to Market Watch regardless of signal count
     const prominentTopics = scoredClusters
-      .filter(c => c.signal_count >= 3 || c.question_count >= 2)
+      .filter(c => c._inCatalog && (c.signal_count >= 3 || c.question_count >= 2))
       .sort((a, b) => b._score - a._score)
       .slice(0, 5)
       .map(c => {
