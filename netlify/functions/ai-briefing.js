@@ -187,42 +187,123 @@ exports.handler = async (event) => {
       }
     }
 
-    // ── 7. POPULATE TODAY BOARD ───────────────────────────────────────────────
-    const todayItems = briefingResult.today_items || [];
-    if (todayItems.length > 0) {
-      const boardDate = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    // ── 7. POPULATE TODAY BOARD (generated from code, not Claude) ────────────
+    const boardDate = now.toISOString().slice(0, 10);
 
-      // Clear existing unresolved today_board_items for today (avoid duplicates on re-run)
-      await supabase
-        .from("today_board_items")
-        .delete()
-        .eq("board_date", boardDate)
-        .in("status", ["New today", "Needs decision"]);
+    // Clear existing unresolved items for today
+    await supabase.from("today_board_items").delete()
+      .eq("board_date", boardDate)
+      .in("status", ["New today", "Needs decision"]);
 
-      const todayRows = todayItems
-        .filter(item => item.title)
-        .map((item, idx) => ({
-          briefing_id:       briefingId,
-          cluster_id:        item.cluster_id        || null,
-          suggestion_id:     item.suggestion_id     || null,
-          section:           item.section           || "Prominent Topics",
-          rank:              item.rank              ?? idx,
-          title:             item.title,
-          summary:           item.summary            || null,
-          why_today:         item.why_today          || null,
-          evidence_summary:  item.evidence_summary   || null,
-          ai_confidence:     item.ai_confidence      || "Medium",
-          recommended_action: item.recommended_action || null,
-          status:            "New today",
-          board_date:        boardDate,
-          created_at:        now.toISOString(),
-          updated_at:        now.toISOString(),
-        }));
+    const todayRows = [];
+    let rank = 0;
 
-      if (todayRows.length > 0) {
-        await supabase.from("today_board_items").insert(todayRows);
-      }
+    // Prominent Topics — from Claude's prominent_topics
+    for (const topic of (briefingResult.prominent_topics || []).slice(0, 5)) {
+      todayRows.push({
+        briefing_id: briefingId,
+        cluster_id:  topic.cluster_ids?.[0] || null,
+        section:     "Prominent Topics",
+        rank:        rank++,
+        title:       topic.theme,
+        summary:     topic.why_prominent || null,
+        why_today:   topic.change_from_prior ? `Change: ${topic.change_from_prior}` : null,
+        evidence_summary: `${topic.signal_count || 0} signals, ${topic.source_count || 0} sources, ${topic.question_count || 0} questions`,
+        ai_confidence: "Medium",
+        recommended_action: "Review cluster",
+        status: "New today", board_date: boardDate,
+        created_at: now.toISOString(), updated_at: now.toISOString(),
+      });
     }
+
+    // Content Candidates — clusters with status "Pattern detected" or "Content review ready"
+    const candidates = activeClusters
+      .filter(c => c.status === "Pattern detected" || c.status === "Content review ready")
+      .slice(0, 5);
+    for (const c of candidates) {
+      todayRows.push({
+        briefing_id: briefingId, cluster_id: c.id,
+        section: "Content Candidates", rank: rank++,
+        title: c.title,
+        summary: c.summary || null,
+        why_today: `${c.signal_count} signals across ${c.distinct_source_count} sources`,
+        evidence_summary: `${c.question_count || 0} questions · ${(c.platforms || []).join(", ")}`,
+        ai_confidence: c.ai_confidence || "Medium",
+        recommended_action: c.status === "Content review ready" ? "View in Content Review" : "Move to Content Review",
+        status: "New today", board_date: boardDate,
+        created_at: now.toISOString(), updated_at: now.toISOString(),
+      });
+    }
+
+    // Attention Items — from Claude's attention_items
+    for (const item of (briefingResult.attention_items || []).slice(0, 5)) {
+      const section = item.recommended_action === "Move to Content Review" ? "Content Candidates"
+        : item.recommended_action === "Flag for research" ? "Needs Research"
+        : "Prominent Topics";
+      todayRows.push({
+        briefing_id: briefingId, cluster_id: item.cluster_id || null,
+        section, rank: rank++,
+        title: item.title,
+        summary: item.detail || null,
+        why_today: item.reason || null,
+        evidence_summary: `Evidence: ${item.evidence_strength}`,
+        ai_confidence: item.ai_confidence || "Medium",
+        recommended_action: item.recommended_action || null,
+        status: "New today", board_date: boardDate,
+        created_at: now.toISOString(), updated_at: now.toISOString(),
+      });
+    }
+
+    // Cleanup Review — one item per saved suggestion
+    for (const s of cleanupSuggestions.slice(0, 5)) {
+      todayRows.push({
+        briefing_id: briefingId, cluster_id: s.cluster_id || null,
+        section: "Cleanup Review", rank: rank++,
+        title: `${s.suggestion_type}: ${s.cluster_title || "cluster"}`,
+        summary: s.reason || null,
+        why_today: "AI flagged for cleanup",
+        evidence_summary: s.evidence_preview || null,
+        ai_confidence: s.confidence || "Medium",
+        recommended_action: s.suggestion_type,
+        status: "New today", board_date: boardDate,
+        created_at: now.toISOString(), updated_at: now.toISOString(),
+      });
+    }
+
+    // Market Watch Alerts
+    for (const mw of marketWatchPlants.slice(0, 3)) {
+      todayRows.push({
+        briefing_id: briefingId, cluster_id: null,
+        section: "Market Watch Alerts", rank: rank++,
+        title: `${mw.plant_name} — market activity`,
+        summary: `${mw.signal_count} signals, ${mw.question_count} questions`,
+        why_today: "Active in market watch this period",
+        evidence_summary: `${mw.distinct_source_count} sources · ${(mw.platforms || []).join(", ")}`,
+        ai_confidence: "Medium", recommended_action: "Review market watch",
+        status: "New today", board_date: boardDate,
+        created_at: now.toISOString(), updated_at: now.toISOString(),
+      });
+    }
+
+    // Competitor Alerts
+    for (const ca of recentCompetitors.slice(0, 3)) {
+      todayRows.push({
+        briefing_id: briefingId, cluster_id: null,
+        section: "Competitor Alerts", rank: rank++,
+        title: `${ca.source_account_name || "Competitor"} — ${ca.plant_name}`,
+        summary: ca.ai_summary || null,
+        why_today: "Competitor activity detected this period",
+        evidence_summary: ca.activity_type || null,
+        ai_confidence: "Medium", recommended_action: "Review competitor activity",
+        status: "New today", board_date: boardDate,
+        created_at: now.toISOString(), updated_at: now.toISOString(),
+      });
+    }
+
+    if (todayRows.length > 0) {
+      await supabase.from("today_board_items").insert(todayRows);
+    }
+    const todayItemsCount = todayRows.length;
 
     // ── 8. BUILD CLEANUP COUNTS SUMMARY ──────────────────────────────────────
     const cleanupCounts = {
@@ -256,7 +337,7 @@ exports.handler = async (event) => {
         prominent_topics: briefingResult.prominent_topics || [],
         attention_items:  briefingResult.attention_items  || [],
         cleanup_counts:   cleanupCounts,
-        today_items_count: todayRows?.length || 0,
+        today_items_count: todayItemsCount || 0,
         suggestions_count: cleanupSuggestions.length,
       }),
     };
@@ -437,19 +518,6 @@ Return ONLY valid JSON — no markdown, no explanation:
       "reason": "why this action is suggested",
       "confidence": "High | Medium | Low",
       "evidence_preview": "short excerpt from the cluster that supports this suggestion"
-    }
-  ],
-  "today_items": [
-    {
-      "section": "one of the 6 allowed sections",
-      "cluster_id": "uuid or null",
-      "title": "decision item title",
-      "summary": "what the reviewer needs to know",
-      "why_today": "why this needs a decision today",
-      "evidence_summary": "signal count, sources, key question",
-      "ai_confidence": "High | Medium | Low",
-      "recommended_action": "what the reviewer should do",
-      "rank": 0
     }
   ]
 }`;
