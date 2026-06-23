@@ -256,7 +256,7 @@ exports.handler = async (event) => {
     const briefingId = savedBriefing.id;
 
     // ── 6. SAVE CLEANUP SUGGESTIONS ───────────────────────────────────────────
-    const cleanupSuggestions = briefingResult.cleanup_suggestions || [];
+    // cleanupSuggestions already computed in section 3
     if (cleanupSuggestions.length > 0) {
       const suggestionRows = cleanupSuggestions
         .filter(s => s.cluster_id)
