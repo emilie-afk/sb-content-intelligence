@@ -159,7 +159,8 @@ exports.handler = async (event) => {
     // Genus-level match alone isn't enough for highly specific varieties.
     // Add a term here whenever a cluster surfaces a plant you've confirmed you don't carry.
     const NOT_IN_CATALOG = [
-      "black widow",   // Gymnocalycium mihanovichii var. black widow — not in SB catalog
+      "black widow",        // Gymnocalycium mihanovichii var. black widow — not in SB catalog
+      "springbokvlakensis", // Haworthia springbokvlakensis hybrid — not in SB catalog
     ];
 
     const isInCatalog = (plantName) => {
@@ -248,10 +249,14 @@ exports.handler = async (event) => {
       .sort((a, b) => b._score - a._score)
       .slice(0, 3);
 
-    // Attention Items: clusters needing reviewer action
-    const attentionItems = activeClusters
-      .filter(c => c.review_required || (c.new_signals_since_review || 0) >= 3 ||
-        c.contradiction_status === "Detected" || c.novelty_status === "New tip or claim")
+    // market_watch_plants rows — filter out any plant now confirmed in SB catalog
+    // (catches historical mis-routing before catalog matching was fixed)
+    const trulyNonCatalogMW = marketWatchPlants.filter(mw => !isInCatalog(mw.plant_name));
+
+    // Attention Items: clusters needing reviewer action — catalog plants only
+    const attentionItems = scoredClusters
+      .filter(c => c._inCatalog && (c.review_required || (c.new_signals_since_review || 0) >= 3 ||
+        c.contradiction_status === "Detected" || c.novelty_status === "New tip or claim"))
       .slice(0, 5)
       .map(c => {
         const reason = c.contradiction_status === "Detected" ? "Contradictory advice detected"
@@ -302,7 +307,7 @@ exports.handler = async (event) => {
       changedCount: clustersChanged.length,
       topTopics: prominentTopics.slice(0, 3).map(t => t.theme),
       competitorCount: recentCompetitors.length,
-      marketWatchCount: marketWatchPlants.length,
+      marketWatchCount: trulyNonCatalogMW.length,
       briefingType, periodStart, periodEnd,
     });
 
@@ -400,9 +405,9 @@ exports.handler = async (event) => {
       });
     }
 
-    // Content Candidates — clusters with status "Pattern detected" or "Content review ready"
-    const candidates = activeClusters
-      .filter(c => c.status === "Pattern detected" || c.status === "Content review ready")
+    // Content Candidates — catalog plants only, with status "Pattern detected" or "Content review ready"
+    const candidates = scoredClusters
+      .filter(c => c._inCatalog && (c.status === "Pattern detected" || c.status === "Content review ready"))
       .slice(0, 5);
     for (const c of candidates) {
       todayRows.push({
@@ -454,8 +459,8 @@ exports.handler = async (event) => {
       });
     }
 
-    // Market Watch Alerts — from market_watch_plants table
-    for (const mw of marketWatchPlants.slice(0, 3)) {
+    // Market Watch Alerts — from market_watch_plants table (catalog-filtered above)
+    for (const mw of trulyNonCatalogMW.slice(0, 3)) {
       todayRows.push({
         briefing_id: briefingId, cluster_id: null,
         section: "Market Watch Alerts", rank: rank++,
@@ -487,7 +492,7 @@ exports.handler = async (event) => {
     // Competitor Alerts
     for (const ca of recentCompetitors.slice(0, 3)) {
       todayRows.push({
-        briefing_id: briefingId, cluster_id: null,
+        briefing_id: briefingId, cluster_id: ca.id,  // reuse cluster_id to store competitor_activity.id
         section: "Competitor Alerts", rank: rank++,
         title: `${ca.source_account_name || "Competitor"} — ${ca.plant_name}`,
         summary: ca.ai_summary || null,
