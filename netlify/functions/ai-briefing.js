@@ -125,20 +125,33 @@ exports.handler = async (event) => {
     const recentCompetitors = competitorActivity || [];
     const marketWatchPlants = marketWatch        || [];
     const published         = ownedContent       || [];
+    const catalogPlantNames = (watchlist || []).map(p => p.plant_name.toLowerCase());
     const catalogPlants     = (watchlist || []).map(p => {
       const products = p.top_products ? p.top_products.split(" || ").slice(0, 5).join(", ") : null;
       return products ? `${p.plant_name} (${products})` : p.plant_name;
     });
 
+    // Helper: check if a plant is in the SB catalog
+    const isInCatalog = (plantName) => {
+      if (!plantName) return false;
+      const lc = plantName.toLowerCase();
+      return catalogPlantNames.some(cp => lc.includes(cp) || cp.includes(lc));
+    };
+
     // ── 3. GENERATE STRUCTURED DATA FROM CODE (no Claude JSON parsing) ────────
 
-    // Prominent Topics: top clusters by combined signal + question score
-    const prominentTopics = activeClusters
-      .filter(c => c.signal_count >= 3 || c.question_count >= 2)
-      .sort((a, b) =>
-        (b.signal_count + b.question_count * 2 + (b.new_signals_since_review > 0 ? 3 : 0)) -
-        (a.signal_count + a.question_count * 2 + (a.new_signals_since_review > 0 ? 3 : 0))
-      )
+    // Score each cluster: catalog plants score higher; non-catalog capped at Market Watch
+    const scoredClusters = activeClusters.map(c => ({
+      ...c,
+      _inCatalog: isInCatalog(c.plant_or_product),
+      _score: c.signal_count + c.question_count * 2 + (c.new_signals_since_review > 0 ? 3 : 0)
+        + (isInCatalog(c.plant_or_product) ? 10 : 0),  // catalog plants ranked higher
+    }));
+
+    // Prominent Topics: catalog plants only (non-catalog go to Market Watch section)
+    const prominentTopics = scoredClusters
+      .filter(c => (c.signal_count >= 3 || c.question_count >= 2) && c._inCatalog)
+      .sort((a, b) => b._score - a._score)
       .slice(0, 5)
       .map(c => ({
         theme:         c.title,
@@ -146,14 +159,21 @@ exports.handler = async (event) => {
         signal_count:  c.signal_count,
         source_count:  c.distinct_source_count,
         question_count: c.question_count,
-        catalog_plants: c.plant_or_product ? [c.plant_or_product] : [],
+        catalog_plants: [c.plant_or_product],
         platforms:     c.platforms || [],
         change_from_prior: (c.new_signals_since_review || 0) > 0 ? "growing" : "stable",
         related_owned_content: null,
         why_prominent: `${c.signal_count} signals across ${c.distinct_source_count} sources` +
           (c.question_count > 0 ? `, ${c.question_count} audience questions` : "") +
-          (c.novelty_status && c.novelty_status !== "None" ? ` · ${c.novelty_status}` : ""),
+          (c.novelty_status && c.novelty_status !== "None" ? ` · ${c.novelty_status}` : "") +
+          " · In SB catalog",
       }));
+
+    // Non-catalog clusters with enough signals → flag as Market Watch in today board
+    const nonCatalogClusters = scoredClusters
+      .filter(c => (c.signal_count >= 3 || c.question_count >= 2) && !c._inCatalog)
+      .sort((a, b) => b._score - a._score)
+      .slice(0, 3);
 
     // Attention Items: clusters needing reviewer action
     const attentionItems = activeClusters
@@ -361,7 +381,7 @@ exports.handler = async (event) => {
       });
     }
 
-    // Market Watch Alerts
+    // Market Watch Alerts — from market_watch_plants table
     for (const mw of marketWatchPlants.slice(0, 3)) {
       todayRows.push({
         briefing_id: briefingId, cluster_id: null,
@@ -371,6 +391,21 @@ exports.handler = async (event) => {
         why_today: "Active in market watch this period",
         evidence_summary: `${mw.distinct_source_count} sources · ${(mw.platforms || []).join(", ")}`,
         ai_confidence: "Medium", recommended_action: "Review market watch",
+        status: "New today", board_date: boardDate,
+        created_at: now.toISOString(), updated_at: now.toISOString(),
+      });
+    }
+
+    // Market Watch Alerts — non-catalog clusters with audience signal (not in SB catalog)
+    for (const c of nonCatalogClusters) {
+      todayRows.push({
+        briefing_id: briefingId, cluster_id: c.id,
+        section: "Market Watch Alerts", rank: rank++,
+        title: `${c.plant_or_product || c.title} — not in SB catalog`,
+        summary: c.summary || c.title,
+        why_today: `${c.signal_count} signals but plant not in SB catalog — consider adding or monitoring`,
+        evidence_summary: `${c.signal_count} signals · ${c.distinct_source_count} sources · ${(c.platforms || []).join(", ")}`,
+        ai_confidence: "Medium", recommended_action: "Send to Market Watch",
         status: "New today", board_date: boardDate,
         created_at: now.toISOString(), updated_at: now.toISOString(),
       });
