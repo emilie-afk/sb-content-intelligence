@@ -771,17 +771,15 @@ tbody tr:hover { background: #fafffe; }
         <div class="stat-card"><div class="stat-number" id="disc-total">—</div><div class="stat-label">Total clusters</div></div>
         <div class="stat-card"><div class="stat-number" id="disc-pattern">—</div><div class="stat-label">Pattern detected</div></div>
         <div class="stat-card"><div class="stat-number" id="disc-ready">—</div><div class="stat-label">Review ready</div></div>
-        <div class="stat-card"><div class="stat-number" id="disc-new">—</div><div class="stat-label">New claims</div></div>
+        <div class="stat-card"><div class="stat-number" id="disc-new">—</div><div class="stat-label">Manual signals</div></div>
       </div>
 
-      <!-- Section tabs -->
-      <div class="filters" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-sm disc-section-btn active" data-section="all" onclick="setDiscSection('all',this)">All</button>
-        <button class="btn btn-sm disc-section-btn" data-section="most-mentioned" onclick="setDiscSection('most-mentioned',this)">Most Mentioned</button>
-        <button class="btn btn-sm disc-section-btn" data-section="most-asked" onclick="setDiscSection('most-asked',this)">Most Asked</button>
-        <button class="btn btn-sm disc-section-btn" data-section="emerging" onclick="setDiscSection('emerging',this)">Emerging</button>
-        <button class="btn btn-sm disc-section-btn" data-section="new-claims" onclick="setDiscSection('new-claims',this)">New &amp; Unfamiliar</button>
-        <button class="btn btn-sm disc-section-btn" data-section="contradictions" onclick="setDiscSection('contradictions',this)">Contradictions</button>
+      <!-- Controls row -->
+      <div class="filters" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <div style="display:flex;gap:3px;background:#1e293b;border-radius:6px;padding:3px">
+          <button class="btn btn-sm disc-mode-btn active" data-mode="sections" onclick="setDiscMode('sections',this)" style="font-size:12px">📋 Sections</button>
+          <button class="btn btn-sm disc-mode-btn" data-mode="all" onclick="setDiscMode('all',this)" style="font-size:12px">☰ All</button>
+        </div>
         <div style="flex:1"></div>
         <select class="filter-select" id="disc-plant-filter" onchange="loadDiscovery()">
           <option value="">All plants</option>
@@ -792,7 +790,7 @@ tbody tr:hover { background: #fafffe; }
         </select>
         <select class="filter-select" id="disc-status-filter" onchange="loadDiscovery()">
           <option value="">All statuses</option>
-          <option>Collecting</option><option>Pattern detected</option><option>Content review ready</option><option>Keep watching</option>
+          <option>Collecting</option><option>Pattern detected</option><option>Content review ready</option><option>Keep watching</option><option>Mention only</option>
         </select>
         <button class="btn btn-secondary" onclick="loadDiscovery()">↺ Refresh</button>
         <button class="btn btn-secondary" id="maintenance-btn" onclick="runMaintenance()" title="Re-run qualification checks on all existing clusters">⚙️ Run Maintenance</button>
@@ -800,8 +798,11 @@ tbody tr:hover { background: #fafffe; }
         <button class="btn btn-primary" onclick="generateBriefing('on-demand',this)" title="Generate AI briefing and populate Today board">✨ AI Briefing</button>
       </div>
 
-      <!-- Cluster cards -->
-      <div id="discovery-clusters-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px">
+      <!-- Sections view (default) -->
+      <div id="discovery-sections-view"></div>
+
+      <!-- Flat grid (All mode) -->
+      <div id="discovery-clusters-grid" style="display:none;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px">
         <div style="color:var(--text-muted);padding:40px;text-align:center;grid-column:1/-1">Loading clusters…</div>
       </div>
 
@@ -2575,13 +2576,24 @@ function renderRepetitionAnalysis(a) {
 }
 
 // ── DISCOVERY BOARD ───────────────────────────────────────────────────
-let _discSection = 'all';
+let _discMode = 'sections';
 
-function setDiscSection(section, btn) {
-  _discSection = section;
-  document.querySelectorAll('.disc-section-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  renderDiscoveryClusters(window._discClusters || []);
+function setDiscMode(mode, btn) {
+  _discMode = mode;
+  document.querySelectorAll('.disc-mode-btn').forEach(b => {
+    b.classList.toggle('active', b === btn);
+    b.style.background = b === btn ? 'var(--primary)' : 'transparent';
+    b.style.color = b === btn ? '#fff' : 'var(--text-muted)';
+  });
+  const sv = document.getElementById('discovery-sections-view');
+  const gv = document.getElementById('discovery-clusters-grid');
+  if (mode === 'sections') {
+    sv.style.display = 'block'; gv.style.display = 'none';
+    renderDiscoverySections(window._discClusters || []);
+  } else {
+    sv.style.display = 'none'; gv.style.display = 'grid';
+    renderDiscoveryClusters(window._discClusters || []);
+  }
 }
 
 async function loadDiscovery() {
@@ -2590,113 +2602,240 @@ async function loadDiscovery() {
   const status   = document.getElementById('disc-status-filter')?.value;
 
   let q = sb.from('discovery_clusters')
-    .select('*')
-    .not('status', 'eq', 'Closed')
-    .order('signal_count', { ascending: false })
-    .limit(100);
+    .select(`id,title,summary,plant_or_product,primary_question,
+      signal_count,audience_signal_count,manual_signal_count,owned_comment_signal_count,
+      question_count,distinct_source_count,platforms,audience_wording,
+      problems_mentioned,tips_mentioned,first_seen_at,last_seen_at,
+      recent_mention_count,previous_mention_count,new_signals_since_review,
+      novelty_status,contradiction_status,ai_confidence,status,maintenance_status,
+      review_required,last_ai_updated_at,ai_update_summary,revenue_priority_match,
+      audience_recurring_boolean,repetition_source_type,covered_before_boolean,ai_reason`)
+    .not('status', 'in', '("Closed","Blocked irrelevant")')
+    .order('audience_signal_count', { ascending: false, nullsFirst: false })
+    .limit(150);
   if (plant)    q = q.ilike('plant_or_product', `%${plant}%`);
   if (platform) q = q.contains('platforms', [platform]);
   if (status)   q = q.eq('status', status);
 
   const { data, error } = await q;
   if (error) {
-    document.getElementById('discovery-clusters-grid').innerHTML =
-      `<div style="color:#e74c3c;padding:40px;text-align:center;grid-column:1/-1">Error: ${esc(error.message)}</div>`;
+    document.getElementById('discovery-sections-view').innerHTML =
+      `<div style="color:#e74c3c;padding:40px;text-align:center">Error: ${esc(error.message)}</div>`;
     return;
   }
 
   window._discClusters = data || [];
 
-  // Update stats
-  document.getElementById('disc-total').textContent   = data?.length || 0;
+  // Stats
+  document.getElementById('disc-total').textContent   = data?.filter(c => c.status !== 'Mention only').length || 0;
   document.getElementById('disc-pattern').textContent = data?.filter(c => c.status === 'Pattern detected').length || 0;
   document.getElementById('disc-ready').textContent   = data?.filter(c => c.status === 'Content review ready').length || 0;
-  document.getElementById('disc-new').textContent     = data?.filter(c => ['New tip or claim','New contradiction'].includes(c.novelty_status)).length || 0;
+  document.getElementById('disc-new').textContent     = data?.filter(c => (c.manual_signal_count||0) > 0).length || 0;
   document.getElementById('badge-discovery').textContent =
     data?.filter(c => ['Pattern detected','Content review ready'].includes(c.status)).length || 0;
 
-  // Populate plant filter dropdown
-  const plants = [...new Set((data || []).map(c => c.plant_or_product).filter(Boolean))].sort();
+  // Populate plant filter
+  const plants = [...new Set((data||[]).map(c=>c.plant_or_product).filter(Boolean))].sort();
   const plantSel = document.getElementById('disc-plant-filter');
-  const currentPlant = plantSel.value;
+  const cur = plantSel.value;
   plantSel.innerHTML = '<option value="">All plants</option>' +
-    plants.map(p => `<option${p === currentPlant ? ' selected' : ''}>${esc(p)}</option>`).join('');
+    plants.map(p=>`<option${p===cur?' selected':''}>${esc(p)}</option>`).join('');
 
-  renderDiscoveryClusters(data || []);
+  if (_discMode === 'sections') renderDiscoverySections(data || []);
+  else renderDiscoveryClusters(data || []);
 }
 
-function renderDiscoveryClusters(all) {
-  const grid = document.getElementById('discovery-clusters-grid');
-
-  // Filter by section
-  let data = all;
-  if (_discSection === 'most-mentioned')  data = [...all].sort((a,b) => (b.signal_count||0) - (a.signal_count||0));
-  if (_discSection === 'most-asked')      data = all.filter(c => (c.question_count||0) >= 1).sort((a,b) => (b.question_count||0) - (a.question_count||0));
-  if (_discSection === 'emerging')        data = all.filter(c => (c.previous_mention_count||0) > 0 && (c.recent_mention_count||0) >= (c.previous_mention_count||0) * 1.5).sort((a,b) => (b.recent_mention_count||0) - (a.recent_mention_count||0));
-  if (_discSection === 'new-claims')      data = all.filter(c => ['New tip or claim','New contradiction','New audience wording','New question about a known topic','New plant connected to a known problem'].includes(c.novelty_status));
-  if (_discSection === 'contradictions')  data = all.filter(c => c.contradiction_status === 'Detected' || c.contradiction_status === 'Reviewer confirmed');
-
-  if (!data.length) {
-    grid.innerHTML = '<div style="color:var(--text-muted);padding:40px;text-align:center;grid-column:1/-1">No clusters found for this section.</div>';
-    return;
-  }
-
+// ── CARD RENDERER (shared by sections + all-mode) ─────────────────────────────
+function discClusterCard(c) {
   const statusColor = {
-    'Collecting':            '#6b7280',
-    'Pattern detected':      '#d97706',
-    'Content review ready':  '#059669',
-    'Under review':          '#2563eb',
-    'Keep watching':         '#7c3aed',
+    'Collecting':'#6b7280','Pattern detected':'#d97706',
+    'Content review ready':'#059669','Under review':'#2563eb',
+    'Keep watching':'#7c3aed','Mention only':'#374151',
   };
   const noveltyBadge = {
-    'New tip or claim':                 { bg: '#d97706', text: '🆕 New tip' },
-    'New contradiction':                { bg: '#e74c3c', text: '⚡ Contradiction' },
-    'New audience wording':             { bg: '#7c3aed', text: '💬 New wording' },
-    'New question about a known topic': { bg: '#2563eb', text: '❓ New angle' },
-    'New plant connected to a known problem': { bg: '#059669', text: '🌱 New plant link' },
-    'Known recurring topic':            { bg: '#6b7280', text: '🔁 Recurring' },
+    'New tip or claim':{'bg':'#d97706','text':'🆕 New tip'},
+    'New contradiction':{'bg':'#e74c3c','text':'⚡ Contradiction'},
+    'New audience wording':{'bg':'#7c3aed','text':'💬 New wording'},
+    'New question about a known topic':{'bg':'#2563eb','text':'❓ New angle'},
+    'New plant connected to a known problem':{'bg':'#059669','text':'🌱 New plant link'},
+    'Known recurring topic':{'bg':'#6b7280','text':'🔁 Recurring'},
+    'Audience recurring':{'bg':'#7c3aed','text':'🔁 Recurring'},
   };
+  const nb = noveltyBadge[c.novelty_status] || null;
+  const wording  = (c.audience_wording || []).slice(0,2);
+  const lastSeen = c.last_seen_at ? new Date(c.last_seen_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '—';
+  const newSigs  = c.new_signals_since_review || 0;
+  const manual   = c.manual_signal_count || 0;
+  const owned    = c.owned_comment_signal_count || 0;
+  const asc      = c.audience_signal_count ?? c.signal_count ?? 0;
+  const condMatch = (c.ai_reason||'').match(/Conditions:\s*([^|]+)/);
+  const conditions = condMatch ? condMatch[1].trim() : null;
+  const reviewReadyBtn = c.status === 'Pattern detected'
+    ? `<button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="moveClusterToReview('${c.id}',event)">→ Review</button>`
+    : '';
+  return `
+  <div class="stat-card" style="cursor:pointer;border-left:3px solid ${statusColor[c.status]||'#444'}" onclick="openDiscoveryPanel('${c.id}')">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:5px">
+      <div style="font-weight:600;font-size:14px;line-height:1.3">${esc(c.title)}</div>
+      <span style="font-size:11px;color:${statusColor[c.status]||'#888'};white-space:nowrap;font-weight:500">${esc(c.status)}</span>
+    </div>
+    ${c.plant_or_product ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">🌱 ${esc(c.plant_or_product)}</div>` : ''}
+    ${c.summary ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:5px;line-height:1.4">${esc(c.summary)}</div>` : ''}
+    ${conditions ? `<div style="font-size:11px;color:#7c3aed;margin-bottom:5px">📍 ${esc(conditions)}</div>` : ''}
+    ${(newSigs>0||c.review_required||c.covered_before_boolean) ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:5px">
+      ${newSigs>0?`<span style="font-size:10px;background:#1e3a5f;color:#93c5fd;border-radius:10px;padding:2px 8px;font-weight:600">+${newSigs} new</span>`:''}
+      ${c.review_required?`<span style="font-size:10px;background:#450a0a;color:#fca5a5;border-radius:10px;padding:2px 8px;font-weight:600">⚠️ Review</span>`:''}
+      ${c.covered_before_boolean?`<span style="font-size:10px;background:#292524;color:#d6b98c;border-radius:10px;padding:2px 8px">⚠️ Covered before</span>`:''}
+    </div>` : ''}
+    <div style="display:flex;gap:10px;font-size:12px;color:var(--text-muted);margin-bottom:6px;flex-wrap:wrap">
+      <span title="Audience signals">📊 ${asc}</span>
+      ${manual>0?`<span title="Manual signals" style="color:#a78bfa">✍️ ${manual}</span>`:''}
+      ${owned>0?`<span title="Owned comments" style="color:#34d399">💬 ${owned}</span>`:''}
+      ${(c.question_count||0)>0?`<span title="Questions">❓ ${c.question_count}</span>`:''}
+      ${(c.distinct_source_count||0)>1?`<span title="Sources">🔗 ${c.distinct_source_count}</span>`:''}
+      <span title="Last seen">🕐 ${lastSeen}</span>
+    </div>
+    ${wording.length?`<div style="font-size:11px;color:#9ca3af;font-style:italic;margin-bottom:6px">"${wording.map(esc).join('" · "')}"</div>`:''}
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      ${nb?`<span style="font-size:11px;font-weight:600;color:${nb.bg}">${nb.text}</span>`:'<span></span>'}
+      ${reviewReadyBtn}
+    </div>
+  </div>`;
+}
 
-  grid.innerHTML = data.map(c => {
-    const nb = noveltyBadge[c.novelty_status] || null;
-    const wording = (c.audience_wording || []).slice(0, 2);
-    const lastSeen = c.last_seen_at ? new Date(c.last_seen_at).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—';
-    const platforms = (c.platforms || []).join(', ') || '—';
-    const reviewReadyBtn = c.status === 'Pattern detected'
-      ? `<button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="moveClusterToReview('${c.id}',event)">→ Content Review</button>`
-      : '';
-    // Extract relevant conditions from ai_reason (format: "... | Conditions: x, y")
-    const condMatch = (c.ai_reason || '').match(/Conditions:\s*([^|]+)/);
-    const conditions = condMatch ? condMatch[1].trim() : null;
-    const newSigs = c.new_signals_since_review || 0;
+// ── SECTIONS VIEW ─────────────────────────────────────────────────────────────
+function renderDiscoverySections(all) {
+  const SECTIONS = [
+    {
+      id:'ready', icon:'✅', title:'Ready for Content Review',
+      desc:'Qualified clusters — strong enough to become a brief',
+      filter: c => ['Pattern detected','Content review ready'].includes(c.status),
+      sort: (a,b) => ((b.audience_signal_count??b.signal_count??0)) - ((a.audience_signal_count??a.signal_count??0)),
+      empty:'No clusters ready yet. Run Maintenance after new signals are analyzed.',
+    },
+    {
+      id:'questions', icon:'❓', title:'Repeated Audience Questions',
+      desc:'People are asking the same thing across sources',
+      filter: c => (c.question_count||0)>=1 && !['Mention only'].includes(c.status),
+      sort: (a,b) => (b.question_count||0)-(a.question_count||0),
+      empty:'No clusters with audience questions yet.',
+    },
+    {
+      id:'manual', icon:'✍️', title:'Manual Signals Worth Reviewing',
+      desc:'Intentional submissions from the intake sheet or dashboard',
+      filter: c => (c.manual_signal_count||0)>=1 && !['Mention only'].includes(c.status),
+      sort: (a,b) => (b.manual_signal_count||0)-(a.manual_signal_count||0),
+      empty:'No manual signals yet. Signals submitted via intake sheet or dashboard appear here.',
+    },
+    {
+      id:'owned', icon:'💬', title:'Owned Comment Follow-ups',
+      desc:"Audience asking follow-up questions on SB's own content",
+      filter: c => (c.owned_comment_signal_count||0)>=1,
+      sort: (a,b) => (b.owned_comment_signal_count||0)-(a.owned_comment_signal_count||0),
+      empty:"No owned comment signals yet.",
+    },
+    {
+      id:'claims', icon:'🔬', title:'New Tips or Claims to Verify',
+      desc:'Care advice or plant claims that need fact-checking before scripting',
+      filter: c => ['New tip or claim','New contradiction'].includes(c.novelty_status) && c.status!=='Mention only',
+      sort: (a,b) => new Date(b.last_seen_at)-new Date(a.last_seen_at),
+      empty:'No unverified claims detected.',
+    },
+    {
+      id:'emerging', icon:'📈', title:'Emerging Topics',
+      desc:'Gaining momentum — not ready yet but worth watching',
+      filter: c => (c.previous_mention_count||0)>0 && (c.recent_mention_count||0)>=(c.previous_mention_count||0)*1.5 && !['Pattern detected','Content review ready'].includes(c.status),
+      sort: (a,b) => (b.recent_mention_count||0)-(a.recent_mention_count||0),
+      empty:'No emerging topics detected yet.',
+    },
+    {
+      id:'recurring', icon:'🔁', title:'Audience Recurring',
+      desc:'Confirmed repeating demand — audience keeps coming back to this',
+      filter: c => c.audience_recurring_boolean && !['Pattern detected','Content review ready'].includes(c.status),
+      sort: (a,b) => ((b.audience_signal_count??b.signal_count??0))-((a.audience_signal_count??a.signal_count??0)),
+      empty:'No confirmed recurring audience topics yet.',
+    },
+    {
+      id:'collecting', icon:'📡', title:'Collecting',
+      desc:'Weak signals — watching for more evidence before acting',
+      filter: c => c.status==='Collecting' && !(c.manual_signal_count||0) && !(c.question_count||0) && !c.audience_recurring_boolean,
+      sort: (a,b) => new Date(b.last_seen_at)-new Date(a.last_seen_at),
+      limit: 8,
+      empty:'No clusters still collecting.',
+    },
+  ];
+
+  const sv = document.getElementById('discovery-sections-view');
+  const collapsed = window._discCollapsed || {};
+
+  sv.innerHTML = SECTIONS.map(sec => {
+    const items = all.filter(sec.filter).sort(sec.sort);
+    const limit  = sec.limit || 5;
+    const isCollapsed = collapsed[sec.id];
+    const shown  = isCollapsed ? [] : items.slice(0, limit);
+    const hasMore = items.length > limit;
+    const countColor = items.length ? '#e2e8f0' : '#4b5563';
+
     return `
-    <div class="stat-card" style="cursor:pointer;border-left:3px solid ${statusColor[c.status]||'#444'}" onclick="openDiscoveryPanel('${c.id}')">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px">
-        <div style="font-weight:600;font-size:14px;line-height:1.3">${esc(c.title)}</div>
-        <span style="font-size:11px;color:${statusColor[c.status]||'#888'};white-space:nowrap;font-weight:500">${esc(c.status)}</span>
+    <div class="disc-section" id="disc-sec-${sec.id}" style="margin-bottom:24px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;cursor:pointer" onclick="toggleDiscSection('${sec.id}')">
+        <span style="font-size:16px">${sec.icon}</span>
+        <div style="flex:1">
+          <span style="font-size:15px;font-weight:700;color:#e2e8f0">${sec.title}</span>
+          ${items.length ? '' : `<span style="font-size:11px;color:#4b5563;margin-left:6px">empty</span>`}
+          <span style="margin-left:6px;background:${items.length?'#1e3a5f':'#1e293b'};color:${countColor};border-radius:10px;padding:1px 8px;font-size:11px;font-weight:600">${items.length}</span>
+        </div>
+        <span style="color:#4b5563;font-size:13px">${isCollapsed?'▶':'▾'}</span>
       </div>
-      ${c.summary ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:5px;line-height:1.4">${esc(c.summary)}</div>` : ''}
-      ${c.plant_or_product ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:5px">🌱 ${esc(c.plant_or_product)}</div>` : ''}
-      ${conditions ? `<div style="font-size:11px;color:#7c3aed;margin-bottom:6px">📍 ${esc(conditions)}</div>` : ''}
-      ${(newSigs > 0 || c.review_required) ? `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
-        ${newSigs > 0 ? `<span style="font-size:10px;background:#1e3a5f;color:#93c5fd;border-radius:10px;padding:2px 8px;font-weight:600">+${newSigs} since review</span>` : ''}
-        ${c.review_required ? `<span style="font-size:10px;background:#450a0a;color:#fca5a5;border-radius:10px;padding:2px 8px;font-weight:600">⚠️ Review needed</span>` : ''}
-      </div>` : ''}
-      ${c.ai_update_summary ? `<div style="font-size:11px;color:#64748b;margin-bottom:6px;font-style:italic;line-height:1.3">🤖 ${esc(c.ai_update_summary)}</div>` : ''}
-      <div style="display:flex;gap:12px;font-size:12px;color:var(--text-muted);margin-bottom:8px">
-        <span title="Signals">📊 ${c.signal_count||0}</span>
-        ${(c.question_count||0) > 0 ? `<span title="Questions">❓ ${c.question_count}</span>` : ''}
-        ${(c.distinct_source_count||0) > 1 ? `<span title="Sources">🔗 ${c.distinct_source_count} sources</span>` : ''}
-        <span title="Last seen">🕐 ${lastSeen}</span>
-        ${platforms !== '—' ? `<span title="Platforms">${platforms}</span>` : ''}
-      </div>
-      ${wording.length ? `<div style="font-size:12px;color:#9ca3af;font-style:italic;margin-bottom:8px">"${wording.map(esc).join('" · "')}"</div>` : ''}
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-        ${nb ? `<span style="font-size:11px;font-weight:600;color:${nb.bg}">${nb.text}</span>` : '<span></span>'}
-        ${reviewReadyBtn}
-      </div>
+      ${!isCollapsed && items.length ? `
+        <div style="font-size:12px;color:#64748b;margin-bottom:10px;margin-left:26px">${sec.desc}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-left:0">
+          ${shown.map(discClusterCard).join('')}
+        </div>
+        ${hasMore && !isCollapsed ? `<button class="btn btn-secondary" style="margin-top:10px;font-size:12px" onclick="expandDiscSection('${sec.id}',${items.length})">Show all ${items.length} →</button>` : ''}
+      ` : ''}
+      ${!isCollapsed && !items.length ? `<div style="color:#4b5563;font-size:13px;padding:12px 0 4px 26px;font-style:italic">${sec.empty}</div>` : ''}
+      <div style="border-top:1px solid #1e293b;margin-top:14px"></div>
     </div>`;
   }).join('');
+}
+
+window._discCollapsed = {};
+function toggleDiscSection(id) {
+  window._discCollapsed[id] = !window._discCollapsed[id];
+  renderDiscoverySections(window._discClusters || []);
+}
+function expandDiscSection(id, total) {
+  // Re-render section with full list
+  const sec = document.getElementById('disc-sec-'+id);
+  if (!sec) return;
+  const all = window._discClusters || [];
+  const SECTIONS = {
+    ready:     c => ['Pattern detected','Content review ready'].includes(c.status),
+    questions: c => (c.question_count||0)>=1,
+    manual:    c => (c.manual_signal_count||0)>=1,
+    owned:     c => (c.owned_comment_signal_count||0)>=1,
+    claims:    c => ['New tip or claim','New contradiction'].includes(c.novelty_status),
+    emerging:  c => (c.previous_mention_count||0)>0 && (c.recent_mention_count||0)>=(c.previous_mention_count||0)*1.5,
+    recurring: c => c.audience_recurring_boolean,
+    collecting:c => c.status==='Collecting',
+  };
+  const filter = SECTIONS[id] || (() => true);
+  const items = all.filter(filter);
+  const cardsEl = sec.querySelector('div[style*="grid-template-columns"]');
+  if (cardsEl) cardsEl.innerHTML = items.map(discClusterCard).join('');
+  const moreBtn = sec.querySelector('button[onclick*="expandDiscSection"]');
+  if (moreBtn) moreBtn.remove();
+}
+
+// ── FLAT GRID (All mode) ──────────────────────────────────────────────────────
+function renderDiscoveryClusters(all) {
+  const grid = document.getElementById('discovery-clusters-grid');
+  if (!all.length) {
+    grid.innerHTML = '<div style="color:var(--text-muted);padding:40px;text-align:center;grid-column:1/-1">No clusters found.</div>';
+    return;
+  }
+  grid.innerHTML = all.map(discClusterCard).join('');
 }
 
 async function openDiscoveryPanel(clusterId) {
