@@ -87,6 +87,9 @@ exports.handler = async (event) => {
     comments_count:        s.comments !== undefined ? Number(s.comments) : null,
     post_date:             s.post_date || null,
     status:                "New",
+    // is_manual: true  = intake sheet or dashboard modal (human submitted)
+    // is_manual: false = scraper (not passed → defaults false)
+    is_manual_submission:  s.is_manual ?? s.is_manual_submission ?? false,
   }));
 
   // ── 4. Deduplicate against existing source_urls ──────────────

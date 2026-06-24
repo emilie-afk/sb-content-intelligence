@@ -459,11 +459,6 @@ tbody tr:hover { background: #fafffe; }
             onclick="generateBriefing(document.getElementById('briefing-type-select').value,this)">
             ✨ Generate Briefing
           </button>
-          <button class="btn" id="run-cleanup-btn" title="AI reviews all clusters and removes/reroutes irrelevant ones"
-            onclick="runCleanupBatch(this)"
-            style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;font-size:13px">
-            🧹 Run Cleanup
-          </button>
         </div>
       </div>
       <div id="today-view-body">
@@ -801,6 +796,7 @@ tbody tr:hover { background: #fafffe; }
         </select>
         <button class="btn btn-secondary" onclick="loadDiscovery()">↺ Refresh</button>
         <button class="btn btn-secondary" id="maintenance-btn" onclick="runMaintenance()" title="Re-run qualification checks on all existing clusters">⚙️ Run Maintenance</button>
+        <button class="btn btn-secondary" id="run-cleanup-btn" onclick="runCleanupBatch(this)" title="AI reviews all clusters and removes or reroutes irrelevant ones">🧹 Run Cleanup</button>
         <button class="btn btn-primary" onclick="generateBriefing('on-demand',this)" title="Generate AI briefing and populate Today board">✨ AI Briefing</button>
       </div>
 
@@ -1843,9 +1839,10 @@ async function deleteLearning(id) {
 // ── SAVE MODALS ───────────────────────────────────────────────────────
 async function saveSignal() {
   const row = {
-    platform:        document.getElementById('sig-platform').value,
-    source_url:      document.getElementById('sig-url').value || null,
-    creator_name:    document.getElementById('sig-creator').value || null,
+    platform:             document.getElementById('sig-platform').value,
+    source_url:           document.getElementById('sig-url').value || null,
+    creator_name:         document.getElementById('sig-creator').value || null,
+    is_manual_submission: true,  // dashboard modal = human submitted
     topic:           document.getElementById('sig-topic').value || null,
     caption_summary: document.getElementById('sig-caption').value || null,
     audience_problem:document.getElementById('sig-problem').value || null,
