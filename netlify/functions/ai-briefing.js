@@ -73,12 +73,13 @@ exports.handler = async (event) => {
     let clusterQuery = supabase
       .from("discovery_clusters")
       .select(`id, title, summary, plant_or_product, primary_question,
-        signal_count, question_count, distinct_source_count,
+        signal_count, audience_signal_count, question_count, distinct_source_count,
         platforms, audience_wording, problems_mentioned, tips_mentioned,
         first_seen_at, last_seen_at, recent_mention_count, previous_mention_count,
         novelty_status, contradiction_status, ai_confidence, status,
         maintenance_status, review_required, last_ai_updated_at, new_signals_since_review,
-        ai_update_summary, revenue_priority_match`)
+        ai_update_summary, revenue_priority_match,
+        audience_recurring_boolean, repetition_source_type, covered_before_boolean`)
       .not("status", "in", '("Closed","Blocked irrelevant")')
       .order("signal_count", { ascending: false })
       .limit(60);
@@ -145,15 +146,19 @@ exports.handler = async (event) => {
 
     const GENERAL_TERMS = ["cactus","succulent","air plant","tillandsia","houseplant","plant"];
 
-    // Build lookup sets from live sb_products data
-    const catalog = sbProducts || [];
-    const catalogTitles    = catalog.map(p => p.title.toLowerCase());
-    const catalogCommon    = catalog.map(p => (p.common_name || "").toLowerCase()).filter(Boolean);
-    const catalogSci       = catalog.map(p => (p.scientific_name || "").toLowerCase()).filter(Boolean);
-    const catalogGenera    = new Set(catalog.map(p => (p.genus || "").toLowerCase()).filter(Boolean));
+    // Normalise: lowercase, strip parenthetical scientific names, collapse all whitespace
+    // Apply BEFORE building catalog arrays so comparisons are consistent
+    const norm = (s) => (s || "").toLowerCase()
+      .replace(/\s*\(.*?\)\s*/g, "")  // strip "(Senecio peregrinus)" etc.
+      .replace(/\s+/g, " ")           // collapse non-breaking spaces, tabs, double spaces
+      .trim();
 
-    // Normalise: strip scientific name in parens, lowercase
-    const norm = (s) => (s || "").toLowerCase().replace(/\s*\(.*?\)\s*/g, "").trim();
+    // Build lookup sets from live sb_products data (all normalized for consistent matching)
+    const catalog = sbProducts || [];
+    const catalogTitles    = catalog.map(p => norm(p.title)).filter(Boolean);
+    const catalogCommon    = catalog.map(p => norm(p.common_name || "")).filter(Boolean);
+    const catalogSci       = catalog.map(p => norm(p.scientific_name || "")).filter(Boolean);
+    const catalogGenera    = new Set(catalog.map(p => (p.genus || "").toLowerCase().trim()).filter(Boolean));
 
     // Specific varieties confirmed NOT in SB catalog.
     // Genus-level match alone isn't enough for highly specific varieties.
@@ -204,23 +209,28 @@ exports.handler = async (event) => {
     // ── 3. GENERATE STRUCTURED DATA FROM CODE (no Claude JSON parsing) ────────
 
     // Score each cluster — watchlist plants get +5 priority boost
+    // Use audience_signal_count (v13) as the primary demand signal; fall back to signal_count
     const scoredClusters = activeClusters.map(c => {
       const inCatalog   = isInCatalog(c.plant_or_product);
       const isWatchlist = inCatalog && isWatchlistPlant(c.plant_or_product);
+      const asc = c.audience_signal_count ?? c.signal_count ?? 0; // audience signal count
       return {
         ...c,
         _inCatalog:   inCatalog,
         _isWatchlist: isWatchlist,
-        _score: c.signal_count + c.question_count * 2 +
+        _asc: asc,
+        _score: asc + (c.question_count ?? 0) * 2 +
                 (c.new_signals_since_review > 0 ? 3 : 0) +
+                (c.audience_recurring_boolean ? 4 : 0) +  // confirmed recurring demand bonus
                 (isWatchlist ? 5 : 0),
       };
     });
 
-    // Prominent Topics: in-catalog plants only, ranked by score
-    // Non-catalog plants go to Market Watch regardless of signal count
+    // Prominent Topics: in-catalog plants only, ranked by score.
+    // Threshold uses audience_signal_count (not raw signal_count) — owned archive matches
+    // should not inflate a cluster into Prominent Topics.
     const prominentTopics = scoredClusters
-      .filter(c => c._inCatalog && (c.signal_count >= 3 || c.question_count >= 2))
+      .filter(c => c._inCatalog && (c._asc >= 3 || (c.question_count ?? 0) >= 2))
       .sort((a, b) => b._score - a._score)
       .slice(0, 5)
       .map(c => {
@@ -236,9 +246,11 @@ exports.handler = async (event) => {
           platforms:     c.platforms || [],
           change_from_prior: (c.new_signals_since_review || 0) > 0 ? "growing" : "stable",
           related_owned_content: null,
-          why_prominent: `${c.signal_count} signals across ${c.distinct_source_count} sources` +
-            (c.question_count > 0 ? `, ${c.question_count} audience questions` : "") +
-            (c.novelty_status && c.novelty_status !== "None" ? ` · ${c.novelty_status}` : "") +
+          why_prominent: `${c._asc} audience signals across ${c.distinct_source_count} sources` +
+            ((c.question_count ?? 0) > 0 ? `, ${c.question_count} questions` : "") +
+            (c.audience_recurring_boolean ? " · Audience recurring" : "") +
+            (c.covered_before_boolean ? " · Covered before (check repetition risk)" : "") +
+            (c.novelty_status && c.novelty_status !== "None" && c.novelty_status !== "Unclear" ? ` · ${c.novelty_status}` : "") +
             ` · ${catalogLabel}`,
         };
       });

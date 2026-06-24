@@ -328,6 +328,14 @@ exports.handler = async (event) => {
           const newSignalCount = (cluster.signal_count || 0) + 1;
           const newSinceReview = (cluster.new_signals_since_review || 0) + 1;
 
+          // Determine if this signal is from current external audience (not owned archive)
+          const isAudienceSignal = attr.ownership_type !== "Owned content";
+          const newAudienceCount = (cluster.audience_signal_count ?? cluster.signal_count ?? 0) + (isAudienceSignal ? 1 : 0);
+          const signalRepetitionType = getRepetitionSourceType(attr.ownership_type);
+          // Upgrade repetition_source_type if the new signal is stronger evidence
+          const currentRepType = cluster.repetition_source_type || "none";
+          const newRepType = mergeRepetitionType(currentRepType, signalRepetitionType);
+
           // Build a short update summary describing what changed
           const updateParts = [`+1 signal (total: ${newSignalCount})`];
           if (idea.evidence_type === "Question") updateParts.push("new question");
@@ -338,6 +346,8 @@ exports.handler = async (event) => {
 
           await supabase.from("discovery_clusters").update({
             signal_count:            newSignalCount,
+            audience_signal_count:   newAudienceCount,
+            repetition_source_type:  newRepType,
             question_count:          idea.evidence_type === "Question" ? (cluster.question_count || 0) + 1 : cluster.question_count,
             last_seen_at:            now,
             audience_wording:        mergedWording,
@@ -379,6 +389,8 @@ exports.handler = async (event) => {
               audience_wording:       idea.audience_wording || [],
               evidence_types:         idea.evidence_type ? [idea.evidence_type] : [],
               signal_count:           1,
+              audience_signal_count:  attr.ownership_type !== "Owned content" ? 1 : 0,
+              repetition_source_type: getRepetitionSourceType(attr.ownership_type),
               question_count:         idea.evidence_type === "Question" ? 1 : 0,
               distinct_source_count:  1,
               platforms:              data.platform ? [data.platform] : [],
@@ -657,6 +669,32 @@ async function upsertMarketWatchPlant(supabase, idea, signalId, signal, attr) {
       });
     }
   }
+}
+
+
+// ── REPETITION SOURCE TYPE HELPERS ────────────────────────────────────────────
+// Maps ownership_type from the extraction prompt to the DB enum value.
+function getRepetitionSourceType(ownershipType) {
+  if (ownershipType === "Competitor content")                                return "competitor_repetition";
+  if (ownershipType === "Owned content")                                     return "owned_archive_only";
+  if (ownershipType === "Community content" || ownershipType === "Customer content") return "current_audience";
+  return "current_audience"; // Unknown, Third-party media — default to audience
+}
+
+// When updating an existing cluster, keep the "strongest" repetition type seen so far.
+// Priority: current_audience > competitor_repetition > market_repetition > owned_comments > owned_archive_only > none
+const REP_PRIORITY = {
+  current_audience:      5,
+  competitor_repetition: 4,
+  market_repetition:     3,
+  owned_comments:        2,
+  owned_archive_only:    1,
+  none:                  0,
+};
+function mergeRepetitionType(existing, incoming) {
+  const ep = REP_PRIORITY[existing]  ?? 0;
+  const ip = REP_PRIORITY[incoming] ?? 0;
+  return ip > ep ? incoming : existing;
 }
 
 
@@ -965,14 +1003,19 @@ C) Signal purpose
 
 D) Section routing (assign based on ownership + purpose + catalog status)
 
-  GEOGRAPHIC FILTER — APPLY FIRST:
-  Succulents Box ships within the US only. If the signal source clearly operates outside the US
-  (e.g., mentions UK delivery, ships to Australia/EU/Canada only, non-US currency, non-US location
-  in bio or caption such as "Norfolk", "London", "Sydney", "Toronto"), then:
-    → Set section_route to "Mention Tracking" regardless of content
-    → Set processing_path to "Mention only"
-  Do NOT route non-US sources to Competitor Activity or Market Watch — they are not relevant competition.
-  If location is ambiguous or unclear, treat the source as US-based (default to normal routing).
+  GEOGRAPHIC FILTER — ONLY when there is EXPLICIT non-US evidence in the content:
+  Succulents Box ships within the US only. Apply this filter ONLY if the caption or bio contains
+  one or more of these specific signals:
+    - Explicit non-US currency (£, €, AUS$, NZ$, CAD$, etc.)
+    - Explicit phrase like "ships to UK", "deliver to Australia", "EU shipping", "ships to Canada"
+    - A city or country stated in the caption/bio that is clearly outside the US (e.g. "Norfolk, UK", "London", "Sydney", "Toronto")
+
+  If ANY of the above are present → Set section_route to "Mention Tracking", processing_path to "Mention only".
+
+  DO NOT apply this filter based on:
+    - Account name or handle alone (handles don't reveal location)
+    - Any ambiguity — default US-based when unsure
+    - A city name that could be US (e.g. "Norfolk" alone could be Norfolk, VA)
 
   section_route:
     Catalog Discovery    — US source, catalog match AND (question | problem | tip | claim | comparison | disagreement | purchase intent)

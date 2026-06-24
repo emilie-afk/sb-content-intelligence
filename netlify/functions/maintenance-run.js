@@ -61,11 +61,14 @@ exports.handler = async (event) => {
       if (qualifies && cluster.status === "Collecting") {
         await Promise.all([
           supabase.from("discovery_clusters").update({
-            status:             "Pattern detected",
-            maintenance_status: "Pattern detected",
-            last_ai_updated_at: now,
-            ai_update_summary:  "Promoted: " + qualifies.reason,
-            prompt_version:     PROMPT_VERSION,
+            status:                   "Pattern detected",
+            maintenance_status:       "Pattern detected",
+            last_ai_updated_at:       now,
+            ai_update_summary:        "Promoted: " + qualifies.reason,
+            prompt_version:           PROMPT_VERSION,
+            audience_recurring_boolean: true,
+            // Keep existing repetition_source_type if already set; default to current_audience
+            repetition_source_type:   cluster.repetition_source_type || "current_audience",
           }).eq("id", cluster.id),
           supabase.from("cluster_audit_log").insert({
             cluster_id:     cluster.id,
@@ -117,17 +120,20 @@ exports.handler = async (event) => {
 
 
 // ── PATTERN QUALIFICATION (mirrors ai-analyze.js) ─────────────────────────────
+// Uses audience_signal_count (current external audience only) — not signal_count.
+// signal_count counts everything; audience_signal_count excludes owned archive matches.
 function checkQualification(cluster) {
-  const sc = cluster.signal_count           || 0;
-  const qc = cluster.question_count         || 0;
-  const dc = cluster.distinct_source_count  || 0;
-  const rc = cluster.recent_mention_count   || 0;
-  const pc = cluster.previous_mention_count || 0;
+  // audience_signal_count is the v13 field; fall back to signal_count for old rows
+  const asc = cluster.audience_signal_count ?? cluster.signal_count ?? 0;
+  const qc  = cluster.question_count        ?? 0;
+  const dc  = cluster.distinct_source_count ?? 0;
+  const rc  = cluster.recent_mention_count  ?? 0;
+  const pc  = cluster.previous_mention_count ?? 0;
 
   if (qc >= 3)
-    return { qualifies: true, reason: `${qc} independent question signals` };
-  if (sc >= 3 && dc >= 2)
-    return { qualifies: true, reason: `${sc} independent signals across ${dc} sources` };
+    return { qualifies: true, reason: `${qc} independent audience questions` };
+  if (asc >= 3 && dc >= 2)
+    return { qualifies: true, reason: `${asc} audience signals across ${dc} sources` };
   if (dc >= 2 && rc >= 3 && pc > 0 && rc >= pc * 2)
     return { qualifies: true, reason: `Growth: ${pc} → ${rc} mentions across ${dc} sources` };
   if (dc >= 2 && cluster.novelty_status === "New tip or claim")

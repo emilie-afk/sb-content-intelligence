@@ -459,6 +459,11 @@ tbody tr:hover { background: #fafffe; }
             onclick="generateBriefing(document.getElementById('briefing-type-select').value,this)">
             ✨ Generate Briefing
           </button>
+          <button class="btn" id="run-cleanup-btn" title="AI reviews all clusters and removes/reroutes irrelevant ones"
+            onclick="runCleanupBatch(this)"
+            style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;font-size:13px">
+            🧹 Run Cleanup
+          </button>
         </div>
       </div>
       <div id="today-view-body">
@@ -1581,7 +1586,12 @@ async function deleteCompetitorActivity(competitorActivityId, todayItemId) {
   if (!confirm('Delete this competitor from the database? This cannot be undone.')) return;
   const { error: caErr } = await sb.from('competitor_activity').delete().eq('id', competitorActivityId);
   if (caErr) { toast('Error deleting competitor: ' + caErr.message, true); return; }
-  await sb.from('today_board_items').delete().eq('id', todayItemId);
+  // Mark the today board item resolved so it's filtered out on reload
+  await sb.from('today_board_items').update({
+    status: 'Resolved',
+    resolved_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }).eq('id', todayItemId);
   toast('🗑 Competitor removed');
   loadToday();
 }
@@ -1604,6 +1614,38 @@ async function generateBriefing(type = 'on-demand', callerBtn) {
     toast('Briefing failed: ' + err.message, true);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '✨ AI Briefing'; }
+  }
+}
+
+async function runCleanupBatch(callerBtn) {
+  const btn = callerBtn || document.getElementById('run-cleanup-btn');
+  if (!confirm('Run AI Cleanup Batch?\n\nThis will automatically:\n• Block clearly irrelevant clusters\n• Close weak/vague clusters\n• Mark showcase-only clusters as "Mention only"\n• Queue borderline clusters for your review\n\nThis processes up to 15 clusters per run. Run it multiple times to clean the full board.')) return;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Cleaning…'; }
+  toast('🧹 Running AI cleanup… this can take 15–20 seconds');
+  try {
+    const resp = await fetch('/.netlify/functions/ai-cleanup-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ offset: 0, limit: 15 }),
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || 'Unknown error');
+    const a = result.actions || {};
+    const parts = [];
+    if (a.delete_and_block) parts.push(`${a.delete_and_block} blocked`);
+    if (a.dismiss)          parts.push(`${a.dismiss} dismissed`);
+    if (a.reroute_mention)  parts.push(`${a.reroute_mention} → Mention only`);
+    if (a.queued_for_review) parts.push(`${a.queued_for_review} queued for review`);
+    if (a.keep)              parts.push(`${a.keep} kept`);
+    toast(`🧹 Cleanup done — ${result.batch_size} clusters processed: ${parts.join(', ') || 'no changes'}`);
+    if (result.has_more) {
+      toast(`💡 More clusters remain. Run Cleanup again to continue (next offset: ${result.next_offset}).`);
+    }
+    loadDiscovery();
+  } catch (err) {
+    toast('Cleanup failed: ' + err.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🧹 Run Cleanup'; }
   }
 }
 
