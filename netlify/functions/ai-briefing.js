@@ -492,12 +492,13 @@ exports.handler = async (event) => {
     // Competitor Alerts
     for (const ca of recentCompetitors.slice(0, 3)) {
       todayRows.push({
-        briefing_id: briefingId, cluster_id: ca.id,  // reuse cluster_id to store competitor_activity.id
+        briefing_id: briefingId, cluster_id: null,
         section: "Competitor Alerts", rank: rank++,
         title: `${ca.source_account_name || "Competitor"} — ${ca.plant_name}`,
         summary: ca.ai_summary || null,
         why_today: "Competitor activity detected this period",
-        evidence_summary: ca.activity_type || null,
+        // Prefix ca.id so the delete button can extract it without a separate lookup
+        evidence_summary: `[ca:${ca.id}] ${ca.activity_type || ''}`,
         ai_confidence: "Medium", recommended_action: "Review competitor activity",
         status: "New today", board_date: boardDate,
         created_at: now.toISOString(), updated_at: now.toISOString(),
