@@ -49,7 +49,7 @@ exports.handler = async (event) => {
   catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
 
   const offset  = body.offset  ?? 0;
-  const limit   = Math.min(body.limit ?? 15, 20);
+  const limit   = Math.min(body.limit ?? 10, 12); // 10 clusters keeps Claude response under ~1800 tokens and well within timeout
   const dryRun  = body.dry_run ?? false;
 
   try {
@@ -169,20 +169,20 @@ REVIEWER QUEUE (flag but don't auto-apply):
 CLUSTERS TO CLASSIFY:
 ${clusterLines}
 
-Return ONLY a JSON array, one object per cluster, in the same order:
+Return ONLY a JSON array, one object per cluster, in the same order. Keep reasons under 8 words.
 [
   {
     "id": "<uuid>",
     "action": "keep|dismiss|reroute_mention|reroute_market_watch|reroute_competitor|needs_research|delete_and_block|merge",
     "confidence": "High|Medium|Low",
-    "reason": "one brief sentence"
+    "reason": "under 8 words"
   }
 ]
 
 No extra text. Just the JSON array.`;
 
     // ── 4. CALL CLAUDE ─────────────────────────────────────────────────────────
-    const decisions = await callClaude(prompt, 1200);
+    const decisions = await callClaude(prompt, 2000);
 
     // Validate: must be array matching cluster count
     if (!Array.isArray(decisions) || decisions.length === 0) {

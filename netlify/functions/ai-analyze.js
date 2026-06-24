@@ -330,7 +330,7 @@ exports.handler = async (event) => {
 
           // Determine signal source category for weighted scoring
           const isAudienceSignal = attr.ownership_type !== "Owned content";
-          const isManualSignal   = signal.is_manual_submission === true;
+          const isManualSignal   = data.is_manual_submission === true;
           const newAudienceCount = (cluster.audience_signal_count ?? cluster.signal_count ?? 0) + (isAudienceSignal ? 1 : 0);
           const newManualCount   = (cluster.manual_signal_count  ?? 0) + (isManualSignal   ? 1 : 0);
           const signalRepetitionType = getRepetitionSourceType(attr.ownership_type);
@@ -393,7 +393,7 @@ exports.handler = async (event) => {
               evidence_types:         idea.evidence_type ? [idea.evidence_type] : [],
               signal_count:           1,
               audience_signal_count:  attr.ownership_type !== "Owned content" ? 1 : 0,
-              manual_signal_count:    signal.is_manual_submission === true ? 1 : 0,
+              manual_signal_count:    data.is_manual_submission === true ? 1 : 0,
               repetition_source_type: getRepetitionSourceType(attr.ownership_type),
               question_count:         idea.evidence_type === "Question" ? 1 : 0,
               distinct_source_count:  1,
@@ -1204,29 +1204,33 @@ Return ONLY valid JSON:
 
 
 // ── PATTERN QUALIFICATION ─────────────────────────────────────────────────────
-// Returns { qualifies: true, reason } or false
-// Rules per spec v2:
-//   Rule 1: 3+ independent question signals
-//   Rule 2: 3+ independent signals across 2+ sources (same pattern)
-//   Rule 3a: 2+ distinct sources + meaningful growth (rc >= 2x pc AND rc >= 3)
-//   Rule 3b: 2+ distinct sources + new tip or claim
-//   Rule 3c: 2+ distinct sources + contradiction detected
-//   Rule 4: Reviewer manually pinned
+// Returns { qualifies: true, reason } or false.
+// v14: manual_signal_count and owned_comment_signal_count trigger earlier qualification.
 // NOTE: 2 distinct sources alone does NOT qualify for Content Review.
 function checkQualification(cluster) {
-  const sc = cluster.signal_count          || 0;
-  const qc = cluster.question_count        || 0;
-  const dc = cluster.distinct_source_count || 0;
-  const rc = cluster.recent_mention_count  || 0;
-  const pc = cluster.previous_mention_count || 0;
+  const asc    = cluster.audience_signal_count     ?? cluster.signal_count ?? 0;
+  const manual = cluster.manual_signal_count        ?? 0;
+  const owned  = cluster.owned_comment_signal_count ?? 0;
+  const qc     = cluster.question_count             ?? 0;
+  const dc     = cluster.distinct_source_count      ?? 0;
+  const rc     = cluster.recent_mention_count       ?? 0;
+  const pc     = cluster.previous_mention_count     ?? 0;
 
-  // Rule 1: 3+ independent question signals
+  // v14 Rule 0a: 1 manual + 1 question = immediately worth reviewing
+  if (manual >= 1 && qc >= 1)
+    return { qualifies: true, reason: `Manual signal with ${qc} audience question(s)` };
+
+  // v14 Rule 0b: Strong owned-comment demand
+  if (owned >= 2)
+    return { qualifies: true, reason: `${owned} owned comment signals — audience follow-up demand` };
+
+  // Rule 1: 3+ independent audience questions
   if (qc >= 3)
-    return { qualifies: true, reason: `${qc} independent question signals` };
+    return { qualifies: true, reason: `${qc} independent audience questions` };
 
-  // Rule 2: 3+ independent signals across 2+ distinct sources
-  if (sc >= 3 && dc >= 2)
-    return { qualifies: true, reason: `${sc} independent signals across ${dc} sources` };
+  // Rule 2: 3+ audience signals across 2+ distinct sources
+  if (asc >= 3 && dc >= 2)
+    return { qualifies: true, reason: `${asc} audience signals across ${dc} sources` };
 
   // Rule 3a: 2+ sources + meaningful growth (at least double AND at least 3 recent)
   if (dc >= 2 && rc >= 3 && pc > 0 && rc >= pc * 2)
