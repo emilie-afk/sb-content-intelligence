@@ -73,7 +73,8 @@ exports.handler = async (event) => {
     let clusterQuery = supabase
       .from("discovery_clusters")
       .select(`id, title, summary, plant_or_product, primary_question,
-        signal_count, audience_signal_count, question_count, distinct_source_count,
+        signal_count, audience_signal_count, manual_signal_count, owned_comment_signal_count,
+        question_count, distinct_source_count,
         platforms, audience_wording, problems_mentioned, tips_mentioned,
         first_seen_at, last_seen_at, recent_mention_count, previous_mention_count,
         novelty_status, contradiction_status, ai_confidence, status,
@@ -208,21 +209,43 @@ exports.handler = async (event) => {
 
     // ── 3. GENERATE STRUCTURED DATA FROM CODE (no Claude JSON parsing) ────────
 
-    // Score each cluster — watchlist plants get +5 priority boost
-    // Use audience_signal_count (v13) as the primary demand signal; fall back to signal_count
+    // ── OPPORTUNITY SCORE ─────────────────────────────────────────────────────
+    // Weighted by signal source quality (per planning doc):
+    //   Manual submission:    3× (intentional, high-context human observation)
+    //   Owned comment:        3× (brand's own audience, high intent)
+    //   Question (any source): +2 per question (clear audience need)
+    //   Remaining audience:   1× (scraped signals — breadth/trend only)
+    //   Audience recurring:  +4 (confirmed pattern across multiple sources)
+    //   New signals:         +2 (recent momentum)
+    //   Watchlist plant:     +5 (revenue priority)
+    // Old owned script matches are excluded from audience_signal_count (v13 field).
     const scoredClusters = activeClusters.map(c => {
       const inCatalog   = isInCatalog(c.plant_or_product);
       const isWatchlist = inCatalog && isWatchlistPlant(c.plant_or_product);
-      const asc = c.audience_signal_count ?? c.signal_count ?? 0; // audience signal count
+
+      const asc      = c.audience_signal_count    ?? c.signal_count ?? 0;
+      const manual   = c.manual_signal_count       ?? 0;
+      const owned    = c.owned_comment_signal_count ?? 0;
+      const qc       = c.question_count            ?? 0;
+      const scraped  = Math.max(0, asc - manual - owned); // remaining audience signals
+
+      const score =
+        manual  * 3 +
+        owned   * 3 +
+        qc      * 2 +
+        scraped * 1 +
+        (c.audience_recurring_boolean        ? 4 : 0) +
+        ((c.new_signals_since_review ?? 0) > 0 ? 2 : 0) +
+        (isWatchlist                          ? 5 : 0);
+
       return {
         ...c,
         _inCatalog:   inCatalog,
         _isWatchlist: isWatchlist,
-        _asc: asc,
-        _score: asc + (c.question_count ?? 0) * 2 +
-                (c.new_signals_since_review > 0 ? 3 : 0) +
-                (c.audience_recurring_boolean ? 4 : 0) +  // confirmed recurring demand bonus
-                (isWatchlist ? 5 : 0),
+        _asc:    asc,
+        _manual: manual,
+        _owned:  owned,
+        _score:  score,
       };
     });
 
@@ -246,12 +269,17 @@ exports.handler = async (event) => {
           platforms:     c.platforms || [],
           change_from_prior: (c.new_signals_since_review || 0) > 0 ? "growing" : "stable",
           related_owned_content: null,
-          why_prominent: `${c._asc} audience signals across ${c.distinct_source_count} sources` +
-            ((c.question_count ?? 0) > 0 ? `, ${c.question_count} questions` : "") +
-            (c.audience_recurring_boolean ? " · Audience recurring" : "") +
-            (c.covered_before_boolean ? " · Covered before (check repetition risk)" : "") +
-            (c.novelty_status && c.novelty_status !== "None" && c.novelty_status !== "Unclear" ? ` · ${c.novelty_status}` : "") +
-            ` · ${catalogLabel}`,
+          why_prominent: [
+            `${c._asc} audience signals`,
+            c._manual > 0 ? `${c._manual} manual` : null,
+            c._owned  > 0 ? `${c._owned} owned comments` : null,
+            c.distinct_source_count > 1 ? `${c.distinct_source_count} sources` : null,
+            (c.question_count ?? 0) > 0 ? `${c.question_count} questions` : null,
+            c.audience_recurring_boolean ? "Audience recurring" : null,
+            c.covered_before_boolean ? "⚠️ Covered before" : null,
+            c.novelty_status && !["None","Unclear"].includes(c.novelty_status) ? c.novelty_status : null,
+            catalogLabel,
+          ].filter(Boolean).join(" · "),
         };
       });
 

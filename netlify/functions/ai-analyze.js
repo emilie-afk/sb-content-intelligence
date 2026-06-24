@@ -328,9 +328,11 @@ exports.handler = async (event) => {
           const newSignalCount = (cluster.signal_count || 0) + 1;
           const newSinceReview = (cluster.new_signals_since_review || 0) + 1;
 
-          // Determine if this signal is from current external audience (not owned archive)
+          // Determine signal source category for weighted scoring
           const isAudienceSignal = attr.ownership_type !== "Owned content";
+          const isManualSignal   = signal.is_manual_submission === true;
           const newAudienceCount = (cluster.audience_signal_count ?? cluster.signal_count ?? 0) + (isAudienceSignal ? 1 : 0);
+          const newManualCount   = (cluster.manual_signal_count  ?? 0) + (isManualSignal   ? 1 : 0);
           const signalRepetitionType = getRepetitionSourceType(attr.ownership_type);
           // Upgrade repetition_source_type if the new signal is stronger evidence
           const currentRepType = cluster.repetition_source_type || "none";
@@ -347,6 +349,7 @@ exports.handler = async (event) => {
           await supabase.from("discovery_clusters").update({
             signal_count:            newSignalCount,
             audience_signal_count:   newAudienceCount,
+            manual_signal_count:     newManualCount,
             repetition_source_type:  newRepType,
             question_count:          idea.evidence_type === "Question" ? (cluster.question_count || 0) + 1 : cluster.question_count,
             last_seen_at:            now,
@@ -390,6 +393,7 @@ exports.handler = async (event) => {
               evidence_types:         idea.evidence_type ? [idea.evidence_type] : [],
               signal_count:           1,
               audience_signal_count:  attr.ownership_type !== "Owned content" ? 1 : 0,
+              manual_signal_count:    signal.is_manual_submission === true ? 1 : 0,
               repetition_source_type: getRepetitionSourceType(attr.ownership_type),
               question_count:         idea.evidence_type === "Question" ? 1 : 0,
               distinct_source_count:  1,

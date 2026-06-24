@@ -122,13 +122,23 @@ exports.handler = async (event) => {
 // ── PATTERN QUALIFICATION (mirrors ai-analyze.js) ─────────────────────────────
 // Uses audience_signal_count (current external audience only) — not signal_count.
 // signal_count counts everything; audience_signal_count excludes owned archive matches.
+// v14: manual_signal_count and owned_comment_signal_count are weighted higher.
 function checkQualification(cluster) {
-  // audience_signal_count is the v13 field; fall back to signal_count for old rows
-  const asc = cluster.audience_signal_count ?? cluster.signal_count ?? 0;
-  const qc  = cluster.question_count        ?? 0;
-  const dc  = cluster.distinct_source_count ?? 0;
-  const rc  = cluster.recent_mention_count  ?? 0;
-  const pc  = cluster.previous_mention_count ?? 0;
+  const asc    = cluster.audience_signal_count     ?? cluster.signal_count ?? 0;
+  const manual = cluster.manual_signal_count        ?? 0;
+  const owned  = cluster.owned_comment_signal_count ?? 0;
+  const qc     = cluster.question_count             ?? 0;
+  const dc     = cluster.distinct_source_count      ?? 0;
+  const rc     = cluster.recent_mention_count       ?? 0;
+  const pc     = cluster.previous_mention_count     ?? 0;
+
+  // 1 manual + 1 question = immediately worth reviewing (human saw something real)
+  if (manual >= 1 && qc >= 1)
+    return { qualifies: true, reason: `Manual signal with ${qc} audience question(s)` };
+
+  // Strong owned-comment demand = audience asking follow-ups on SB's own content
+  if (owned >= 2)
+    return { qualifies: true, reason: `${owned} owned comment signals — audience follow-up demand` };
 
   if (qc >= 3)
     return { qualifies: true, reason: `${qc} independent audience questions` };
