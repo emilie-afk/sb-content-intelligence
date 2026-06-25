@@ -2946,8 +2946,21 @@ async function openDiscoveryPanel(clusterId) {
         <button class="btn btn-secondary" onclick="updateClusterStatus('${cluster.id}','Keep watching')">👁 Keep watching</button>
         <button class="btn btn-secondary" onclick="updateClusterStatus('${cluster.id}','Content review ready')">→ Content Review</button>
         <button class="btn btn-secondary" onclick="pinCluster('${cluster.id}')">📌 Pin</button>
+        <button class="btn btn-secondary" onclick="openMergePicker('${cluster.id}')">🔀 Merge</button>
         <button class="btn btn-secondary" onclick="dismissCluster('${cluster.id}')">✕ Dismiss</button>
         <button class="btn btn-secondary" style="color:#e74c3c;border-color:#e74c3c" onclick="deleteCluster('${cluster.id}','${cluster.title.replace(/'/g,"\\'")}')">🗑 Delete + block</button>
+      </div>
+
+      <!-- Merge picker (hidden by default) -->
+      <div id="merge-picker-${cluster.id}" style="display:none;margin-top:14px;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:14px">
+        <div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:8px">🔀 Merge another cluster INTO this one</div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:10px">This cluster keeps its ID. The selected cluster's signals are absorbed, then it is closed. AI updates the merged title and summary.</div>
+        <input id="merge-search-${cluster.id}" type="text" placeholder="Search clusters to merge in…"
+          style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:13px;box-sizing:border-box;margin-bottom:8px"
+          oninput="filterMergeCandidates('${cluster.id}', this.value)">
+        <div id="merge-candidates-${cluster.id}" style="max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
+          <div style="color:#4b5563;font-size:12px;padding:8px">Type to search clusters…</div>
+        </div>
       </div>
       <div style="margin-top:10px">
         <input id="disc-reviewer-note-${cluster.id}" type="text" placeholder="Add reviewer note…" value="${esc(cluster.reviewer_note||'')}" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
@@ -2979,6 +2992,78 @@ async function openDiscoveryPanel(clusterId) {
       </div>
     </details>` : ''}
   `;
+}
+
+// ── MERGE PICKER ──────────────────────────────────────────────────────────────
+function openMergePicker(clusterId) {
+  const el = document.getElementById('merge-picker-' + clusterId);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') {
+    document.getElementById('merge-search-' + clusterId)?.focus();
+  }
+}
+
+function filterMergeCandidates(winnerId, query) {
+  const container = document.getElementById('merge-candidates-' + winnerId);
+  if (!container) return;
+
+  const all = window._discClusters || [];
+  const q   = query.trim().toLowerCase();
+
+  if (!q) {
+    container.innerHTML = '<div style="color:#4b5563;font-size:12px;padding:8px">Type to search clusters…</div>';
+    return;
+  }
+
+  const matches = all
+    .filter(c => c.id !== winnerId && !['Closed','Blocked irrelevant'].includes(c.status))
+    .filter(c => (c.title||'').toLowerCase().includes(q) || (c.plant_or_product||'').toLowerCase().includes(q) || (c.summary||'').toLowerCase().includes(q))
+    .slice(0, 12);
+
+  if (!matches.length) {
+    container.innerHTML = '<div style="color:#4b5563;font-size:12px;padding:8px">No matches found.</div>';
+    return;
+  }
+
+  container.innerHTML = matches.map(c => `
+    <div style="background:#1e293b;border-radius:6px;padding:9px 12px;cursor:pointer;border:1px solid transparent"
+      onmouseover="this.style.borderColor='#4f46e5'" onmouseout="this.style.borderColor='transparent'"
+      onclick="confirmMerge('${winnerId}','${c.id}',${JSON.stringify(c.title)})">
+      <div style="font-size:12px;font-weight:600;color:#e2e8f0">${esc(c.title)}</div>
+      <div style="font-size:11px;color:#64748b;margin-top:2px">
+        ${c.plant_or_product ? `🌱 ${esc(c.plant_or_product)} · ` : ''}
+        📊 ${c.signal_count||0} signals · ${esc(c.status)}
+      </div>
+    </div>`).join('');
+}
+
+async function confirmMerge(winnerId, loserId, loserTitle) {
+  const winnerCluster = (window._discClusters||[]).find(c => c.id === winnerId);
+  const winnerTitle   = winnerCluster?.title || 'this cluster';
+
+  const ok = confirm(`Merge "${loserTitle}" INTO "${winnerTitle}"?\n\nThe selected cluster's signals will be absorbed and it will be closed. AI will update the merged title and summary.\n\nThis cannot be undone.`);
+  if (!ok) return;
+
+  const pickerEl = document.getElementById('merge-picker-' + winnerId);
+  if (pickerEl) pickerEl.innerHTML = '<div style="color:#94a3b8;font-size:13px;padding:8px">🔀 Merging… this may take a few seconds</div>';
+
+  try {
+    const resp = await fetch('/.netlify/functions/merge-clusters', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ winner_id: winnerId, loser_id: loserId }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || 'Merge failed');
+
+    toast(`✅ Merged — ${data.signals_moved} signal(s) moved. AI updated: "${data.ai_update?.title || 'cluster'}"`);
+    closeDiscoveryPanel();
+    loadDiscovery();
+  } catch (err) {
+    toast('❌ Merge failed: ' + err.message);
+    if (pickerEl) openMergePicker(winnerId); // reset picker
+  }
 }
 
 function closeDiscoveryPanel() {
