@@ -964,11 +964,16 @@ Separate these three date types:
 Never use an event date as the publication date.
 
 ═══════════════════════════════════════════════════
-STEP 3 — RELEVANCE CHECK
+STEP 3 — LANGUAGE + RELEVANCE CHECK
 ═══════════════════════════════════════════════════
-Is this signal relevant to the plant/succulent market?
-Relevant = succulents, cacti, houseplants, plant care, propagation, watering, soil, pots, plant products, or anything a plant hobbyist would care about.
-NOT relevant = unrelated food, fashion, travel, celebrities, non-plant viral trends.
+First: Is the caption or audience content written primarily in a non-English language?
+  Non-English = Spanish, French, Portuguese, Serbian, Turkish, Korean, Japanese, German, Dutch, etc.
+  Exception: scientific plant names (Latin) are fine. A single non-English word in an otherwise English post is fine.
+  If the main body of text is non-English → { "relevant": false, "noise_reason": "Non-English content" }
+
+Second: Is this signal relevant to the plant/succulent market?
+  Relevant = succulents, cacti, houseplants, plant care, propagation, watering, soil, pots, plant products, or anything a plant hobbyist would care about.
+  NOT relevant = unrelated food, fashion, travel, celebrities, non-plant viral trends.
 
 If NOT relevant:
 { "relevant": false, "noise_reason": "one sentence why" }
@@ -1007,19 +1012,21 @@ C) Signal purpose
 
 D) Section routing (assign based on ownership + purpose + catalog status)
 
-  GEOGRAPHIC FILTER — ONLY when there is EXPLICIT non-US evidence in the content:
-  Succulents Box ships within the US only. Apply this filter ONLY if the caption or bio contains
-  one or more of these specific signals:
-    - Explicit non-US currency (£, €, AUS$, NZ$, CAD$, etc.)
-    - Explicit phrase like "ships to UK", "deliver to Australia", "EU shipping", "ships to Canada"
-    - A city or country stated in the caption/bio that is clearly outside the US (e.g. "Norfolk, UK", "London", "Sydney", "Toronto")
+  GEOGRAPHIC FILTER — apply when there is clear non-US evidence:
+  Succulents Box ships within the US only. Apply this filter if the caption, bio, or content contains
+  one or more of these signals:
+    - Non-US currency (£, €, AUS$, NZ$, CAD$, R for ZAR, etc.)
+    - Explicit non-US shipping phrase ("ships to Chile", "envíos a todo Chile", "deliver to Australia", "EU shipping", "ships to Canada")
+    - A city or country clearly outside the US named in the caption or bio (e.g. "Cairns", "Sydney", "Melbourne", "London", "Toronto", "Cape Town", "Santiago", "Chile", "Australia", "UK", "Serbia", "Turkey", "Korea", "Brazil")
+    - Caption or audience wording written primarily in a non-English language (Spanish, Serbian, Turkish, Korean, French, Portuguese, etc.)
+    - Hashtags indicating non-US geography (#australia, #serbia, #türkiye, #chile, #uk, #southafrica, etc.)
 
   If ANY of the above are present → Set section_route to "Mention Tracking", processing_path to "Mention only".
 
   DO NOT apply this filter based on:
     - Account name or handle alone (handles don't reveal location)
-    - Any ambiguity — default US-based when unsure
-    - A city name that could be US (e.g. "Norfolk" alone could be Norfolk, VA)
+    - A single foreign word that is a plant name or scientific term
+    - A city name that is common in the US without other context (e.g. "Portland", "Norfolk" alone)
 
   section_route:
     Catalog Discovery    — US source, catalog match AND (question | problem | tip | claim | comparison | disagreement | purchase intent)
@@ -1105,8 +1112,9 @@ function buildClusterMatchPrompt(extracted, existingClusters) {
   return `You are matching a new signal extraction to an existing discovery cluster for Succulents Box.
 
 NEW SIGNAL EXTRACTION:
-Title: ${extracted.cluster_title}
+Title: ${extracted.normalized_cluster_title || extracted.cluster_title}
 Plant: ${extracted.plant || "unknown"}
+Core issue: ${extracted.core_issue || "none"}
 Question: ${extracted.question || "none"}
 Problems: ${(extracted.problems || []).join(", ") || "none"}
 Tips: ${(extracted.tips || []).join(", ") || "none"}
@@ -1116,12 +1124,22 @@ Evidence type: ${extracted.evidence_type || "unknown"}
 EXISTING CLUSTERS:
 ${clusterList}
 
-Rules:
-- Match if the new signal addresses the SAME core question, problem, or claim about the SAME plant.
-- Different plant = different cluster, even if the question is similar.
-- Different stage of the same problem (e.g. "how to prevent rot" vs "my plant is rotting") should be separate clusters.
+MATCHING RULES — read carefully, two different cases:
+
+CASE A — PLANT-SPECIFIC ISSUE (ID, cultivar behavior, species-specific care):
+  Example: "Why does my Haworthia go red?", "Echeveria lilacina losing lower leaves"
+  → Require SAME plant genus/species to match. Different plant = different cluster.
+
+CASE B — GENERAL CARE ISSUE (applies broadly across plants, plant is incidental evidence):
+  Example: sunburn, overwatering, root rot, etiolation, propagation failure, pest damage
+  → Match by ISSUE TYPE, not by plant. If the care answer would be substantially the same regardless of plant, merge into one cluster.
+  → A new sunburn signal about Echeveria runyonii should match an existing "sunburn recovery" cluster even if the existing cluster mentions Echeveria lilacina.
+
+OTHER RULES:
+- Clearly different stages of the same problem should stay separate only if the audience question or care answer is meaningfully different (e.g. "how to prevent sunburn" vs "how to recover from sunburn" = two clusters).
+- If an existing cluster already covers the same issue with broader plant scope, prefer it over creating a new narrow cluster.
 - If no good match exists, declare "new".
-- Do NOT force a match if uncertain.
+- Do NOT force a match if genuinely uncertain.
 
 Return ONLY valid JSON:
 {
