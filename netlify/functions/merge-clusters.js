@@ -78,7 +78,14 @@ exports.handler = async (event) => {
     // Delete all loser signal links (including the ones we just copied and any dupe that was already in winner)
     await supabase.from("signal_cluster_links").delete().eq("cluster_id", loser_id);
 
-    // ── 3. MERGE ARRAYS + COUNTS ───────────────────────────────────────────────
+    // ── 3. RECOUNT FROM ACTUAL LINKS + MERGE ARRAYS ───────────────────────────
+    // Recount signal_count from the live signal_cluster_links so the number is
+    // always accurate regardless of whether the stored fields had drifted.
+    const { count: liveSignalCount } = await supabase
+      .from("signal_cluster_links")
+      .select("*", { count: "exact", head: true })
+      .eq("cluster_id", winner_id);
+
     const merge = (a, b) => [...new Set([...(a || []), ...(b || [])])];
 
     const mergedWording   = merge(winner.audience_wording,  loser.audience_wording).slice(0, 20);
@@ -87,7 +94,8 @@ exports.handler = async (event) => {
     const mergedPlatforms = merge(winner.platforms,          loser.platforms);
     const mergedEvidence  = merge(winner.evidence_types,     loser.evidence_types);
 
-    const newSignalCount   = (winner.signal_count   || 0) + (loser.signal_count   || 0);
+    // Use live recount for signal_count; sum declared fields for the rest
+    const newSignalCount   = liveSignalCount ?? ((winner.signal_count || 0) + (loser.signal_count || 0));
     const newAudienceCount = (winner.audience_signal_count  ?? winner.signal_count ?? 0)
                            + (loser.audience_signal_count   ?? loser.signal_count  ?? 0);
     const newManualCount   = (winner.manual_signal_count  || 0) + (loser.manual_signal_count  || 0);
