@@ -419,10 +419,22 @@ exports.handler = async (event) => {
     // ── 7. POPULATE TODAY BOARD (generated from code, not Claude) ────────────
     const boardDate = now.toISOString().slice(0, 10);
 
-    // Clear existing unresolved items for today
-    await supabase.from("today_board_items").delete()
+    // Carry over unreviewed items — mark "New today" → "Carried over" (keep them on the board)
+    await supabase.from("today_board_items")
+      .update({ status: "Carried over", updated_at: now.toISOString() })
       .eq("board_date", boardDate)
-      .in("status", ["New today", "Needs decision"]);
+      .eq("status", "New today");
+
+    // Get cluster+section combos already on today's board so we don't re-insert them
+    const { data: existingBoardItems } = await supabase
+      .from("today_board_items")
+      .select("cluster_id, section")
+      .eq("board_date", boardDate)
+      .not("status", "in", '("Resolved","Cleanup confirmed","Already covered","Dismissed")');
+
+    const existingBoardKeys = new Set(
+      (existingBoardItems || []).map(i => `${i.section}|${i.cluster_id ?? "null"}`)
+    );
 
     const todayRows = [];
     let rank = 0;
@@ -545,10 +557,14 @@ exports.handler = async (event) => {
       });
     }
 
-    if (todayRows.length > 0) {
-      await supabase.from("today_board_items").insert(todayRows);
+    // Only insert items not already on today's board
+    const newTodayRows = todayRows.filter(r =>
+      !existingBoardKeys.has(`${r.section}|${r.cluster_id ?? "null"}`)
+    );
+    if (newTodayRows.length > 0) {
+      await supabase.from("today_board_items").insert(newTodayRows);
     }
-    const todayItemsCount = todayRows.length;
+    const todayItemsCount = newTodayRows.length;
 
     // ── 8. BUILD CLEANUP COUNTS SUMMARY ──────────────────────────────────────
     const cleanupCounts = {
