@@ -93,7 +93,7 @@ exports.handler = async (event) => {
     const newManualCount   = (winner.manual_signal_count  || 0) + (loser.manual_signal_count  || 0);
     const newOwnedCount    = (winner.owned_comment_signal_count || 0) + (loser.owned_comment_signal_count || 0);
     const newQuestionCount = (winner.question_count || 0) + (loser.question_count || 0);
-    const newSourceCount   = Math.max(winner.distinct_source_count || 1, loser.distinct_source_count || 1);
+    const newSourceCount   = (winner.distinct_source_count || 0) + (loser.distinct_source_count || 0);
     const newRecentCount   = (winner.recent_mention_count || 0) + (loser.recent_mention_count || 0);
 
     // Keep earliest first_seen, latest last_seen
@@ -172,7 +172,7 @@ Return ONLY valid JSON:
         last_seen_at:               lastSeen  || winner.last_seen_at,
         last_ai_updated_at:         now,
         ai_update_summary:          `Merged with "${loser.title}"${aiUpdate.merge_note ? " — " + aiUpdate.merge_note : ""}`,
-        new_signals_since_review:   (winner.new_signals_since_review || 0) + (loser.signal_count || 0),
+        new_signals_since_review:   (winner.new_signals_since_review || 0) + (loser.new_signals_since_review || loser.signal_count || 0),
         prompt_version:             PROMPT_VERSION,
       })
       .eq("id", winner_id)
