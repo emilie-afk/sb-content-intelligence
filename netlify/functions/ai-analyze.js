@@ -9,6 +9,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
+const { requireUserRole } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -23,11 +24,18 @@ exports.handler = async (event) => {
   const headers = {
     "Content-Type":                "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":"Content-Type",
+    "Access-Control-Allow-Headers":"Content-Type, Authorization",
   };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
+
+  // Internal calls from batch-cluster / submit-signal pass a shared secret instead of a user token
+  const internalSecret = event.headers["x-internal-secret"] || event.headers["X-Internal-Secret"];
+  if (!internalSecret || internalSecret !== process.env.INTERNAL_SECRET) {
+    const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+    if (authError) return authError;
+  }
 
   if (!CLAUDE_API_KEY) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "CLAUDE_API_KEY not set in Netlify environment variables." }) };
@@ -65,7 +73,7 @@ exports.handler = async (event) => {
         await supabase.from("signals").update({
           topic:                  result.topic           || data.topic,
           plant_or_product:       result.plant_product   || data.plant_or_product,
-          priority:               result.priority        || data.priority,
+          priority:               data.is_manual_submission === true ? "High" : (result.priority || data.priority),
           shelf_life:             result.shelf_life      || data.shelf_life,
           signal_type:            result.signal_type     || data.signal_type,
           audience_problem:       result.why_matters     || data.audience_problem,

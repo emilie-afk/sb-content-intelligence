@@ -28,11 +28,31 @@ const COL = {
 };
 
 
+const PUB_SHEET_NAME = "Published";
+
+const PUB = {
+  POST_URL:     1,   // Link to live post
+  PLATFORM:     2,   // Dropdown
+  PUBLISHED_ON: 3,   // Date published
+  TOPIC:        4,   // What it's about
+  FORMAT:       5,   // Reel, TikTok, Carousel, etc.
+  VIEWS:        6,   // Filled in after posting
+  LIKES:        7,
+  COMMENTS:     8,
+  SAVES:        9,
+  FOLLOWS:      10,  // Follows gained
+  CHECKED_ON:   11,  // Date metrics were captured
+  RATING:       12,  // Hit / Solid / Weak
+  NOTES:        13,  // Learnings
+};
+
+
 // ── MENU ──────────────────────────────────────────────────────────────────────
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🌵 SB Intake")
-    .addItem("📋 Set up headers", "setupHeaders")
+    .addItem("📋 Set up Intake headers", "setupHeaders")
+    .addItem("📊 Set up Published tracker", "setupPublished")
     .addToUi();
 }
 
@@ -119,12 +139,14 @@ function submitRow(sheet, row) {
   const sourceName = String(sheet.getRange(row, COL.SOURCE_NAME).getValue()).trim() || null;
 
   const payload = [{
-    topic:          rawInput,
-    source_url:     sourceUrl,
-    platform:       platform   !== "" ? platform   : null,
-    creator_name:   sourceName !== "" ? sourceName : null,
-    date_found:     new Date().toISOString().slice(0, 10),
-    status:         "New",
+    topic:                rawInput,
+    source_url:           sourceUrl,
+    platform:             platform   !== "" ? platform   : null,
+    creator_name:         sourceName !== "" ? sourceName : null,
+    date_found:           new Date().toISOString().slice(0, 10),
+    status:               "New",
+    is_manual_submission: true,   // intake sheet = human-submitted, always High priority
+    priority:             "High",
   }];
 
   const endpoint = netlifyUrl.replace(/\/$/, "") + "/.netlify/functions/submit-signal";
@@ -151,4 +173,92 @@ function submitRow(sheet, row) {
     sheet.getRange(row, COL.STATUS).setValue("❌ Error").setFontColor("red");
     sheet.getRange(row, COL.SUBMITTED_AT).setValue(e.message);
   }
+}
+
+
+// ── SET UP PUBLISHED TRACKER ──────────────────────────────────────────────────
+function setupPublished() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(PUB_SHEET_NAME);
+
+  if (!sheet) {
+    sheet = ss.insertSheet(PUB_SHEET_NAME);
+  }
+
+  // ── Headers ──
+  const headers = [
+    "Post URL", "Platform", "Published on", "Topic", "Format",
+    "Views", "Likes", "Comments", "Saves", "Follows gained",
+    "Checked on", "Rating", "Notes / learnings"
+  ];
+  const headerRange = sheet.getRange(1, 1, 1, headers.length);
+  headerRange.setValues([headers]).setFontWeight("bold").setFrozenRows;
+  sheet.setFrozenRows(1);
+
+  // Color groups: post info (green) | metrics (blue) | review (purple)
+  const green  = "#1B5E20"; const greenText  = "#ffffff";
+  const blue   = "#0D47A1"; const blueText   = "#ffffff";
+  const purple = "#4A148C"; const purpleText = "#ffffff";
+
+  [PUB.POST_URL, PUB.PLATFORM, PUB.PUBLISHED_ON, PUB.TOPIC, PUB.FORMAT].forEach(c =>
+    sheet.getRange(1, c).setBackground(green).setFontColor(greenText)
+  );
+  [PUB.VIEWS, PUB.LIKES, PUB.COMMENTS, PUB.SAVES, PUB.FOLLOWS, PUB.CHECKED_ON].forEach(c =>
+    sheet.getRange(1, c).setBackground(blue).setFontColor(blueText)
+  );
+  [PUB.RATING, PUB.NOTES].forEach(c =>
+    sheet.getRange(1, c).setBackground(purple).setFontColor(purpleText)
+  );
+
+  // ── Column widths ──
+  sheet.setColumnWidth(PUB.POST_URL,     280);
+  sheet.setColumnWidth(PUB.PLATFORM,     100);
+  sheet.setColumnWidth(PUB.PUBLISHED_ON, 120);
+  sheet.setColumnWidth(PUB.TOPIC,        200);
+  sheet.setColumnWidth(PUB.FORMAT,       110);
+  sheet.setColumnWidth(PUB.VIEWS,         80);
+  sheet.setColumnWidth(PUB.LIKES,         70);
+  sheet.setColumnWidth(PUB.COMMENTS,      90);
+  sheet.setColumnWidth(PUB.SAVES,         70);
+  sheet.setColumnWidth(PUB.FOLLOWS,      110);
+  sheet.setColumnWidth(PUB.CHECKED_ON,   110);
+  sheet.setColumnWidth(PUB.RATING,       100);
+  sheet.setColumnWidth(PUB.NOTES,        250);
+
+  // ── Dropdowns ──
+  const rows = 500;
+  sheet.getRange(2, PUB.PLATFORM, rows).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList(["Instagram","TikTok","Facebook","YouTube","Pinterest","Other"], true).build()
+  );
+  sheet.getRange(2, PUB.FORMAT, rows).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList(["Reel","TikTok","Carousel","Static","YouTube Short","Story","Other"], true).build()
+  );
+  sheet.getRange(2, PUB.RATING, rows).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList(["🔥 Hit","✅ Solid","📉 Weak"], true).build()
+  );
+
+  // ── Conditional formatting: highlight hits ──
+  const ratingCol  = sheet.getRange(2, PUB.RATING, rows);
+  const hitRule    = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextContains("Hit")
+    .setBackground("#E8F5E9").setFontColor("#1B5E20")
+    .setRanges([sheet.getRange(2, 1, rows, headers.length)])
+    .build();
+  const weakRule   = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextContains("Weak")
+    .setBackground("#FFF3E0").setFontColor("#BF360C")
+    .setRanges([sheet.getRange(2, 1, rows, headers.length)])
+    .build();
+  sheet.setConditionalFormatRules([hitRule, weakRule]);
+
+  SpreadsheetApp.getUi().alert(
+    "Published tracker is ready!\n\n" +
+    "🟢 Post info — fill when you publish\n" +
+    "🔵 Metrics — fill in 5–7 days after posting\n" +
+    "🟣 Rating & notes — your take on how it performed\n\n" +
+    "Tip: sort by Views or Rating to see what's working."
+  );
 }

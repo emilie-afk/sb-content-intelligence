@@ -1192,6 +1192,19 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 let currentUser = null;
 let userRole    = 'viewer';
 
+/**
+ * Returns fetch headers with the user's live Supabase JWT.
+ * Use for all calls to protected Netlify functions.
+ */
+async function authHeaders(extra = {}) {
+  const { data: { session } } = await sb.auth.getSession();
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': session?.access_token ? `Bearer ${session.access_token}` : '',
+    ...extra,
+  };
+}
+
 // ── AUTH ──────────────────────────────────────────────────────────────
 async function signInWithGoogle() {
   const { error } = await sb.auth.signInWithOAuth({
@@ -1336,6 +1349,13 @@ async function loadInbox() {
   const { data } = await q;
   const tbody = document.getElementById('inbox-table');
   if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📥</div><p>No signals found</p></div></td></tr>'; return; }
+  // Manual submissions first, then by priority
+  const priorityRank = { High: 3, Medium: 2, Low: 1 };
+  data?.sort((a, b) => {
+    const manualDelta = Number(b.is_manual_submission === true) - Number(a.is_manual_submission === true);
+    if (manualDelta) return manualDelta;
+    return (priorityRank[b.priority] || 0) - (priorityRank[a.priority] || 0);
+  });
   tbody.innerHTML = data.map(s => `
     <tr>
       <td>${s.date_found||'—'}</td>
@@ -1621,7 +1641,7 @@ async function generateBriefing(type = 'on-demand', callerBtn) {
   try {
     const resp = await fetch('/.netlify/functions/ai-briefing', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ briefing_type: type || 'on-demand', generated_by: currentUser?.id || 'user' }),
     });
     const result = await resp.json();
@@ -1744,7 +1764,7 @@ async function runCleanupBatch(callerBtn) {
   try {
     const resp = await fetch('/.netlify/functions/ai-cleanup-batch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ offset: 0, limit: 15 }),
     });
     const result = await resp.json();
@@ -1774,7 +1794,7 @@ async function runMaintenance() {
   try {
     const resp = await fetch('/.netlify/functions/maintenance-run', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ limit: 200 }),
     });
     const result = await resp.json();
@@ -1915,7 +1935,7 @@ async function submitPublished() {
   try {
     const res = await fetch('/.netlify/functions/log-published', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({
         opportunityId: document.getElementById('pub-opportunity-id').value,
         postUrl,
@@ -1969,7 +1989,7 @@ async function saveSignal() {
     topic:           document.getElementById('sig-topic').value || null,
     caption_summary: document.getElementById('sig-caption').value || null,
     audience_problem:document.getElementById('sig-problem').value || null,
-    priority:        document.getElementById('sig-priority').value,
+    priority:        'High',  // manual submissions are always High priority
     likes:           Number(document.getElementById('sig-likes').value) || null,
     comments_count:  Number(document.getElementById('sig-comments').value) || null,
     status:          'New',
@@ -2331,7 +2351,7 @@ async function pushToCalendar(title, style, script_text, platform) {
   try {
     const resp = await fetch('/.netlify/functions/push-to-calendar', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ title, style, script_text, platform, calendar_url: calendarUrl }),
     });
     const result = await resp.json();
@@ -2406,7 +2426,7 @@ async function runAIAnalysis(type, data) {
   try {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ type, data }),
     });
     const result = await resp.json();
@@ -2420,11 +2440,11 @@ async function runAIAnalysis(type, data) {
         clusterBadge.style.cssText = 'font-size:12px;color:#9ca3af;margin-top:8px;padding:6px 10px;background:#1e293b;border-radius:6px';
         clusterBadge.textContent = '🔍 Clustering signal…';
         resultEl.appendChild(clusterBadge);
-        fetch('/.netlify/functions/ai-analyze', {
+        authHeaders().then(h => fetch('/.netlify/functions/ai-analyze', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: h,
           body: JSON.stringify({ type: 'cluster', data }),
-        }).then(r => r.json()).then(cr => {
+        })).then(r => r.json()).then(cr => {
           if (cr.success && cr.analysis) {
             const ca = cr.analysis;
             clusterBadge.innerHTML = `🔍 Cluster: <b>${esc(ca.cluster_title)}</b> · ${ca.match_type === 'existing' ? 'Added to existing' : 'New cluster created'} · ${ca.signal_count} signal${ca.signal_count!==1?'s':''}${ca.qualifies ? ' · <span style="color:#059669">✓ Pattern qualified</span>' : ''}`;
@@ -2661,7 +2681,7 @@ async function runRepetitionCheck(opportunityId) {
   try {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ type: 'opportunity', data: o }),
     });
     const result = await resp.json();
@@ -3173,7 +3193,7 @@ async function confirmMerge(winnerId, loserId, loserTitle) {
   try {
     const resp = await fetch('/.netlify/functions/merge-clusters', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       body: JSON.stringify({ winner_id: winnerId, loser_id: loserId }),
     });
     const data = await resp.json();
@@ -3473,11 +3493,12 @@ async function clusterAllSignals() {
   const BATCH = 5;
   for (let i = 0; i < unclustered.length; i += BATCH) {
     const batch = unclustered.slice(i, i + BATCH);
+    const h = await authHeaders();
     await Promise.allSettled(
       batch.map(sig =>
         fetch('/.netlify/functions/ai-analyze', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: h,
           body: JSON.stringify({ type: 'cluster', data: sig }),
         })
         .then(r => r.json())
