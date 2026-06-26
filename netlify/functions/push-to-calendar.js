@@ -1,13 +1,21 @@
 // Proxy: forwards approved script data to the Google Apps Script sheet web app.
 // Runs server-side so there are no CORS issues from the browser.
 
+const { createClient } = require("@supabase/supabase-js");
+const { requireUserRole } = require("./_auth");
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
       headers: {
         'Access-Control-Allow-Origin':  '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
       },
       body: '',
@@ -17,6 +25,9 @@ exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method not allowed' };
   }
+
+  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+  if (authError) return authError;
 
   try {
     const { title, style, script_text, platform, calendar_url } = JSON.parse(event.body || '{}');

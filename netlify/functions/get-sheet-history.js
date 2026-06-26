@@ -11,6 +11,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
+const { requireUserRole } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -21,10 +22,13 @@ exports.handler = async (event) => {
   const headers = {
     "Content-Type":                "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":"Content-Type",
+    "Access-Control-Allow-Headers":"Content-Type, Authorization",
   };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
+
+  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+  if (authError) return authError;
 
   try {
     // Get the Apps Script URL from settings

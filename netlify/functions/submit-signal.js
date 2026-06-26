@@ -68,7 +68,9 @@ exports.handler = async (event) => {
   }
 
   // ── 3. Map to signals table columns ─────────────────────────
-  const rows = signals.map((s) => ({
+  const rows = signals.map((s) => {
+    const isManual = s.is_manual ?? s.is_manual_submission ?? false;
+    return {
     date_found:            s.date_discovered || s.date_found || new Date().toISOString().slice(0, 10),
     platform:              s.platform || null,
     source_url:            s.source_url || null,
@@ -80,7 +82,7 @@ exports.handler = async (event) => {
                              ? `Likes: ${s.likes}, Comments: ${s.comments}`
                              : s.metrics_summary || null,
     score:                 s.score !== undefined ? Number(s.score) : null,
-    priority:              s.priority || null,
+    priority:              isManual ? "High" : (s.priority || null),
     search_tag:            s.search_tag || null,
     shelf_life:            s.shelf_life || null,
     likes:                 s.likes !== undefined ? Number(s.likes) : null,
@@ -89,8 +91,9 @@ exports.handler = async (event) => {
     status:                "New",
     // is_manual: true  = intake sheet or dashboard modal (human submitted)
     // is_manual: false = scraper (not passed → defaults false)
-    is_manual_submission:  s.is_manual ?? s.is_manual_submission ?? false,
-  }));
+    is_manual_submission:  isManual,
+    };
+  });
 
   // ── 4. Deduplicate against existing source_urls ──────────────
   const urls = rows.map((r) => r.source_url).filter(Boolean);
@@ -115,7 +118,7 @@ exports.handler = async (event) => {
 
   // ── 5. Batch insert ──────────────────────────────────────────
   const { data: inserted, error: insertErr } = await supabase
-    .from("signals").insert(newRows).select("id, topic, platform, source_url, caption_summary, plant_or_product");
+    .from("signals").insert(newRows).select("id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission, priority");
 
   if (insertErr) {
     console.error("Insert error:", insertErr);
@@ -135,7 +138,10 @@ exports.handler = async (event) => {
       inserted.map((sig) =>
         fetch(`${netlifyUrl}/.netlify/functions/ai-analyze`, {
           method:  "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-internal-secret": process.env.INTERNAL_SECRET || "",
+          },
           body:    JSON.stringify({ type: "cluster", data: sig }),
         })
       )

@@ -10,6 +10,12 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { google }       = require('googleapis');
+const { requireUserRole } = require("./_auth");
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 const SHEET_NAME = 'SB Videos';
 
@@ -21,9 +27,15 @@ const V = {
 };
 
 exports.handler = async (event) => {
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' }, body: '' };
+  }
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }
+
+  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+  if (authError) return authError;
 
   try {
     const { opportunityId, postUrl, platform, publishedOn, topic, format } =
