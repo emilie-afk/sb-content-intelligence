@@ -461,6 +461,12 @@ tbody tr:hover { background: #fafffe; }
             onclick="generateBriefing(document.getElementById('briefing-type-select').value,this)">
             ✨ Generate Briefing
           </button>
+          <input type="date" id="export-date-picker" class="filter-select"
+            style="font-size:13px;width:140px"
+            title="Pick a date to export">
+          <button class="btn btn-secondary" onclick="exportTodayReport(document.getElementById('export-date-picker').value)" title="Download that day's topics as a Markdown file">
+            📄 Export .md
+          </button>
         </div>
       </div>
       <div id="today-view-body">
@@ -1354,6 +1360,8 @@ async function loadInbox() {
 // ── TODAY BOARD ───────────────────────────────────────────────────────────────
 async function loadToday() {
   const today = new Date().toISOString().slice(0, 10);
+  const picker = document.getElementById('export-date-picker');
+  if (picker && !picker.value) picker.value = today;
   const container = document.getElementById('today-view-body');
   container.innerHTML = '<div class="loading">Loading…</div>';
 
@@ -1623,6 +1631,107 @@ async function generateBriefing(type = 'on-demand', callerBtn) {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '✨ AI Briefing'; }
   }
+}
+
+async function exportTodayReport(date) {
+  const exportDate = date || new Date().toISOString().slice(0, 10);
+  const dayStart   = exportDate + 'T00:00:00.000Z';
+  const dayEnd     = exportDate + 'T23:59:59.999Z';
+
+  // Fetch board items for chosen date + the briefing generated that day
+  const [{ data: items }, { data: briefings }] = await Promise.all([
+    sb.from('today_board_items')
+      .select('*').eq('board_date', exportDate)
+      .not('status', 'in', '("Resolved","Cleanup confirmed","Already covered")')
+      .order('rank', { ascending: true }),
+    sb.from('discovery_briefings')
+      .select('summary, signal_count, cluster_count, generated_at, prominent_topics')
+      .gte('generated_at', dayStart).lte('generated_at', dayEnd)
+      .order('generated_at', { ascending: false }).limit(1),
+  ]);
+
+  if (!items?.length && !briefings?.length) {
+    toast(`No briefing data found for ${exportDate}`, true);
+    return;
+  }
+
+  const brief = briefings?.[0] || null;
+  const allItems = items || [];
+
+  const sections = [
+    { key: 'Prominent Topics',    icon: '📌' },
+    { key: 'Content Candidates',  icon: '🎬' },
+    { key: 'Needs Research',      icon: '🔬' },
+    { key: 'Market Watch Alerts', icon: '📈' },
+    { key: 'Competitor Alerts',   icon: '🕵️' },
+    { key: 'Cleanup Review',      icon: '🧹' },
+  ];
+
+  const dateLabel = new Date(exportDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+  let md = `# SB Discovery Brief — ${dateLabel}\n\n`;
+
+  if (brief) {
+    md += `> ${brief.summary || ''}\n\n`;
+    const stats = [
+      brief.cluster_count  ? `${brief.cluster_count} clusters` : null,
+      brief.signal_count   ? `${brief.signal_count} signals`   : null,
+      brief.generated_at   ? `Generated ${brief.generated_at.slice(0,16).replace('T',' ')} UTC` : null,
+    ].filter(Boolean).join(' · ');
+    if (stats) md += `*${stats}*\n\n`;
+  }
+
+  md += `---\n\n`;
+
+  for (const sec of sections) {
+    const secItems = allItems.filter(i => i.section === sec.key);
+    if (!secItems.length) continue;
+
+    md += `## ${sec.icon} ${sec.key}\n\n`;
+
+    for (const item of secItems) {
+      const tag = item.status === 'New today' ? ' 🆕' : item.status === 'Carried over' ? ' 📌' : '';
+      md += `### ${item.title}${tag}\n`;
+      if (item.summary)          md += `${item.summary}\n\n`;
+      if (item.why_today)        md += `**Why today:** ${item.why_today}\n\n`;
+      if (item.evidence_summary && !item.evidence_summary.startsWith('[ca:'))
+                                 md += `**Evidence:** ${item.evidence_summary}\n\n`;
+      if (item.recommended_action) md += `**Action:** ${item.recommended_action}\n\n`;
+      md += `---\n\n`;
+    }
+  }
+
+  // Prominent topics detail from briefing record (richer than today_board_items)
+  const prominentFromBriefing = (brief?.prominent_topics || []).filter(t => t.why_prominent);
+  if (prominentFromBriefing.length) {
+    md += `## 📊 Topic Detail (from briefing)\n\n`;
+    for (const t of prominentFromBriefing) {
+      md += `**${t.theme}**`;
+      if (t.catalog_plants?.length) md += ` — ${t.catalog_plants.join(', ')}`;
+      md += `\n`;
+      if (t.why_prominent) md += `${t.why_prominent}\n`;
+      const stats = [
+        t.signal_count   ? `${t.signal_count} signals`   : null,
+        t.question_count ? `${t.question_count} questions` : null,
+        t.source_count   ? `${t.source_count} sources`   : null,
+        t.platforms?.length ? t.platforms.join(', ')      : null,
+      ].filter(Boolean).join(' · ');
+      if (stats) md += `*${stats}*\n`;
+      md += `\n`;
+    }
+  }
+
+  md += `\n---\n*Exported from SB Social Listening Dashboard · ${exportDate}*\n`;
+
+  // Download
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `sb-brief-${exportDate}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('📄 Downloaded sb-brief-' + exportDate + '.md');
 }
 
 async function runCleanupBatch(callerBtn) {
