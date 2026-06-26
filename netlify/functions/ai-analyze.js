@@ -597,6 +597,15 @@ exports.handler = async (event) => {
 
   } catch (err) {
     console.error("ai-analyze error:", err);
+    // If clustering failed, mark the signal so it doesn't stay stuck as New forever
+    if (type === "cluster" && data?.id) {
+      try {
+        await supabase.from("signals")
+          .update({ status: "Needs cleanup" })
+          .eq("id", data.id)
+          .eq("status", "New");  // only update if still New — don't overwrite manual decisions
+      } catch (_) {}
+    }
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
   }
 };
