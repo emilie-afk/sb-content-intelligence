@@ -110,7 +110,9 @@ exports.handler = async (event) => {
         .eq("briefing_type", briefingType).order("generated_at", { ascending: false }).limit(1),
       supabase.from("competitor_activity")
         .select("id, plant_name, activity_type, ai_summary, source_account_name, observed_at, status")
-        .gte("observed_at", periodStart).order("observed_at", { ascending: false }).limit(10),
+        .gte("observed_at", periodStart)
+        .not("status", "in", '("Dismissed","Reviewed")')
+        .order("observed_at", { ascending: false }).limit(10),
       supabase.from("market_watch_plants")
         .select("id, plant_name, signal_count, question_count, purchase_intent_count, distinct_source_count, platforms, last_seen_at, reviewer_status")
         .gte("last_seen_at", periodStart).order("signal_count", { ascending: false }).limit(10),

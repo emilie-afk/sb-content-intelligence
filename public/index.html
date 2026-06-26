@@ -1599,16 +1599,18 @@ async function todayItemDecide(itemId, status) {
 }
 
 async function deleteCompetitorActivity(competitorActivityId, todayItemId) {
-  if (!confirm('Delete this competitor from the database? This cannot be undone.')) return;
-  const { error: caErr } = await sb.from('competitor_activity').delete().eq('id', competitorActivityId);
-  if (caErr) { toast('Error deleting competitor: ' + caErr.message, true); return; }
-  // Mark the today board item resolved so it's filtered out on reload
+  if (!confirm('Dismiss this competitor alert? It will be hidden from all future briefings.')) return;
+  // Mark Dismissed (not hard-deleted) so the briefing query filters it out permanently
+  const { error: caErr } = await sb.from('competitor_activity')
+    .update({ status: 'Dismissed', updated_at: new Date().toISOString() })
+    .eq('id', competitorActivityId);
+  if (caErr) { toast('Error dismissing competitor: ' + caErr.message, true); return; }
   await sb.from('today_board_items').update({
     status: 'Resolved',
     resolved_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }).eq('id', todayItemId);
-  toast('🗑 Competitor removed');
+  toast('🗑 Competitor dismissed — won\'t appear in future briefings');
   loadToday();
 }
 
@@ -3430,16 +3432,18 @@ async function clusterAllSignals() {
   btn.disabled = true;
   btn.textContent = '🔍 Loading signals…';
 
-  // Fetch all unclustered signals (not yet linked to any cluster)
-  const { data: linked } = await sb.from('signal_cluster_links').select('signal_id');
-  const linkedIds = new Set((linked || []).map(l => l.signal_id));
-
+  // Only fetch signals that haven't been processed yet (status = New)
+  // Already-processed signals (Clustered, Watch, Mention only, Noise, etc.) are excluded
   const { data: allSignals } = await sb
     .from('signals')
-    .select('id, topic, platform, source_url, caption_summary, plant_or_product')
-    .not('status', 'in', '("Reject","Noise")')
+    .select('id, topic, raw_input, platform, source_url, caption_summary, plant_or_product, is_manual_submission')
+    .eq('status', 'New')
     .order('created_at', { ascending: true })
     .limit(200);
+
+  // Also skip any that already have a cluster link (double-check)
+  const { data: linked } = await sb.from('signal_cluster_links').select('signal_id');
+  const linkedIds = new Set((linked || []).map(l => l.signal_id));
 
   const unclustered = (allSignals || []).filter(s => !linkedIds.has(s.id));
 
