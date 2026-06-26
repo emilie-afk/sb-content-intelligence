@@ -3445,10 +3445,19 @@ async function clusterAllSignals() {
   const { data: linked } = await sb.from('signal_cluster_links').select('signal_id');
   const linkedIds = new Set((linked || []).map(l => l.signal_id));
 
+  // Signals already linked but status still 'New' — fix their status now
+  const stuckLinked = (allSignals || []).filter(s => linkedIds.has(s.id));
+  if (stuckLinked.length) {
+    await sb.from('signals')
+      .update({ status: 'Clustered' })
+      .in('id', stuckLinked.map(s => s.id));
+    toast(`🔧 Fixed ${stuckLinked.length} signals stuck at New — refreshing…`);
+    loadCommandCenter();
+  }
+
   const unclustered = (allSignals || []).filter(s => !linkedIds.has(s.id));
 
   if (!unclustered.length) {
-    toast('All signals already clustered ✓');
     btn.disabled = false;
     btn.textContent = '🔍 Cluster all';
     return;
