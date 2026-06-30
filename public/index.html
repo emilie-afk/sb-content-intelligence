@@ -593,18 +593,7 @@ tbody tr:hover { background: #fafffe; }
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <button class="btn btn-primary btn-sm" onclick="openScriptModal()">+ New Script</button>
-          <button id="btn-calendar-settings" class="btn btn-secondary btn-sm" onclick="toggleCalendarSettings()" style="display:none">⚙ Calendar URL</button>
         </div>
-      </div>
-      <!-- Calendar URL settings (admin/owner only) -->
-      <div id="calendar-settings-panel" style="display:none;background:#f9f9f9;border:1px solid #e0e0e0;border-radius:8px;padding:16px;margin-bottom:16px">
-        <p style="font-size:13px;font-weight:600;margin-bottom:8px">📅 Google Calendar Sheet URL</p>
-        <p style="font-size:12px;color:#666;margin-bottom:12px">Paste the Apps Script web app URL from your script calendar sheet. Update this each new year when you create a new sheet.</p>
-        <div style="display:flex;gap:8px">
-          <input type="url" id="calendar-url-input" placeholder="https://script.google.com/macros/s/…/exec" style="flex:1;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px">
-          <button class="btn btn-primary btn-sm" onclick="saveCalendarUrl()">Save</button>
-        </div>
-        <p style="font-size:11px;color:#888;margin-top:8px">Current: <span id="calendar-url-display">not set</span></p>
       </div>
       <div class="table-wrap">
         <table>
@@ -1239,7 +1228,6 @@ async function loadUser(user) {
   document.getElementById('app').style.display = 'grid';
   document.getElementById('today-date').textContent = new Date().toLocaleDateString('en-US', {weekday:'long',year:'numeric',month:'long',day:'numeric'});
   loadCommandCenter();
-  initCalendarUrl();
 }
 
 sb.auth.onAuthStateChange((_event, session) => {
@@ -2141,20 +2129,6 @@ async function updateScriptStatus(id, status) {
   if (error) { toast('Error: ' + error.message, true); return; }
   toast('Script status updated');
 
-  // Auto-push to Google Sheet when approved
-  if (status === 'Approved') {
-    const { data: s } = await sb.from('script_outputs')
-      .select('script_title, script_type, platform, full_voiceover_script')
-      .eq('id', id).single();
-    if (s) {
-      await pushToCalendar(
-        s.script_title || '',
-        s.script_type  || '',
-        s.full_voiceover_script || '',
-        s.platform     || ''
-      );
-    }
-  }
 }
 
 async function viewScript(id) {
@@ -2308,65 +2282,11 @@ function openScriptModal()    { document.getElementById('modal-script').classLis
 function openBrandRuleModal() { document.getElementById('modal-brand-rule').classList.add('open'); }
 function closeModal(id)       { document.getElementById(id).classList.remove('open'); }
 
-// ── CALENDAR INTEGRATION ──────────────────────────────────────────────
-let calendarUrl = null;
-
-async function initCalendarUrl() {
-  const { data } = await sb.from('settings').select('value').eq('key', 'calendar_script_url').single();
-  calendarUrl = data?.value?.url || null;
-  const display = document.getElementById('calendar-url-display');
-  if (display) display.textContent = calendarUrl ? calendarUrl.slice(0, 60) + '…' : 'not set';
-  if (calendarUrl && document.getElementById('calendar-url-input')) {
-    document.getElementById('calendar-url-input').value = calendarUrl;
-  }
-  if (['admin','owner'].includes(userRole)) {
-    const btn = document.getElementById('btn-calendar-settings');
-    if (btn) btn.style.display = 'inline-flex';
-  }
-}
-
-function toggleCalendarSettings() {
-  const panel = document.getElementById('calendar-settings-panel');
-  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-}
-
-async function saveCalendarUrl() {
-  const url = document.getElementById('calendar-url-input').value.trim();
-  if (!url) { toast('Paste the Apps Script URL first', true); return; }
-  const { error } = await sb.from('settings').upsert({ key: 'calendar_script_url', value: { url } });
-  if (error) { toast('Error: ' + error.message, true); return; }
-  calendarUrl = url;
-  document.getElementById('calendar-url-display').textContent = url.slice(0, 60) + '…';
-  toast('Calendar URL saved');
-  toggleCalendarSettings();
-}
-
-// Called automatically when a script is approved.
-// Appends the script as a new row in the current month's tab of the Google Sheet.
-async function pushToCalendar(title, style, script_text, platform) {
-  if (!calendarUrl) {
-    toast('Calendar URL not set — admin: use ⚙ Calendar URL to add it', true);
-    return false;
-  }
-  try {
-    const resp = await fetch('/.netlify/functions/push-to-calendar', {
-      method:  'POST',
-      headers: await authHeaders(),
-      body: JSON.stringify({ title, style, script_text, platform, calendar_url: calendarUrl }),
-    });
-    const result = await resp.json();
-    if (result.success) {
-      toast('📋 Added to script sheet — ' + (result.placed || ''));
-      return true;
-    } else {
-      toast('Sheet error: ' + (result.error || 'unknown'), true);
-      return false;
-    }
-  } catch (err) {
-    toast('Could not reach sheet. Check URL in ⚙ Calendar URL.', true);
-    return false;
-  }
-}
+// ── SHEET HISTORY NOTE ────────────────────────────────────────────────
+// The Apps Script sheet URL (settings key: calendar_script_url) is read
+// server-side by get-sheet-history.js for repetition checking.
+// Set it once in Supabase: Settings table → key = 'calendar_script_url'
+//   value = { "url": "https://script.google.com/macros/s/.../exec" }
 
 // Close modal on overlay click
 document.querySelectorAll('.modal-overlay').forEach(overlay => {

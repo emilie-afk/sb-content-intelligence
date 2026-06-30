@@ -10,7 +10,7 @@
  *   READ   — Supabase queries only, no writes
  *   WRITE  — safe, non-destructive writes (suggestions + logs only)
  *   BLOCKED — never callable by agent (not in ALLOWED_TOOLS)
- *             examples: ai-cleanup-batch, merge-clusters, push-to-calendar
+ *             examples: ai-cleanup-batch, merge-clusters, log-published
  */
 
 const NETLIFY_URL    = process.env.URL || "https://sb-content-intelligence.netlify.app";
