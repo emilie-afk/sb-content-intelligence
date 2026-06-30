@@ -1386,6 +1386,18 @@ async function loadToday() {
     .order('rank', { ascending: true });
   const todayItems = items || [];
 
+  // Pre-fetch source URLs for competitor items so cards can link to the original post
+  const competitorCaIds = todayItems
+    .filter(i => i.section === 'Competitor Alerts')
+    .map(i => { const m = /\[ca:([^\]]+)\]/.exec(i.evidence_summary || ''); return m?.[1]; })
+    .filter(Boolean);
+  window._caSourceUrls = {};
+  if (competitorCaIds.length) {
+    const { data: caRows } = await sb.from('competitor_activity')
+      .select('id, source_url').in('id', competitorCaIds);
+    (caRows || []).forEach(r => { if (r.source_url) window._caSourceUrls[r.id] = r.source_url; });
+  }
+
   // Pending cleanup suggestions
   const { data: suggestions } = await sb.from('cluster_review_suggestions')
     .select('*, cluster:discovery_clusters(id,title,status)')
@@ -1559,7 +1571,9 @@ function renderTodayItem(item, actionType) {
   } else if (actionType === 'competitor') {
     const caIdMatch = /\[ca:([^\]]+)\]/.exec(item.evidence_summary || '');
     const caId = caIdMatch ? caIdMatch[1] : '';
+    const sourceUrl = caId && window._caSourceUrls?.[caId];
     actionBtns = `
+      ${sourceUrl ? `<a href="${sourceUrl}" target="_blank" class="btn btn-secondary btn-sm">🔗 View post</a>` : ''}
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs decision')">📋 Mark for review</button>
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Done</button>
@@ -1578,7 +1592,9 @@ function renderTodayItem(item, actionType) {
           ${isNew     ? `<span class="badge badge-new"     style="font-size:10px;margin-bottom:4px;display:inline-block">🆕 New today</span>`
           : isCarried ? `<span class="badge badge-carried" style="font-size:10px;margin-bottom:4px;display:inline-block">📌 Still here</span>`
           :             `<span class="badge badge-pending" style="font-size:10px;margin-bottom:4px;display:inline-block">${esc(item.status)}</span>`}
-          <div class="today-item-title">${esc(item.title)}</div>
+          ${item.cluster_id
+            ? `<div class="today-item-title" style="cursor:pointer;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.2)" onclick="openDiscoveryPanel('${item.cluster_id}')" title="Click to view cluster signals and source posts">${esc(item.title)}</div>`
+            : `<div class="today-item-title">${esc(item.title)}</div>`}
         </div>
         <span style="color:${confColor};font-size:11px;font-weight:600;flex-shrink:0;margin-top:2px">${item.ai_confidence || ''}</span>
       </div>
