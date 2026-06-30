@@ -2,7 +2,7 @@
 // Runs server-side so there are no CORS issues from the browser.
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, CORS_HEADERS } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -13,11 +13,7 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
-      headers: {
-        'Access-Control-Allow-Origin':  '*',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      },
+      headers: { ...CORS_HEADERS, 'Access-Control-Allow-Methods': 'POST, OPTIONS' },
       body: '',
     };
   }
@@ -48,7 +44,10 @@ exports.handler = async (event) => {
     const response = await fetch(calendar_url, {
       method:   'POST',
       headers:  { 'Content-Type': 'application/json' },
-      body:     JSON.stringify({ title, style, script_text, platform }),
+      body:     JSON.stringify({
+        title, style, script_text, platform,
+        "x-script-secret": process.env.CALENDAR_SCRIPT_SECRET || "",
+      }),
       redirect: 'follow',   // Google Apps Script redirects once before responding
     });
 
@@ -61,7 +60,7 @@ exports.handler = async (event) => {
       statusCode: 200,
       headers: {
         'Content-Type':                'application/json',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': CORS_HEADERS['Access-Control-Allow-Origin'],
       },
       body: JSON.stringify(result),
     };
@@ -69,7 +68,7 @@ exports.handler = async (event) => {
   } catch (err) {
     return {
       statusCode: 500,
-      headers: { 'Access-Control-Allow-Origin': '*' },
+      headers: { 'Access-Control-Allow-Origin': CORS_HEADERS['Access-Control-Allow-Origin'] },
       body: JSON.stringify({ success: false, error: err.message }),
     };
   }

@@ -10,7 +10,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -20,17 +20,22 @@ const supabase = createClient(
 const PROMPT_VERSION = "extract-v2";
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":"Content-Type, Authorization",
-  };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
 
-  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
-  if (authError) return authError;
+  // Allow agent calls via shared internal secret (same pattern as batch-cluster.js)
+  const internalSecret =
+    event.headers["x-internal-secret"] ||
+    event.headers["X-Internal-Secret"];
+  const isInternalCall = internalSecret && internalSecret === process.env.INTERNAL_SECRET;
+
+  let performedBy = null;
+  if (!isInternalCall) {
+    const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+    if (authError) return authError;
+    performedBy = await getUserId(event, supabase);
+  }
 
   let body = {};
   try { if (event.body) body = JSON.parse(event.body); }
@@ -75,15 +80,17 @@ exports.handler = async (event) => {
             repetition_source_type:   cluster.repetition_source_type || "current_audience",
           }).eq("id", cluster.id),
           supabase.from("cluster_audit_log").insert({
-            cluster_id:     cluster.id,
-            field_changed:  "status",
-            previous_value: "Collecting",
-            new_value:      "Pattern detected",
-            reason:         qualifies.reason,
-            trigger:        "daily_maintenance",
-            ai_model:       "none",
-            prompt_version: PROMPT_VERSION,
-            is_automatic:   true,
+            cluster_id:      cluster.id,
+            field_changed:   "status",
+            previous_value:  "Collecting",
+            new_value:       "Pattern detected",
+            reason:          qualifies.reason,
+            trigger:         "daily_maintenance",
+            ai_model:        "none",
+            prompt_version:  PROMPT_VERSION,
+            is_automatic:    true,
+            performed_by:    performedBy,
+            source_function: "maintenance-run",
           }),
         ]);
         promoted++;

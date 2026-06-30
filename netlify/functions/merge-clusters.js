@@ -10,7 +10,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -22,17 +22,13 @@ const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const PROMPT_VERSION = "merge-v1";
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
 
   const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
   if (authError) return authError;
+  const performedBy = await getUserId(event, supabase);
 
   let body = {};
   try { if (event.body) body = JSON.parse(event.body); }
@@ -203,26 +199,30 @@ Return ONLY valid JSON:
     // ── 7. AUDIT LOG ───────────────────────────────────────────────────────────
     await supabase.from("cluster_audit_log").insert([
       {
-        cluster_id:     winner_id,
-        field_changed:  "signal_count",
-        previous_value: String(winner.signal_count || 0),
-        new_value:      String(newSignalCount),
-        reason:         `Manual merge: absorbed "${loser.title}" (${loser.signal_count || 0} signals)`,
-        trigger:        "manual_merge",
-        ai_model:       CLAUDE_MODEL,
-        prompt_version: PROMPT_VERSION,
-        is_automatic:   false,
+        cluster_id:      winner_id,
+        field_changed:   "signal_count",
+        previous_value:  String(winner.signal_count || 0),
+        new_value:       String(newSignalCount),
+        reason:          `Manual merge: absorbed "${loser.title}" (${loser.signal_count || 0} signals)`,
+        trigger:         "manual_merge",
+        ai_model:        CLAUDE_MODEL,
+        prompt_version:  PROMPT_VERSION,
+        is_automatic:    false,
+        performed_by:    performedBy,
+        source_function: "merge-clusters",
       },
       {
-        cluster_id:     loser_id,
-        field_changed:  "status",
-        previous_value: loser.status || "Collecting",
-        new_value:      "Closed",
-        reason:         `Merged into "${aiUpdate.title || winner.title}"`,
-        trigger:        "manual_merge",
-        ai_model:       CLAUDE_MODEL,
-        prompt_version: PROMPT_VERSION,
-        is_automatic:   false,
+        cluster_id:      loser_id,
+        field_changed:   "status",
+        previous_value:  loser.status || "Collecting",
+        new_value:       "Closed",
+        reason:          `Merged into "${aiUpdate.title || winner.title}"`,
+        trigger:         "manual_merge",
+        ai_model:        CLAUDE_MODEL,
+        prompt_version:  PROMPT_VERSION,
+        is_automatic:    false,
+        performed_by:    performedBy,
+        source_function: "merge-clusters",
       },
     ]);
 

@@ -14,7 +14,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -26,11 +26,6 @@ const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";  // Haiku: fast enough for 1
 const PROMPT_VERSION = "briefing-v1";
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":"Content-Type, Authorization",
-  };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };

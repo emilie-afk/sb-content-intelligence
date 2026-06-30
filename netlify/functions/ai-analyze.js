@@ -9,7 +9,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -21,11 +21,6 @@ const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const PROMPT_VERSION = "extract-v2";
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":"Content-Type, Authorization",
-  };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
@@ -36,6 +31,7 @@ exports.handler = async (event) => {
     const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
     if (authError) return authError;
   }
+  const performedBy = await getUserId(event, supabase); // null for internal secret calls
 
   if (!CLAUDE_API_KEY) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "CLAUDE_API_KEY not set in Netlify environment variables." }) };
@@ -374,15 +370,17 @@ exports.handler = async (event) => {
 
           // Audit log — record the signal addition
           await supabase.from("cluster_audit_log").insert({
-            cluster_id:    clusterId,
-            field_changed: "signal_count",
-            previous_value: String(cluster.signal_count || 0),
-            new_value:      String(newSignalCount),
-            reason:         aiUpdateSummary,
-            trigger:        "new_signal",
-            ai_model:       CLAUDE_MODEL,
-            prompt_version: PROMPT_VERSION,
-            is_automatic:   true,
+            cluster_id:      clusterId,
+            field_changed:   "signal_count",
+            previous_value:  String(cluster.signal_count || 0),
+            new_value:       String(newSignalCount),
+            reason:          aiUpdateSummary,
+            trigger:         "new_signal",
+            ai_model:        CLAUDE_MODEL,
+            prompt_version:  PROMPT_VERSION,
+            is_automatic:    true,
+            performed_by:    performedBy,
+            source_function: "ai-analyze",
           });
 
         } else {
@@ -431,15 +429,17 @@ exports.handler = async (event) => {
 
           // Audit log — record cluster creation
           await supabase.from("cluster_audit_log").insert({
-            cluster_id:    clusterId,
-            field_changed: "status",
-            previous_value: null,
-            new_value:      "Collecting",
-            reason:         "New cluster auto-created from signal " + signalId,
-            trigger:        "new_signal",
-            ai_model:       CLAUDE_MODEL,
-            prompt_version: PROMPT_VERSION,
-            is_automatic:   true,
+            cluster_id:      clusterId,
+            field_changed:   "status",
+            previous_value:  null,
+            new_value:       "Collecting",
+            reason:          "New cluster auto-created from signal " + signalId,
+            trigger:         "new_signal",
+            ai_model:        CLAUDE_MODEL,
+            prompt_version:  PROMPT_VERSION,
+            is_automatic:    true,
+            performed_by:    performedBy,
+            source_function: "ai-analyze",
           });
 
           // Add newly created cluster to the known list so later ideas can match against it
@@ -473,15 +473,17 @@ exports.handler = async (event) => {
           await supabase.from("discovery_clusters")
             .update({ status: "Pattern detected", maintenance_status: "Pattern detected" }).eq("id", clusterId);
           await supabase.from("cluster_audit_log").insert({
-            cluster_id:     clusterId,
-            field_changed:  "status",
-            previous_value: "Collecting",
-            new_value:      "Pattern detected",
-            reason:         qualifies.reason,
-            trigger:        "new_signal",
-            ai_model:       CLAUDE_MODEL,
-            prompt_version: PROMPT_VERSION,
-            is_automatic:   true,
+            cluster_id:      clusterId,
+            field_changed:   "status",
+            previous_value:  "Collecting",
+            new_value:       "Pattern detected",
+            reason:          qualifies.reason,
+            trigger:         "new_signal",
+            ai_model:        CLAUDE_MODEL,
+            prompt_version:  PROMPT_VERSION,
+            is_automatic:    true,
+            performed_by:    performedBy,
+            source_function: "ai-analyze",
           });
         }
 
@@ -539,15 +541,17 @@ exports.handler = async (event) => {
             await supabase.from("discovery_clusters")
               .update({ status: "Content review ready", maintenance_status: "Pattern detected" }).eq("id", clusterId);
             await supabase.from("cluster_audit_log").insert({
-              cluster_id:     clusterId,
-              field_changed:  "status",
-              previous_value: cluster.status,
-              new_value:      "Content review ready",
-              reason:         qualifies.reason,
-              trigger:        "new_signal",
-              ai_model:       CLAUDE_MODEL,
-              prompt_version: PROMPT_VERSION,
-              is_automatic:   true,
+              cluster_id:      clusterId,
+              field_changed:   "status",
+              previous_value:  cluster.status,
+              new_value:       "Content review ready",
+              reason:          qualifies.reason,
+              trigger:         "new_signal",
+              ai_model:        CLAUDE_MODEL,
+              prompt_version:  PROMPT_VERSION,
+              is_automatic:    true,
+              performed_by:    performedBy,
+              source_function: "ai-analyze",
             });
           } else {
             // Update existing candidate counts

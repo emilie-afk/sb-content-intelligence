@@ -10,7 +10,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { google }       = require('googleapis');
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, CORS_HEADERS } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -28,7 +28,7 @@ const V = {
 
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' }, body: '' };
+    return { statusCode: 204, headers: CORS_HEADERS, body: '' };
   }
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };

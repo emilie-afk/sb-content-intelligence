@@ -22,7 +22,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -34,17 +34,13 @@ const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const PROMPT_VERSION = "cleanup-v1";
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
 
   const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
   if (authError) return authError;
+  const performedBy = await getUserId(event, supabase);
 
   if (!CLAUDE_API_KEY) return { statusCode: 500, headers, body: JSON.stringify({ error: "CLAUDE_API_KEY not set" }) };
 
@@ -235,15 +231,17 @@ No extra text. Just the JSON array.`;
           }).eq("id", cluster.id);
 
           await supabase.from("cluster_audit_log").insert({
-            cluster_id:     cluster.id,
-            field_changed:  "status",
-            previous_value: cluster.status,
-            new_value:      "Blocked irrelevant",
-            reason:         `AI cleanup (${confidence}): ${reason}`,
-            trigger:        "ai_cleanup_batch",
-            ai_model:       CLAUDE_MODEL,
-            prompt_version: PROMPT_VERSION,
-            is_automatic:   true,
+            cluster_id:      cluster.id,
+            field_changed:   "status",
+            previous_value:  cluster.status,
+            new_value:       "Blocked irrelevant",
+            reason:          `AI cleanup (${confidence}): ${reason}`,
+            trigger:         "ai_cleanup_batch",
+            ai_model:        CLAUDE_MODEL,
+            prompt_version:  PROMPT_VERSION,
+            is_automatic:    true,
+            performed_by:    performedBy,
+            source_function: "ai-cleanup-batch",
           });
           summary.delete_and_block++;
           return;
@@ -259,15 +257,17 @@ No extra text. Just the JSON array.`;
           }).eq("id", cluster.id);
 
           await supabase.from("cluster_audit_log").insert({
-            cluster_id:     cluster.id,
-            field_changed:  "status",
-            previous_value: cluster.status,
-            new_value:      "Closed",
-            reason:         `AI cleanup dismiss (${confidence}): ${reason}`,
-            trigger:        "ai_cleanup_batch",
-            ai_model:       CLAUDE_MODEL,
-            prompt_version: PROMPT_VERSION,
-            is_automatic:   true,
+            cluster_id:      cluster.id,
+            field_changed:   "status",
+            previous_value:  cluster.status,
+            new_value:       "Closed",
+            reason:          `AI cleanup dismiss (${confidence}): ${reason}`,
+            trigger:         "ai_cleanup_batch",
+            ai_model:        CLAUDE_MODEL,
+            prompt_version:  PROMPT_VERSION,
+            is_automatic:    true,
+            performed_by:    performedBy,
+            source_function: "ai-cleanup-batch",
           });
           summary.dismiss++;
           return;
@@ -283,15 +283,17 @@ No extra text. Just the JSON array.`;
           }).eq("id", cluster.id);
 
           await supabase.from("cluster_audit_log").insert({
-            cluster_id:     cluster.id,
-            field_changed:  "status",
-            previous_value: cluster.status,
-            new_value:      "Mention only",
-            reason:         `AI cleanup reroute (${confidence}): ${reason}`,
-            trigger:        "ai_cleanup_batch",
-            ai_model:       CLAUDE_MODEL,
-            prompt_version: PROMPT_VERSION,
-            is_automatic:   true,
+            cluster_id:      cluster.id,
+            field_changed:   "status",
+            previous_value:  cluster.status,
+            new_value:       "Mention only",
+            reason:          `AI cleanup reroute (${confidence}): ${reason}`,
+            trigger:         "ai_cleanup_batch",
+            ai_model:        CLAUDE_MODEL,
+            prompt_version:  PROMPT_VERSION,
+            is_automatic:    true,
+            performed_by:    performedBy,
+            source_function: "ai-cleanup-batch",
           });
           summary.reroute_mention++;
           return;
@@ -326,15 +328,17 @@ No extra text. Just the JSON array.`;
         });
 
         await supabase.from("cluster_audit_log").insert({
-          cluster_id:     cluster.id,
-          field_changed:  "maintenance_status",
-          previous_value: cluster.maintenance_status || cluster.status,
-          new_value:      `Queued: ${destination}`,
-          reason:         `AI cleanup suggestion (${confidence}): ${reason}`,
-          trigger:        "ai_cleanup_batch",
-          ai_model:       CLAUDE_MODEL,
-          prompt_version: PROMPT_VERSION,
-          is_automatic:   false,
+          cluster_id:      cluster.id,
+          field_changed:   "maintenance_status",
+          previous_value:  cluster.maintenance_status || cluster.status,
+          new_value:       `Queued: ${destination}`,
+          reason:          `AI cleanup suggestion (${confidence}): ${reason}`,
+          trigger:         "ai_cleanup_batch",
+          ai_model:        CLAUDE_MODEL,
+          prompt_version:  PROMPT_VERSION,
+          is_automatic:    false,
+          performed_by:    performedBy,
+          source_function: "ai-cleanup-batch",
         });
         summary.queued_for_review++;
 
