@@ -13,6 +13,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
+const { requireUserRole, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -20,29 +21,12 @@ const supabase = createClient(
 );
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":"Content-Type, Authorization",
-  };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
 
-  // Auth check
-  const authHeader = event.headers["authorization"] || event.headers["Authorization"] || "";
-  const token = authHeader.replace("Bearer ", "").trim();
-  if (!token) return { statusCode: 401, headers, body: JSON.stringify({ error: "Authorization header required" }) };
-
-  const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
-
-  if (authErr || !user) return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid token" }) };
-
-  const { data: profile } = await supabase
-    .from("users_profile").select("role").eq("id", user.id).single();
-  if (!["admin","owner"].includes(profile?.role)) {
-    return { statusCode: 403, headers, body: JSON.stringify({ error: "Admin or owner required" }) };
-  }
+  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+  if (authError) return authError;
 
   // Parse body
   let body;

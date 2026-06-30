@@ -11,7 +11,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -19,11 +19,6 @@ const supabase = createClient(
 );
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":"Content-Type, Authorization",
-  };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
 
@@ -46,7 +41,12 @@ exports.handler = async (event) => {
       };
     }
 
-    const scriptUrl = setting.value.url;
+    // Append shared secret as query param so Apps Script can validate the caller
+    const secret = process.env.CALENDAR_SCRIPT_SECRET;
+    const baseUrl   = setting.value.url;
+    const scriptUrl = secret
+      ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}secret=${encodeURIComponent(secret)}`
+      : baseUrl;
 
     // Call Apps Script doGet — returns all 2026 entries as JSON
     const resp = await fetch(scriptUrl, {

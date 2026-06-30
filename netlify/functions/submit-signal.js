@@ -35,7 +35,7 @@ exports.handler = async (event) => {
   const tokenHash = hashToken(token);
   const { data: tokenRow, error: tokenErr } = await supabase
     .from("submission_tokens")
-    .select("id, label, active, expires_at, allowed_action")
+    .select("id, label, active, expires_at, allowed_action, rate_limit_per_hour, requests_this_hour, hour_window_start")
     .eq("token_hash", tokenHash)
     .single();
 
@@ -48,6 +48,24 @@ exports.handler = async (event) => {
   if (tokenRow.allowed_action !== "submit_signal") {
     return { statusCode: 403, body: JSON.stringify({ error: "Token not allowed for this action" }) };
   }
+
+  // ── Rate limiting ─────────────────────────────────────────────
+  const limit = tokenRow.rate_limit_per_hour ?? 500; // default 500 requests/hour
+  const now   = new Date();
+  const windowStart = tokenRow.hour_window_start ? new Date(tokenRow.hour_window_start) : null;
+  const inSameHour  = windowStart && (now - windowStart) < 3600_000;
+  const count       = inSameHour ? (tokenRow.requests_this_hour || 0) : 0;
+
+  if (count >= limit) {
+    return { statusCode: 429, body: JSON.stringify({ error: "Rate limit exceeded — try again next hour" }) };
+  }
+
+  // Update rate-limit counters (fire-and-forget, non-blocking)
+  supabase.from("submission_tokens").update({
+    requests_this_hour: count + 1,
+    hour_window_start:  inSameHour ? tokenRow.hour_window_start : now.toISOString(),
+    last_used_at:       now.toISOString(),
+  }).eq("id", tokenRow.id).then(() => {}).catch(() => {});
 
   // ── 2. Parse body ────────────────────────────────────────────
   let body;
@@ -124,11 +142,6 @@ exports.handler = async (event) => {
     console.error("Insert error:", insertErr);
     return { statusCode: 500, body: JSON.stringify({ error: "Failed to insert signals", detail: insertErr.message }) };
   }
-
-  await supabase
-    .from("submission_tokens")
-    .update({ last_used_at: new Date().toISOString() })
-    .eq("id", tokenRow.id);
 
   // ── 6. Auto-cluster (fire and forget) ────────────────────────
   // Don't await — clustering runs in background so submit stays fast

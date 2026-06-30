@@ -6,7 +6,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole } = require("./_auth");
+const { requireUserRole, CORS_HEADERS: headers } = require("./_auth");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -17,12 +17,6 @@ const NETLIFY_URL =
   process.env.URL || "https://sb-content-intelligence.netlify.app";
 const BATCH_SIZE = 8; // signals per call — keep total wall-time under 10s
 const CONCURRENCY = 2; // parallel ai-analyze calls per batch
-
-const headers = {
-  "Content-Type": "application/json",
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
 
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {

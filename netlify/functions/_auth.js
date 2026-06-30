@@ -7,9 +7,11 @@
  *   if (authError) return authError;  // already a formatted { statusCode, headers, body }
  */
 
+// Set ALLOWED_ORIGIN in Netlify env vars to your production domain (e.g. https://your-app.netlify.app).
+// Falls back to * so local dev and the initial deploy still work.
 const CORS_HEADERS = {
   "Content-Type":                "application/json",
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*",
   "Access-Control-Allow-Headers":"Content-Type, Authorization",
 };
 
@@ -62,4 +64,27 @@ async function requireUserRole(event, supabase, roles = ["admin", "owner"]) {
   return null; // caller is authenticated and authorised
 }
 
-module.exports = { requireUserRole, CORS_HEADERS };
+/**
+ * Extract the authenticated user's ID from the JWT without enforcing a role.
+ * Returns null if the token is missing or invalid (e.g. internal secret calls).
+ *
+ * @param {object} event    - Netlify handler event
+ * @param {object} supabase - Supabase client
+ * @returns {Promise<string|null>} user UUID or null
+ */
+async function getUserId(event, supabase) {
+  try {
+    const authHeader =
+      event.headers["authorization"] ||
+      event.headers["Authorization"] ||
+      "";
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    if (!token) return null;
+    const { data: { user } } = await supabase.auth.getUser(token);
+    return user?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { requireUserRole, getUserId, CORS_HEADERS };
