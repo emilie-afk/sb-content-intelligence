@@ -1,0 +1,49 @@
+name: Daily Auto-Cluster
+
+on:
+  schedule:
+    - cron: '30 0 * * *'   # 7:30 AM Vietnam (UTC+7)
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  cluster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cluster all New signals
+        run: |
+          REMAINING=1
+          CALLS=0
+          MAX_CALLS=20
+          ERRORS=0
+
+          while [ "$REMAINING" -gt 0 ] && [ "$CALLS" -lt "$MAX_CALLS" ] && [ "$ERRORS" -lt 3 ]; do
+            RESPONSE=$(curl -s -w '\n%{http_code}' -X POST \
+              https://sb-content-intelligence.netlify.app/.netlify/functions/batch-cluster \
+              -H "Content-Type: application/json" \
+              -H "x-internal-secret: ${{ secrets.INTERNAL_SECRET }}" \
+              -d '{}' \
+              --max-time 30)
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | head -n -1)
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "HTTP $HTTP_CODE — retrying..."
+              ERRORS=$((ERRORS + 1))
+              sleep 5
+              continue
+            fi
+
+            REMAINING=$(echo "$BODY" | jq -r '.remaining // 0')
+            PROCESSED=$(echo "$BODY" | jq -r '.processed // 0')
+            CALLS=$((CALLS + 1))
+            ERRORS=0
+
+            echo "Call $CALLS: processed=$PROCESSED, remaining=$REMAINING"
+
+            if [ "$REMAINING" -gt 0 ]; then
+              sleep 3
+            fi
+          done
+
+          echo "Done — $CALLS calls made, $REMAINING signals still queued"
