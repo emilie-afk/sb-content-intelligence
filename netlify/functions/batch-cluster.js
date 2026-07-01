@@ -50,7 +50,7 @@ exports.handler = async (event) => {
     const { data: allNew, error: fetchError } = await supabase
       .from("signals")
       .select(
-        "id, topic, raw_input, platform, source_url, caption_summary, plant_or_product, is_manual_submission"
+        "id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission"
       )
       .eq("status", "New")
       .order("created_at", { ascending: true })
