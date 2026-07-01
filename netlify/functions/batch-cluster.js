@@ -47,7 +47,7 @@ exports.handler = async (event) => {
     }
 
     // ── Step 2: Fetch up to BATCH_SIZE truly-unclustered New signals ────────
-    const { data: allNew } = await supabase
+    const { data: allNew, error: fetchError } = await supabase
       .from("signals")
       .select(
         "id, topic, raw_input, platform, source_url, caption_summary, plant_or_product, is_manual_submission"
@@ -56,6 +56,10 @@ exports.handler = async (event) => {
       .order("created_at", { ascending: true })
       .limit(BATCH_SIZE);
 
+    if (fetchError) {
+      console.error("Step 2 fetch error:", fetchError.message, fetchError.details);
+    }
+
     if (!allNew || allNew.length === 0) {
       // Count remaining for reporting
       const { count: remaining } = await supabase
@@ -63,12 +67,15 @@ exports.handler = async (event) => {
         .select("*", { count: "exact", head: true })
         .eq("status", "New");
 
+      console.log(`Step 2: no signals fetched (fetchError=${fetchError?.message ?? "none"}, remaining=${remaining})`);
+
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
           success: true,
-          message: "No new signals to cluster",
+          message: fetchError ? `Fetch error: ${fetchError.message}` : "No new signals to cluster",
+          fetchError: fetchError?.message ?? null,
           processed: 0,
           remaining: remaining ?? 0,
         }),
@@ -92,12 +99,15 @@ exports.handler = async (event) => {
             },
             body: JSON.stringify({ type: "cluster", data: sig }),
           })
-            .then((r) => r.json())
-            .then((r) => {
-              if (r.success || r.cluster_id) done++;
+            .then(async (r) => {
+              const text = await r.text();
+              console.log(`ai-analyze [sig:${sig.id}] status=${r.status} body=${text.slice(0, 200)}`);
+              let parsed;
+              try { parsed = JSON.parse(text); } catch { errors++; return; }
+              if (parsed.success || parsed.cluster_id) done++;
               else errors++;
             })
-            .catch(() => errors++)
+            .catch((e) => { console.error(`ai-analyze fetch error [sig:${sig.id}]:`, e.message); errors++; })
         )
       );
       // Small pause between chunks to avoid hammering Claude API
