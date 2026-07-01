@@ -1,0 +1,21 @@
+name: Daily Agent Triage
+
+on:
+  schedule:
+    - cron: '45 0 * * *'   # 7:45 AM Vietnam (UTC+7)
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Signal Flow Agent
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            https://sb-content-intelligence.netlify.app/.netlify/functions/run-agent \
+            -H "Content-Type: application/json" \
+            -H "x-internal-secret: ${{ secrets.INTERNAL_SECRET }}" \
+            -d '{"run_type": "scheduled"}' \
+            --max-time 30)
+
+          echo "Agent result: $RESPONSE"
