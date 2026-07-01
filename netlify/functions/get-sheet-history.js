@@ -22,7 +22,7 @@ exports.handler = async (event) => {
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
 
-  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+  const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
   if (authError) return authError;
 
   try {

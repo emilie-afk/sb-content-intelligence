@@ -28,7 +28,7 @@ exports.handler = async (event) => {
   // Internal calls from batch-cluster / submit-signal pass a shared secret instead of a user token
   const internalSecret = event.headers["x-internal-secret"] || event.headers["X-Internal-Secret"];
   if (!internalSecret || internalSecret !== process.env.INTERNAL_SECRET) {
-    const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+    const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
     if (authError) return authError;
   }
   const performedBy = await getUserId(event, supabase); // null for internal secret calls
