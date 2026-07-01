@@ -115,7 +115,7 @@ exports.handler = async (event) => {
 
   let performedBy = null;
   if (!isScheduled) {
-    const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+    const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
     if (authError) return authError;
     performedBy = await getUserId(event, supabase);
   }

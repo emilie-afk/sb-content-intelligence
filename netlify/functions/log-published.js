@@ -34,7 +34,7 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }
 
-  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+  const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
   if (authError) return authError;
 
   try {

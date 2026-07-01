@@ -26,7 +26,7 @@ exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
   if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
 
-  const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
+  const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
   if (authError) return authError;
   const performedBy = await getUserId(event, supabase);
 
