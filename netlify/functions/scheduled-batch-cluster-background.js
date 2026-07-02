@@ -24,8 +24,10 @@ exports.handler = async (event) => {
   let totalProcessed = 0;
   let calls = 0;
   let consecutiveErrors = 0;
+  let lastRemaining = -1;
+  let stalls = 0; // consecutive calls where remaining didn't drop
 
-  while (remaining > 0 && calls < MAX_CALLS && consecutiveErrors < 3) {
+  while (remaining > 0 && calls < MAX_CALLS && consecutiveErrors < 3 && stalls < 3) {
     try {
       const resp = await fetch(
         `${NETLIFY_URL}/.netlify/functions/batch-cluster`,
@@ -56,8 +58,12 @@ exports.handler = async (event) => {
         `Call ${calls}: processed=${data.processed ?? 0}, remaining=${remaining}`
       );
 
+      stalls = remaining === lastRemaining ? stalls + 1 : 0;
+      lastRemaining = remaining;
+
       if (remaining > 0) {
-        await new Promise((r) => setTimeout(r, 3000));
+        // 15s between dispatch batches — throttles concurrent background analyses
+        await new Promise((r) => setTimeout(r, 15000));
       }
     } catch (err) {
       console.error("batch-cluster call failed:", err.message);
@@ -74,6 +80,8 @@ exports.handler = async (event) => {
     stopped_reason:
       consecutiveErrors >= 3
         ? "too_many_errors"
+        : stalls >= 3
+        ? "stalled_signals_not_clustering"
         : calls >= MAX_CALLS
         ? "max_calls_reached"
         : "complete",

@@ -15,11 +15,11 @@ const supabase = createClient(
 
 const NETLIFY_URL =
   process.env.URL || "https://sb-content-intelligence.netlify.app";
-const BATCH_SIZE = 6;        // signals per call — all fired in ONE parallel round
-const ANALYZE_TIMEOUT = 7000; // ms — abort waiting before Netlify's 10s kill.
-// NOTE: an aborted request only stops US waiting — ai-analyze keeps running
-// server-side and still updates the DB. Step 1 of the next call fixes any
-// signal that got linked but is still marked New.
+const BATCH_SIZE = 6; // signals dispatched per call
+// Analyses are dispatched to cluster-signal-background (15-min budget, returns
+// 202 instantly), because a full clustering pass — especially for manual
+// submissions — can exceed the ~26s synchronous function cap. This function
+// just dispatches and returns; ai-analyze writes results to the DB directly.
 
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
@@ -45,9 +45,18 @@ exports.handler = async (event) => {
       await supabase
         .from("signals")
         .update({ status: "Clustered" })
-        .eq("status", "New")
+        .in("status", ["New", "Clustering"])
         .in("id", linkedIds);
     }
+
+    // Recover signals stuck in "Clustering" for >15 min (background analysis
+    // died without writing a final status) — put them back in the New queue.
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    await supabase
+      .from("signals")
+      .update({ status: "New" })
+      .eq("status", "Clustering")
+      .lt("updated_at", staleCutoff);
 
     // ── Step 2: Fetch up to BATCH_SIZE truly-unclustered New signals ────────
     const { data: allNew, error: fetchError } = await supabase
@@ -85,16 +94,19 @@ exports.handler = async (event) => {
       };
     }
 
-    // ── Step 3: Cluster each signal by calling ai-analyze ──────────────────
-    const analyzeUrl = `${NETLIFY_URL}/.netlify/functions/ai-analyze`;
-    let done = 0;
-    let errors = 0;
-    let timedOut = 0;
+    // ── Step 3: Dispatch each signal to the background cluster function ─────
+    // Mark them "Clustering" first so they leave the New queue immediately and
+    // the next batch-cluster call doesn't re-dispatch the same signals.
+    const dispatchIds = allNew.map((s) => s.id);
+    await supabase
+      .from("signals")
+      .update({ status: "Clustering" })
+      .in("id", dispatchIds);
 
-    // Fire ALL signals in one parallel round so wall-time ≈ one ai-analyze
-    // call, not BATCH_SIZE/CONCURRENCY sequential rounds. Each request stops
-    // being awaited after ANALYZE_TIMEOUT ms (the work still completes
-    // server-side — see note at top).
+    const analyzeUrl = `${NETLIFY_URL}/.netlify/functions/cluster-signal-background`;
+    let done = 0;   // dispatched (202 accepted)
+    const failedIds = [];
+
     await Promise.allSettled(
       allNew.map((sig) =>
         fetch(analyzeUrl, {
@@ -104,27 +116,29 @@ exports.handler = async (event) => {
             "x-internal-secret": process.env.INTERNAL_SECRET || "",
           },
           body: JSON.stringify({ type: "cluster", data: sig }),
-          signal: AbortSignal.timeout(ANALYZE_TIMEOUT),
+          signal: AbortSignal.timeout(8000), // 202 arrives near-instantly
         })
-          .then(async (r) => {
-            const text = await r.text();
-            console.log(`ai-analyze [sig:${sig.id}] status=${r.status} body=${text.slice(0, 200)}`);
-            let parsed;
-            try { parsed = JSON.parse(text); } catch { errors++; return; }
-            if (parsed.success || parsed.cluster_id) done++;
-            else errors++;
+          .then((r) => {
+            console.log(`dispatch [sig:${sig.id}] status=${r.status}`);
+            if (r.status === 202 || r.ok) done++;
+            else failedIds.push(sig.id);
           })
           .catch((e) => {
-            if (e.name === "TimeoutError" || e.name === "AbortError") {
-              timedOut++;
-              console.log(`ai-analyze [sig:${sig.id}] still running server-side (stopped waiting after ${ANALYZE_TIMEOUT}ms)`);
-            } else {
-              console.error(`ai-analyze fetch error [sig:${sig.id}]:`, e.message);
-              errors++;
-            }
+            console.error(`dispatch error [sig:${sig.id}]:`, e.message);
+            failedIds.push(sig.id);
           })
       )
     );
+    const errors = failedIds.length;
+
+    // Signals whose dispatch failed go back to New so they're retried later.
+    if (failedIds.length > 0) {
+      await supabase
+        .from("signals")
+        .update({ status: "New" })
+        .in("id", failedIds)
+        .eq("status", "Clustering");
+    }
 
     // ── Step 4: Count how many New signals remain ──────────────────────────
     const { count: remaining } = await supabase
@@ -137,11 +151,10 @@ exports.handler = async (event) => {
       headers,
       body: JSON.stringify({
         success: true,
-        processed: done,
+        processed: done, // dispatched to background — results land in DB shortly
         errors,
-        still_running: timedOut,
         remaining: remaining ?? 0,
-        message: `Clustered ${done}/${allNew.length} signals (${timedOut} still finishing server-side). ${remaining ?? 0} still queued.`,
+        message: `Dispatched ${done}/${allNew.length} signals for background clustering. ${remaining ?? 0} still queued.`,
       }),
     };
   } catch (err) {
