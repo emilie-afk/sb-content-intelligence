@@ -137,6 +137,52 @@ exports.handler = async (event) => {
       prompt = buildScriptPrompt(data, rules || []);
       result = await callClaude(prompt);
 
+    } else if (type === "generate_script") {
+      // ── GENERATE A PRODUCTION-READY SCRIPT FROM A BRIEF ────────────────────
+      // data = the brief row (+ optional target_duration_seconds, default 20).
+      // Duration is auto-computed from the generated voiceover word count.
+      const { data: rules } = await supabase
+        .from("brand_content_rules")
+        .select("category, rule_name, rule_text, severity")
+        .eq("active", true)
+        .order("severity");
+
+      const target = Math.min(600, Math.max(5, Number(data.target_duration_seconds) || 20));
+      prompt = buildScriptGenPrompt(data, rules || [], target);
+      const gen = await callClaude(prompt, 2048);
+
+      // Auto duration: ~150 words/min ≈ 2.5 words/sec of voiceover
+      const words = (gen.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
+      const estSecs = words ? Math.max(5, Math.round(words / 2.5)) : target;
+
+      const row = {
+        brief_id:                   data.id || null,
+        platform:                   gen.platform || data.platform || "TikTok",
+        script_title:               gen.script_title || data.title || "Untitled script",
+        script_version:             "v1",
+        script_type:                gen.script_type || "TikTok / Reel short script",
+        opening_hook:               gen.opening_hook || null,
+        full_voiceover_script:      gen.full_voiceover_script || null,
+        on_screen_text:             gen.on_screen_text || null,
+        shot_list:                  gen.shot_list || null,
+        broll_notes:                gen.broll_notes || null,
+        product_mention:            gen.product_mention || data.featured_product || null,
+        cta:                        gen.cta || data.cta || null,
+        caption:                    gen.caption || null,
+        hashtags:                   gen.hashtags || null,
+        estimated_duration_seconds: estSecs,
+        review_status:              "Draft",
+      };
+
+      const { data: inserted, error: insErr } = await supabase
+        .from("script_outputs")
+        .insert(row)
+        .select("id")
+        .single();
+      if (insErr) throw new Error("Script insert failed: " + insErr.message);
+
+      result = { ...row, id: inserted.id, voiceover_words: words, target_duration_seconds: target };
+
     } else if (type === "cluster") {
       // ── DISCOVERY CLUSTERING ──────────────────────────────────────────────
       // 1. Extract structured signal from raw input
@@ -880,11 +926,63 @@ Review this brief and return ONLY valid JSON:
 }
 
 
+// ── SCRIPT GENERATION PROMPT ──────────────────────────────────────────────────
+function buildScriptGenPrompt(b, rules, targetSecs) {
+  const rulesText = rules.map(r =>
+    `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
+  ).join("\n");
+  const wordBudget = Math.round(targetSecs * 2.5); // ~150 wpm speaking pace
+
+  return `You are writing a short-form video script for Succulents Box, a succulent plant subscription company.
+
+BRIEF:
+Title: ${b.title || ""}
+Featured product: ${b.featured_product || "not specified"}
+Audience problem: ${b.audience_problem || "not specified"}
+Hook idea from brief: ${b.opening_hook || "none — write your own"}
+Visual hook: ${b.visual_hook || "not specified"}
+Video format: ${b.video_format || "TikTok / Reel short script"}
+Video flow: ${b.video_flow || "not specified"}
+CTA: ${b.cta || "not specified"}
+
+TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
+
+BRAND RULES (follow all Required rules, never do Forbidden ones):
+${rulesText || "No rules loaded"}
+
+Writing guidance:
+- The opening hook must create curiosity or name the audience problem in the first sentence — never restate the title.
+- Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
+- Structure: hook → problem/payoff → 2-3 concrete tips or steps → CTA.
+
+Return ONLY valid JSON:
+{
+  "script_title": "short internal title",
+  "platform": "TikTok | Instagram | YouTube | Facebook",
+  "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | UGC-style script",
+  "opening_hook": "first line of the video, under 12 words",
+  "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
+  "on_screen_text": "text overlays, one per line",
+  "shot_list": "Shot 1: … one per line",
+  "broll_notes": "b-roll / close-up suggestions",
+  "product_mention": "how/when the product is mentioned, or null",
+  "cta": "closing call to action",
+  "caption": "post caption, 1-2 sentences",
+  "hashtags": "#space #separated #hashtags"
+}`;
+}
+
+
 // ── SCRIPT PROMPT ─────────────────────────────────────────────────────────────
 function buildScriptPrompt(s, rules) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
+
+  // Spoken-pace duration estimate: ~150 words/min ≈ 2.5 words/sec
+  const words = (s.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
+  const spokenSecs = words ? Math.round(words / 2.5) : null;
+  const target = s.estimated_duration_seconds || null;
 
   return `You are reviewing a video script for Succulents Box, a succulent plant subscription company.
 
@@ -893,6 +991,8 @@ PLATFORM: ${s.platform || ""}
 TYPE: ${s.script_type || ""}
 HOOK: ${s.opening_hook || "not provided"}
 VOICEOVER: ${s.full_voiceover_script || "not provided"}
+VOICEOVER LENGTH: ${words ? `${words} words ≈ ${spokenSecs}s at a normal speaking pace` : "not provided"}
+TARGET DURATION: ${target ? `${target}s` : "not set"}
 CTA: ${s.cta || "not provided"}
 CAPTION: ${s.caption || "not provided"}
 
@@ -904,6 +1004,8 @@ Review this script and return ONLY valid JSON:
   "overall": "Approved | Needs revision | Rejected",
   "score": 85,
   "hook_strength": "Strong | Weak | Missing",
+  "hook_suggestions": ["2-3 stronger alternative opening hooks, each under 12 words, written in casual audience language (curiosity gap, surprising fact, or direct question). Empty array if hook_strength is Strong."],
+  "duration_check": "OK | Too long — spoken length exceeds target, suggest what to cut | Too short — suggest what to add | No target set",
   "cta_present": true,
   "brand_violations": [
     { "severity": "Required|Recommended|Avoid|Forbidden", "rule": "rule name", "issue": "what's wrong", "fix": "how to fix it" }
@@ -913,7 +1015,7 @@ Review this script and return ONLY valid JSON:
   "notes": "overall 1-2 sentence summary"
 }
 
-Score out of 100. brand_violations empty array if none found.`;
+Score out of 100. brand_violations empty array if none found. A hook is Strong only if it creates curiosity or names a specific problem in the first sentence — restating the title is Weak.`;
 }
 
 
