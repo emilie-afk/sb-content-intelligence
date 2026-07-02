@@ -98,10 +98,16 @@ exports.handler = async (event) => {
     // Mark them "Clustering" first so they leave the New queue immediately and
     // the next batch-cluster call doesn't re-dispatch the same signals.
     const dispatchIds = allNew.map((s) => s.id);
-    await supabase
+    const { error: markError } = await supabase
       .from("signals")
       .update({ status: "Clustering" })
       .in("id", dispatchIds);
+    if (markError) {
+      // Most likely the signals_status_check constraint is missing 'Clustering'
+      // — run supabase/migration_add_clustering_status.sql. Without the interim
+      // status, the same signals get re-dispatched on every call.
+      console.error("Failed to mark signals as Clustering:", markError.message);
+    }
 
     const analyzeUrl = `${NETLIFY_URL}/.netlify/functions/cluster-signal-background`;
     let done = 0;   // dispatched (202 accepted)
