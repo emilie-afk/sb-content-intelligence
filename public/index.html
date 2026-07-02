@@ -1097,10 +1097,11 @@ tbody tr:hover { background: #fafffe; }
       <div class="form-group"><label>Version</label>
         <select id="scr-version"><option>v1</option><option>v2</option><option>v3</option></select>
       </div>
-      <div class="form-group"><label>Est. Duration (seconds)</label><input type="number" id="scr-duration" min="5" max="600" placeholder="30"></div>
+      <div class="form-group"><label>Est. Duration (seconds)</label><input type="number" id="scr-duration" min="5" max="600" placeholder="auto" oninput="scrDurationManual=true">
+        <div id="scr-duration-hint" style="font-size:11px;color:#888;margin-top:2px"></div></div>
     </div>
     <div class="form-group"><label>Opening Hook</label><input type="text" id="scr-hook" placeholder="First line of the video"></div>
-    <div class="form-group"><label>Full Voiceover Script</label><textarea id="scr-voiceover" rows="5" placeholder="Full spoken script…"></textarea></div>
+    <div class="form-group"><label>Full Voiceover Script</label><textarea id="scr-voiceover" rows="5" placeholder="Full spoken script…" oninput="estimateScrDuration()"></textarea></div>
     <div class="form-group"><label>On-Screen Text</label><textarea id="scr-onscreen" rows="2" placeholder="Text overlays / captions…"></textarea></div>
     <div class="form-group"><label>Shot List</label><textarea id="scr-shots" rows="3" placeholder="Shot 1: close-up on soil…"></textarea></div>
     <div class="form-group"><label>B-Roll / Close-Up Notes</label><input type="text" id="scr-broll" placeholder="e.g. Show roots being trimmed"></div>
@@ -1832,8 +1833,34 @@ async function loadBriefs() {
           ${['Draft','Needs review','Approved','Filming','Editing','Scheduled','Published','Measured'].map(opt=>`<option${b.status===opt?' selected':''}>${opt}</option>`).join('')}
         </select>
       </td>
-      <td><button class="btn btn-secondary btn-sm" onclick="viewBrief('${b.id}')">View</button></td>
+      <td><button class="btn btn-secondary btn-sm" onclick="viewBrief('${b.id}')">View</button>
+        ${b.status==='Approved' ? `<button class="btn btn-sm" style="margin-left:4px" onclick="generateScriptFromBrief('${b.id}')">🎬 Script</button>` : ''}</td>
     </tr>`).join('');
+}
+
+// ── AI SCRIPT GENERATION FROM BRIEF ───────────────────────────────────
+async function generateScriptFromBrief(briefId) {
+  const secs = prompt('Target video length in seconds:', '20');
+  if (secs === null) return; // cancelled
+  const target = Math.min(600, Math.max(5, Number(secs) || 20));
+
+  const { data: brief, error } = await sb.from('briefs').select('*').eq('id', briefId).single();
+  if (error || !brief) { toast('Brief not found', true); return; }
+
+  toast(`🎬 Generating ~${target}s script… this can take 10-20 seconds`);
+  try {
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ type: 'generate_script', data: { ...brief, target_duration_seconds: target } }),
+    });
+    const result = await resp.json();
+    if (!result.success) { toast('Error: ' + (result.error || 'generation failed'), true); return; }
+    const s = result.analysis;
+    toast(`✅ Script created: "${s.script_title}" — ${s.estimated_duration_seconds}s (${s.voiceover_words} words). Find it in Scripts as Draft.`);
+  } catch (e) {
+    toast('Error: ' + e.message, true);
+  }
 }
 
 // ── PUBLISHED ─────────────────────────────────────────────────────────
@@ -2169,6 +2196,17 @@ async function viewScript(id) {
   document.getElementById('modal-view').style.display = 'flex';
 }
 
+// Auto-estimate duration from voiceover length (~150 words/min ≈ 2.5 words/sec).
+// Stops auto-filling once the user types a duration themselves.
+let scrDurationManual = false;
+function estimateScrDuration() {
+  const words = (document.getElementById('scr-voiceover').value.trim().match(/\S+/g) || []).length;
+  const secs = words ? Math.max(5, Math.round(words / 2.5)) : null;
+  const hint = document.getElementById('scr-duration-hint');
+  if (hint) hint.textContent = secs ? `≈ ${secs}s spoken (${words} words)` : '';
+  if (secs && !scrDurationManual) document.getElementById('scr-duration').value = secs;
+}
+
 async function saveScript() {
   const row = {
     script_title:              document.getElementById('scr-title').value,
@@ -2441,6 +2479,8 @@ function renderScriptAnalysis(a) {
       <span style="font-size:13px">Hook: ${esc(a.hook_strength||'—')}</span>
       <span style="font-size:13px">CTA: ${a.cta_present ? '✅' : '❌'}</span>
     </div>
+    ${a.duration_check && a.duration_check !== 'No target set' ? `<div style="font-size:13px;margin-bottom:8px"><b>⏱ Duration:</b> <span style="color:${a.duration_check==='OK'?'#27ae60':'#e67e22'}">${esc(a.duration_check)}</span></div>` : ''}
+    ${a.hook_suggestions?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>🎣 Stronger hook ideas:</b> ${a.hook_suggestions.map(h=>`<div style="margin-left:12px">• "${esc(h)}"</div>`).join('')}</div>` : ''}
     ${violations.length ? `<div style="margin-bottom:10px"><b style="font-size:13px">⚠️ Brand issues:</b>${violations.map(v=>`
       <div style="font-size:12px;background:#fff3cd;padding:6px 10px;border-radius:4px;margin-top:4px">
         <b>[${esc(v.severity)}]</b> ${esc(v.rule)}: ${esc(v.issue)}<br>
@@ -2981,6 +3021,8 @@ async function openDiscoveryPanel(clusterId) {
       Last seen:  ${cluster.last_seen_at  ? new Date(cluster.last_seen_at).toLocaleDateString()  : '—'}
     </div>
 
+    ${signalList ? `<div style="margin-bottom:20px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">Source signals (${signals?.length||0})</div>${signalList}</div>` : ''}
+
     <!-- ── EDIT CLUSTER ── -->
     <details style="margin-bottom:20px">
       <summary style="font-size:13px;font-weight:600;cursor:pointer;user-select:none;margin-bottom:12px">✏️ Edit cluster</summary>
@@ -3041,11 +3083,10 @@ async function openDiscoveryPanel(clusterId) {
         </div>
       </div>
       <div style="margin-top:10px">
-        <input id="disc-reviewer-note-${cluster.id}" type="text" placeholder="Add reviewer note…" value="${esc(cluster.reviewer_note||'')}" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
+        <input id="disc-reviewer-note-${cluster.id}" type="text" placeholder="Add reviewer note…" value="${esc(cluster.reviewer_note||'')}" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:#e2e8f0;font-size:12px">
         <button class="btn btn-primary" style="margin-top:6px;font-size:12px" onclick="saveClusterNote('${cluster.id}')">Save note</button>
       </div>
     </div>
-    ${signalList ? `<div style="margin-bottom:20px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">Source signals (${signals?.length||0})</div>${signalList}</div>` : ''}
 
     <!-- ── AUDIT LOG ── -->
     ${auditLog?.length ? `
@@ -3392,7 +3433,7 @@ async function clusterAllSignals() {
   // Already-processed signals (Clustered, Watch, Mention only, Noise, etc.) are excluded
   const { data: allSignals } = await sb
     .from('signals')
-    .select('id, topic, raw_input, platform, source_url, caption_summary, plant_or_product, is_manual_submission')
+    .select('id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission')
     .eq('status', 'New')
     .order('created_at', { ascending: true })
     .limit(200);
@@ -3447,9 +3488,19 @@ async function clusterAllSignals() {
     await new Promise(r => setTimeout(r, 500));
   }
 
+  // Fix any signals now in cluster_links but still showing as New
+  const { data: allLinked } = await sb.from('signal_cluster_links').select('signal_id');
+  if (allLinked?.length) {
+    await sb.from('signals')
+      .update({ status: 'Clustered' })
+      .eq('status', 'New')
+      .in('id', allLinked.map(r => r.signal_id));
+  }
+
   btn.disabled = false;
   btn.textContent = '🔍 Cluster all';
   toast(`✅ Clustered ${done} signals${errors ? ` (${errors} errors)` : ''} — check Discovery Board`);
+  loadInbox();
   loadDiscovery();
   loadCommandCenter(); // refresh all nav badges
 }
