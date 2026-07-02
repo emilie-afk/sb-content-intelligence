@@ -64,7 +64,8 @@ CREATE TABLE signals (
   ai_cleanup_notes      TEXT,
   status                TEXT DEFAULT 'New'
                           CHECK (status IN (
-                            'New', 'Needs cleanup', 'Needs scoring',
+                            'New', 'Clustering', 'Clustered', 'Noise', 'Mention only',
+                            'Needs cleanup', 'Needs scoring',
                             'Duplicate', 'Watch', 'Reject', 'Promote to Daily Board'
                           )),
   reject_reason         TEXT,
