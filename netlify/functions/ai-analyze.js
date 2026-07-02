@@ -153,8 +153,10 @@ exports.handler = async (event) => {
       const extractPrompt = buildExtractionPrompt(data);
       const extracted = await callClaude(extractPrompt);
 
-      // If AI says signal is not relevant to plants/succulents, mark as Noise and stop
-      if (extracted.relevant === false) {
+      // If AI says signal is not relevant to plants/succulents, mark as Noise and stop.
+      // EXCEPT manual submissions — a human deliberately submitted these, so never
+      // auto-noise them; let them cluster normally for review.
+      if (extracted.relevant === false && data.is_manual_submission !== true) {
         await supabase.from("signals").update({ status: "Noise" }).eq("id", signalId);
         return { statusCode: 200, headers, body: JSON.stringify({
           success: true,
@@ -615,7 +617,7 @@ exports.handler = async (event) => {
         await supabase.from("signals")
           .update({ status: "Needs cleanup" })
           .eq("id", data.id)
-          .eq("status", "New");  // only update if still New — don't overwrite manual decisions
+          .in("status", ["New", "Clustering"]);  // don't overwrite manual decisions
       } catch (_) {}
     }
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
