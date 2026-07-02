@@ -15,8 +15,11 @@ const supabase = createClient(
 
 const NETLIFY_URL =
   process.env.URL || "https://sb-content-intelligence.netlify.app";
-const BATCH_SIZE = 8; // signals per call — keep total wall-time under 10s
-const CONCURRENCY = 2; // parallel ai-analyze calls per batch
+const BATCH_SIZE = 6;        // signals per call — all fired in ONE parallel round
+const ANALYZE_TIMEOUT = 7000; // ms — abort waiting before Netlify's 10s kill.
+// NOTE: an aborted request only stops US waiting — ai-analyze keeps running
+// server-side and still updates the DB. Step 1 of the next call fixes any
+// signal that got linked but is still marked New.
 
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
@@ -86,35 +89,42 @@ exports.handler = async (event) => {
     const analyzeUrl = `${NETLIFY_URL}/.netlify/functions/ai-analyze`;
     let done = 0;
     let errors = 0;
+    let timedOut = 0;
 
-    for (let i = 0; i < allNew.length; i += CONCURRENCY) {
-      const chunk = allNew.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        chunk.map((sig) =>
-          fetch(analyzeUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-internal-secret": process.env.INTERNAL_SECRET || "",
-            },
-            body: JSON.stringify({ type: "cluster", data: sig }),
+    // Fire ALL signals in one parallel round so wall-time ≈ one ai-analyze
+    // call, not BATCH_SIZE/CONCURRENCY sequential rounds. Each request stops
+    // being awaited after ANALYZE_TIMEOUT ms (the work still completes
+    // server-side — see note at top).
+    await Promise.allSettled(
+      allNew.map((sig) =>
+        fetch(analyzeUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-internal-secret": process.env.INTERNAL_SECRET || "",
+          },
+          body: JSON.stringify({ type: "cluster", data: sig }),
+          signal: AbortSignal.timeout(ANALYZE_TIMEOUT),
+        })
+          .then(async (r) => {
+            const text = await r.text();
+            console.log(`ai-analyze [sig:${sig.id}] status=${r.status} body=${text.slice(0, 200)}`);
+            let parsed;
+            try { parsed = JSON.parse(text); } catch { errors++; return; }
+            if (parsed.success || parsed.cluster_id) done++;
+            else errors++;
           })
-            .then(async (r) => {
-              const text = await r.text();
-              console.log(`ai-analyze [sig:${sig.id}] status=${r.status} body=${text.slice(0, 200)}`);
-              let parsed;
-              try { parsed = JSON.parse(text); } catch { errors++; return; }
-              if (parsed.success || parsed.cluster_id) done++;
-              else errors++;
-            })
-            .catch((e) => { console.error(`ai-analyze fetch error [sig:${sig.id}]:`, e.message); errors++; })
-        )
-      );
-      // Small pause between chunks to avoid hammering Claude API
-      if (i + CONCURRENCY < allNew.length) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
+          .catch((e) => {
+            if (e.name === "TimeoutError" || e.name === "AbortError") {
+              timedOut++;
+              console.log(`ai-analyze [sig:${sig.id}] still running server-side (stopped waiting after ${ANALYZE_TIMEOUT}ms)`);
+            } else {
+              console.error(`ai-analyze fetch error [sig:${sig.id}]:`, e.message);
+              errors++;
+            }
+          })
+      )
+    );
 
     // ── Step 4: Count how many New signals remain ──────────────────────────
     const { count: remaining } = await supabase
@@ -129,8 +139,9 @@ exports.handler = async (event) => {
         success: true,
         processed: done,
         errors,
+        still_running: timedOut,
         remaining: remaining ?? 0,
-        message: `Clustered ${done}/${allNew.length} signals. ${remaining ?? 0} still queued.`,
+        message: `Clustered ${done}/${allNew.length} signals (${timedOut} still finishing server-side). ${remaining ?? 0} still queued.`,
       }),
     };
   } catch (err) {

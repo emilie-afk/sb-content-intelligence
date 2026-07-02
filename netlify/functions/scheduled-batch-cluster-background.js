@@ -9,7 +9,7 @@
 const NETLIFY_URL =
   process.env.URL || "https://sb-content-intelligence.netlify.app";
 const INTERNAL_SECRET = process.env.INTERNAL_SECRET;
-const MAX_CALLS = 20;
+const MAX_CALLS = 40; // batch-cluster now processes 6/call, some finish async — allow headroom
 
 exports.handler = async () => {
   let remaining = 1;
