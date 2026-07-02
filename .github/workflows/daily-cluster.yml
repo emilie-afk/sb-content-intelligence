@@ -17,17 +17,19 @@ jobs:
           ERRORS=0
 
           while [ "$REMAINING" -gt 0 ] && [ "$CALLS" -lt "$MAX_CALLS" ] && [ "$ERRORS" -lt 3 ]; do
+            # `|| true` so a curl failure (timeout, network) doesn't kill the
+            # job via set -e — it falls through to the retry logic below.
             RESPONSE=$(curl -s -w '\n%{http_code}' -X POST \
               https://sb-content-intelligence.netlify.app/.netlify/functions/batch-cluster \
               -H "Content-Type: application/json" \
               -H "x-internal-secret: ${{ secrets.INTERNAL_SECRET }}" \
               -d '{}' \
-              --max-time 30)
+              --max-time 30) || true
 
             HTTP_CODE=$(echo "$RESPONSE" | tail -1)
             BODY=$(echo "$RESPONSE" | head -n -1)
 
-            if [ "$HTTP_CODE" != "200" ]; then
+            if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" != "200" ]; then
               echo "HTTP $HTTP_CODE — retrying..."
               ERRORS=$((ERRORS + 1))
               sleep 5
