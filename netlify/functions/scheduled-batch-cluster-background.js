@@ -11,7 +11,15 @@ const NETLIFY_URL =
 const INTERNAL_SECRET = process.env.INTERNAL_SECRET;
 const MAX_CALLS = 40; // batch-cluster now processes 6/call, some finish async — allow headroom
 
-exports.handler = async () => {
+exports.handler = async (event) => {
+  // Require the shared internal secret — this endpoint is otherwise open to
+  // anyone on the internet, and each run burns Claude API credits.
+  const provided =
+    event?.headers?.["x-internal-secret"] || event?.headers?.["X-Internal-Secret"];
+  if (!INTERNAL_SECRET || provided !== INTERNAL_SECRET) {
+    return { statusCode: 401, body: JSON.stringify({ error: "Unauthorized" }) };
+  }
+
   let remaining = 1;
   let totalProcessed = 0;
   let calls = 0;
