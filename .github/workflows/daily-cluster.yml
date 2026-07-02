@@ -15,8 +15,10 @@ jobs:
           CALLS=0
           MAX_CALLS=20
           ERRORS=0
+          LAST_REMAINING=-1
+          STALLS=0
 
-          while [ "$REMAINING" -gt 0 ] && [ "$CALLS" -lt "$MAX_CALLS" ] && [ "$ERRORS" -lt 3 ]; do
+          while [ "$REMAINING" -gt 0 ] && [ "$CALLS" -lt "$MAX_CALLS" ] && [ "$ERRORS" -lt 3 ] && [ "$STALLS" -lt 3 ]; do
             # `|| true` so a curl failure (timeout, network) doesn't kill the
             # job via set -e — it falls through to the retry logic below.
             RESPONSE=$(curl -s -w '\n%{http_code}' -X POST \
@@ -43,9 +45,24 @@ jobs:
 
             echo "Call $CALLS: processed=$PROCESSED, remaining=$REMAINING"
 
+            # Stall detection: if remaining doesn't drop for 3 calls in a row,
+            # those signals are failing clustering — stop instead of burning
+            # API calls retrying them all the way to MAX_CALLS.
+            if [ "$REMAINING" = "$LAST_REMAINING" ]; then
+              STALLS=$((STALLS + 1))
+            else
+              STALLS=0
+            fi
+            LAST_REMAINING=$REMAINING
+
             if [ "$REMAINING" -gt 0 ]; then
-              sleep 3
+              # 15s between dispatch batches — analyses run in the background,
+              # so this throttles how many are in flight at once
+              sleep 15
             fi
           done
 
+          if [ "$STALLS" -ge 3 ]; then
+            echo "⚠️ Stopped: $REMAINING signals are stuck (not clustering after 3 attempts) — check Netlify ai-analyze logs"
+          fi
           echo "Done — $CALLS calls made, $REMAINING signals still queued"
