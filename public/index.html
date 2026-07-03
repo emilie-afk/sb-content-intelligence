@@ -515,6 +515,7 @@ tbody tr:hover { background: #fafffe; }
           </select>
         </div>
         <button class="btn btn-primary btn-sm" onclick="openPublishedModal()">+ Add Video</button>
+        <button class="btn btn-secondary btn-sm" id="sync-metrics-btn" onclick="syncVideoMetrics()">↺ Sync metrics from sheet</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -1962,6 +1963,26 @@ async function loadPublished() {
       <td>${snapshotBadge(v.snapshot_7d_status)}</td>
       <td><span class="badge badge-${(v.learning_status||'pending').toLowerCase().replace(' ','-')}">${v.learning_status||'Pending'}</span></td>
     </tr>`).join('');
+}
+
+async function syncVideoMetrics() {
+  const btn = document.getElementById('sync-metrics-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing…'; }
+  try {
+    const res = await fetch('/.netlify/functions/sync-video-metrics', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({}),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || 'Sync failed');
+    toast(`✅ Synced ${result.synced} video(s) from sheet. Skipped ${result.skipped} (already synced or no metrics yet).`);
+    loadPublished();
+  } catch (err) {
+    toast('❌ ' + err.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↺ Sync metrics from sheet'; }
+  }
 }
 
 // ── LEARNING ──────────────────────────────────────────────────────────
