@@ -80,7 +80,7 @@ exports.handler = async (event) => {
         maintenance_status, review_required, last_ai_updated_at, new_signals_since_review,
         ai_update_summary, revenue_priority_match,
         audience_recurring_boolean, repetition_source_type, covered_before_boolean`)
-      .not("status", "in", '("Closed","Blocked irrelevant")')
+      .not("status", "in", '("Closed","Blocked irrelevant","Brief created","Published")')
       .order("signal_count", { ascending: false })
       .limit(60);
     if (filterState.platform) clusterQuery = clusterQuery.contains("platforms", [filterState.platform]);
@@ -104,7 +104,7 @@ exports.handler = async (event) => {
         .gte("created_at", periodStart).order("created_at", { ascending: false }).limit(100),
       supabase.from("discovery_clusters")
         .select("id, title, last_seen_at, new_signals_since_review, ai_update_summary")
-        .gte("last_seen_at", periodStart).not("status", "in", '("Closed","Blocked irrelevant")').limit(50),
+        .gte("last_seen_at", periodStart).not("status", "in", '("Closed","Blocked irrelevant","Brief created","Published")').limit(50),
       supabase.from("discovery_briefings")
         .select("id, briefing_type, summary, prominent_topics, generated_at")
         .eq("briefing_type", briefingType).order("generated_at", { ascending: false }).limit(1),

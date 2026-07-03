@@ -127,8 +127,12 @@ exports.handler = async (event) => {
       prompt = buildGenerateBriefPrompt(data, rules || [], lessons, data.human_notes || null, learningMemory);
       const gen = await callClaude(prompt, 1024);
 
+      // cluster_id: candidates have data.cluster_id; direct cluster calls pass data.cluster_id = data.id
+      const clusterIdForBrief = data.cluster_id || null;
+
       const row = {
         opportunity_id:   data.opportunity_id || null, // only set when sourced from an opportunity
+        cluster_id:       clusterIdForBrief,
         title:            gen.title || data.title || data.topic || "Untitled brief",
         featured_product: gen.featured_product || data.plant_or_product || null,
         audience_problem: gen.audience_problem || null,

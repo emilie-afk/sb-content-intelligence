@@ -38,7 +38,7 @@ exports.handler = async (event) => {
   if (authError) return authError;
 
   try {
-    const { opportunityId, postUrl, platform, publishedOn, topic, format } =
+    const { opportunityId, clusterId, postUrl, platform, publishedOn, topic, format } =
       JSON.parse(event.body);
 
     if (!postUrl) {
@@ -88,17 +88,24 @@ exports.handler = async (event) => {
       errors.push('GOOGLE_VIDEO_TRACKER_ID or GOOGLE_SERVICE_ACCOUNT_JSON not set');
     }
 
-    // ── 2. Mark opportunity as Published in Supabase ──────────────────────
-    if (opportunityId) {
+    // ── 2. Mark opportunity as Published + close cluster in Supabase ──────
+    if (opportunityId || clusterId) {
       try {
-        const supabase = createClient(
-          process.env.SUPABASE_URL,
-          process.env.SUPABASE_SERVICE_ROLE_KEY
-        );
-        await supabase.from('opportunities').update({
-          reviewer_decision: 'Published',
-          reviewed_at:       new Date().toISOString(),
-        }).eq('id', opportunityId);
+        if (opportunityId) {
+          await supabase.from('opportunities').update({
+            reviewer_decision: 'Published',
+            reviewed_at:       new Date().toISOString(),
+          }).eq('id', opportunityId);
+        }
+
+        // Close the source cluster — drops it off Discovery and Today board,
+        // and signals the AI learning loop that this topic has been covered.
+        if (clusterId) {
+          await supabase.from('discovery_clusters').update({
+            status:          'Published',
+            reviewer_status: 'Published',
+          }).eq('id', clusterId);
+        }
       } catch (dbErr) {
         console.warn('Supabase update failed:', dbErr.message);
         errors.push('DB: ' + dbErr.message);
