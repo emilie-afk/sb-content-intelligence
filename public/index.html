@@ -1904,16 +1904,24 @@ async function loadBriefs() {
           ${['Draft','Needs review','Approved','Filming','Editing','Scheduled','Published','Measured'].map(opt=>`<option${b.status===opt?' selected':''}>${opt}</option>`).join('')}
         </select>
       </td>
-      <td><button class="btn btn-secondary btn-sm" onclick="viewBrief('${b.id}')">View</button>
-        ${b.status==='Approved' ? `<button class="btn btn-sm" style="margin-left:4px" onclick="generateScriptFromBrief('${b.id}')">🎬 Script</button>` : ''}</td>
+      <td>
+        <button class="btn btn-secondary btn-sm" onclick="viewBrief('${b.id}')">View</button>
+        <button class="btn btn-sm" style="margin-left:4px" onclick="generateScriptFromBrief('${b.id}')" title="Generate script (prompts for duration)">🎬</button>
+      </td>
     </tr>`).join('');
 }
 
 // ── AI SCRIPT GENERATION FROM BRIEF ───────────────────────────────────
-async function generateScriptFromBrief(briefId) {
-  const secs = prompt('Target video length in seconds:', '20');
-  if (secs === null) return; // cancelled
-  const target = Math.min(600, Math.max(5, Number(secs) || 20));
+// autoSecs: if provided, skips the prompt dialog (used for auto-generation on Approve)
+async function generateScriptFromBrief(briefId, autoSecs) {
+  let target;
+  if (autoSecs != null) {
+    target = Math.min(600, Math.max(5, Number(autoSecs) || 20));
+  } else {
+    const secs = prompt('Target video length in seconds:', '20');
+    if (secs === null) return; // cancelled
+    target = Math.min(600, Math.max(5, Number(secs) || 20));
+  }
 
   const { data: brief, error } = await sb.from('briefs').select('*').eq('id', briefId).single();
   if (error || !brief) { toast('Brief not found', true); return; }
@@ -2068,6 +2076,10 @@ async function updateBriefStatus(id, status) {
   await sb.from('briefs').update({ status, updated_by: currentUser?.id }).eq('id', id);
   toast('Brief status updated');
   loadCommandCenter();
+  if (status === 'Approved') {
+    toast('✨ Brief approved — generating script automatically…');
+    generateScriptFromBrief(id, 20);
+  }
 }
 
 async function updateLearningStatus(id, status) {
@@ -2266,7 +2278,14 @@ async function viewScript(id) {
     ${s.cta ? `<div style="margin-bottom:12px"><b>CTA:</b> ${esc(s.cta)}</div>` : ''}
     ${s.caption ? `<div style="margin-bottom:12px"><b>Caption:</b><br><span style="font-size:13px">${esc(s.caption)}</span></div>` : ''}
     <div id="ai-analysis-result" style="margin-top:16px"></div>
-    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('script', window._viewedScript)">🤖 AI Brand Check</button>
+    <div style="margin-top:14px">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Your notes for AI (optional):</label>
+      <textarea id="script-human-notes" placeholder="e.g. make the hook punchier, shorten to 15s, add product mention earlier" style="width:100%;padding:8px;font-size:13px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0;resize:vertical;box-sizing:border-box" rows="2"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn btn-secondary" onclick="runAIAnalysis('script', window._viewedScript)">🤖 AI Brand Check</button>
+      <button class="btn btn-secondary" onclick="generateRevisedScript()">✨ Regenerate Script</button>
+    </div>
   `;
   document.getElementById('modal-view').style.display = 'flex';
 }
@@ -2466,9 +2485,69 @@ async function viewBrief(id) {
     ${b.caption ? `<div style="margin-bottom:10px"><b>Caption:</b> ${esc(b.caption)}</div>` : ''}
     ${b.cta ? `<div style="margin-bottom:10px"><b>CTA:</b> ${esc(b.cta)}</div>` : ''}
     <div id="ai-analysis-result" style="margin-top:16px"></div>
-    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('brief', window._viewedBrief)">🤖 AI Review</button>
+    <div style="margin-top:14px">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Your notes for AI (optional):</label>
+      <textarea id="brief-human-notes" placeholder="e.g. focus on beginners, shorten the hook, add before/after angle" style="width:100%;padding:8px;font-size:13px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0;resize:vertical;box-sizing:border-box" rows="2"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn btn-secondary" onclick="runAIAnalysis('brief', window._viewedBrief)">🤖 AI Review</button>
+      <button class="btn btn-secondary" onclick="aiGenerateBriefFromSelf()">✨ AI Rewrite Brief</button>
+    </div>
   `;
   document.getElementById('modal-view').style.display = 'flex';
+}
+
+// ── AI REWRITE BRIEF FROM ITSELF ──────────────────────────────────────
+// Calls generate_brief with the current brief's own fields as the seed,
+// then updates the existing brief record in place (same as revise_brief but
+// without needing a prior AI Review). Human notes textarea is also included.
+async function aiGenerateBriefFromSelf() {
+  const b = window._viewedBrief;
+  if (!b) { toast('No brief loaded', true); return; }
+  const humanNotes = document.getElementById('brief-human-notes')?.value?.trim() || null;
+  const resultEl = document.getElementById('ai-analysis-result');
+  resultEl.innerHTML = '<div style="color:#888;font-size:13px">✨ AI is rewriting the brief…</div>';
+  try {
+    // generate_brief expects a candidate-like object; feed it the brief's own fields
+    const seed = {
+      title:           b.title,
+      topic:           b.title,
+      plant_or_product: b.featured_product,
+      audience_problem: b.audience_problem,
+      opening_hook:    b.opening_hook,
+      visual_hook:     b.visual_hook,
+      video_format:    b.video_format,
+      video_flow:      b.video_flow,
+      caption:         b.caption,
+      cta:             b.cta,
+      human_notes:     humanNotes,
+    };
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ type: 'generate_brief', data: seed }),
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error || 'Generation failed');
+    // Update the existing brief record with the generated content
+    const gen = result.analysis;
+    await sb.from('briefs').update({
+      title:            gen.title || b.title,
+      featured_product: gen.featured_product || b.featured_product,
+      audience_problem: gen.audience_problem || null,
+      opening_hook:     gen.opening_hook || null,
+      visual_hook:      gen.visual_hook || null,
+      video_format:     gen.video_format || b.video_format,
+      video_flow:       gen.video_flow || null,
+      caption:          gen.caption || null,
+      cta:              gen.cta || null,
+      updated_at:       new Date().toISOString(),
+    }).eq('id', b.id);
+    toast('✨ Brief rewritten by AI — reloading…');
+    await viewBrief(b.id); // reload with updated content
+  } catch (err) {
+    resultEl.innerHTML = `<div style="color:#e74c3c">Error: ${esc(err.message)}</div>`;
+  }
 }
 
 // ── AI ANALYSIS ───────────────────────────────────────────────────────
@@ -2545,21 +2624,23 @@ function renderBriefAnalysis(a) {
     ${a.suggested_hook ? `<div style="font-size:13px;margin-bottom:8px"><b>Hook idea:</b> "${esc(a.suggested_hook)}"</div>` : ''}
     ${a.revenue_priority_match ? `<div style="font-size:13px;margin-bottom:8px"><b>💰 Revenue priority:</b> <span style="color:${a.revenue_priority_match==='Yes'?'#27ae60':a.revenue_priority_match==='Needs check'?'#e67e22':'#999'}">${esc(a.revenue_priority_match)}</span>${a.revenue_priority_note ? ` — ${esc(a.revenue_priority_note)}` : ''}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
-    ${a.overall !== 'Strong' ? `<button id="revise-brief-btn" class="btn btn-primary" style="margin-top:12px" onclick="generateRevisedBrief()">✨ Regenerate brief from this feedback</button>` : ''}
+    <button id="revise-brief-btn" class="btn btn-primary" style="margin-top:12px" onclick="generateRevisedBrief()">✨ Regenerate brief</button>
   </div>`;
 }
 
 async function generateRevisedBrief() {
   const b = window._viewedBrief;
-  const a = window._lastBriefAnalysis;
-  if (!b || !a) { toast('Run AI Review first', true); return; }
+  const a = window._lastBriefAnalysis || {};
+  if (!b) { toast('Open a brief first', true); return; }
+  const humanNotes = document.getElementById('brief-human-notes')?.value?.trim() || null;
+  if (!a.overall && !humanNotes) { toast('Run AI Review first, or add your own notes', true); return; }
   const btn = document.getElementById('revise-brief-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Rewriting brief…'; }
   try {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
       headers: await authHeaders(),
-      body: JSON.stringify({ type: 'revise_brief', data: { brief: b, feedback: a } }),
+      body: JSON.stringify({ type: 'revise_brief', data: { brief: b, feedback: a, human_notes: humanNotes } }),
     });
     const result = await resp.json();
     if (!result.success) throw new Error(result.error || 'Revision failed');
@@ -2591,21 +2672,23 @@ function renderScriptAnalysis(a) {
       </div>`).join('')}</div>` : '<div style="font-size:13px;color:#27ae60;margin-bottom:8px">✅ No brand violations found</div>'}
     ${a.improvements?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Improvements:</b> ${a.improvements.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
-    ${a.overall !== 'Approved' ? `<button id="revise-script-btn" class="btn btn-primary" style="margin-top:12px" onclick="generateRevisedScript()">✨ Generate revised script from this feedback</button>` : ''}
+    <button id="revise-script-btn" class="btn btn-primary" style="margin-top:12px" onclick="generateRevisedScript()">✨ Generate revised script</button>
   </div>`;
 }
 
 async function generateRevisedScript() {
   const s = window._viewedScript;
-  const a = window._lastScriptAnalysis;
-  if (!s || !a) { toast('Run AI Brand Check first', true); return; }
+  const a = window._lastScriptAnalysis || {};
+  if (!s) { toast('Open a script first', true); return; }
+  const humanNotes = document.getElementById('script-human-notes')?.value?.trim() || null;
+  if (!a.overall && !humanNotes) { toast('Run AI Brand Check first, or add your own notes', true); return; }
   const btn = document.getElementById('revise-script-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing new version…'; }
   try {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
       headers: await authHeaders(),
-      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a } }),
+      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a, human_notes: humanNotes } }),
     });
     const result = await resp.json();
     if (!result.success) throw new Error(result.error || 'Revision failed');
@@ -2614,7 +2697,7 @@ async function generateRevisedScript() {
     viewScript(result.analysis.id); // open the new version right away
   } catch (err) {
     toast('Error: ' + err.message, true);
-    if (btn) { btn.disabled = false; btn.textContent = '✨ Generate revised script from this feedback'; }
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Generate revised script'; }
   }
 }
 
@@ -3321,7 +3404,30 @@ async function updateClusterStatus(id, status) {
   await sb.from('discovery_clusters').update({ status, reviewer_status: status === 'Content review ready' ? 'Moved to content review' : 'Unreviewed' }).eq('id', id);
   toast(status === 'Content review ready' ? '✅ Moved to Content Review' : `Status: ${status}`);
   loadDiscovery();
-  if (status === 'Content review ready') loadContentReview();
+  if (status === 'Content review ready') {
+    // Ensure a candidate row exists so it shows up in Content Review
+    const { data: existing } = await sb.from('content_review_candidates').select('id').eq('cluster_id', id).maybeSingle();
+    if (!existing) {
+      const { data: cl } = await sb.from('discovery_clusters')
+        .select('title,plant_or_product,signal_count,distinct_source_count,question_count,audience_wording')
+        .eq('id', id).single();
+      if (cl) {
+        await sb.from('content_review_candidates').insert({
+          cluster_id:    id,
+          title:         cl.title,
+          plant_or_product: cl.plant_or_product || null,
+          signal_count:  cl.signal_count || 0,
+          source_count:  cl.distinct_source_count || 0,
+          question_count: cl.question_count || 0,
+          representative_wording: cl.audience_wording || [],
+          status:        'Ready for review',
+          repetition_risk: 'Low',
+          created_at:    new Date().toISOString(),
+        });
+      }
+    }
+    loadContentReview();
+  }
 }
 
 async function moveClusterToReview(id, evt) {
