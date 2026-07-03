@@ -96,6 +96,7 @@ exports.handler = async (event) => {
       { data: ownedContent },
       { data: watchlist },
       { data: sbProducts },
+      { data: learningMemoryRows },
     ] = await Promise.all([
       clusterQuery,
       supabase.from("signals")
@@ -127,12 +128,38 @@ exports.handler = async (event) => {
       supabase.from("sb_products")
         .select("handle, title, common_name, scientific_name, genus")
         .eq("is_active", true),
+      // Learning memory: active lessons from past content reviews
+      supabase.from("learning_memory")
+        .select("applies_to, topic, what_happened, recommendation_next_time, confidence")
+        .in("status", ["Active", "Approved rule"])
+        .order("date_added", { ascending: false })
+        .limit(20),
     ]);
 
     const activeClusters   = clusters          || [];
     const newSignals        = recentSignals     || [];
     const clustersChanged   = changedClusters   || [];
     const previousBriefing  = prevBriefings?.[0] || null;
+    const learningMemory    = learningMemoryRows || [];
+
+    // ── LEARNING MEMORY BLOCK ─────────────────────────────────────────────────
+    // Compact text injected into Claude prompt: what's worked, what to avoid.
+    const learningBlock = learningMemory.length
+      ? learningMemory.map(m =>
+          `[${m.applies_to || "general"}${m.topic ? ` · ${m.topic}` : ""}] ${m.what_happened} → ${m.recommendation_next_time}`
+        ).join("\n")
+      : null;
+
+    // ── PUBLISHED PERFORMANCE LOOKUP ──────────────────────────────────────────
+    // Maps normalised plant/topic → { performance_summary, followup_questions }
+    // Used both in scoring (boost clusters with proven audience demand) and in
+    // the Claude summary prompt (so it can mention what has already worked).
+    const normStr = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const perfMap = new Map();
+    for (const v of (ownedContent || [])) {
+      const key = normStr(v.plant_or_product || v.topic);
+      if (key) perfMap.set(key, v);
+    }
     // Filter out reviewer-blocked competitor accounts (marked "Noise" on the Today board)
     let blockedCompetitorAccounts = [];
     try {
@@ -237,6 +264,7 @@ exports.handler = async (event) => {
     //   Audience recurring:  +4 (confirmed pattern across multiple sources)
     //   New signals:         +2 (recent momentum)
     //   Watchlist plant:     +5 (revenue priority)
+    //   Follow-up demand:    +3 (published video generated follow-up questions = proven angle)
     // Old owned script matches are excluded from audience_signal_count (v13 field).
     const scoredClusters = activeClusters.map(c => {
       const inCatalog   = isInCatalog(c.plant_or_product);
@@ -248,6 +276,16 @@ exports.handler = async (event) => {
       const qc       = c.question_count            ?? 0;
       const scraped  = Math.max(0, asc - manual - owned); // remaining audience signals
 
+      // Performance bonus: check if we've published on this plant/topic before
+      const clusterKey = normStr(c.plant_or_product || c.title);
+      const priorVideo = perfMap.get(clusterKey) ||
+        // fuzzy fallback: find a video whose plant/topic is a substring of the cluster key
+        [...perfMap.entries()].find(([k]) => clusterKey.includes(k) || k.includes(clusterKey))?.[1];
+      const hasFollowupDemand = priorVideo &&
+        Array.isArray(priorVideo.audience_followup_questions) &&
+        priorVideo.audience_followup_questions.length > 0;
+      const performanceBonus = hasFollowupDemand ? 3 : 0;
+
       const score =
         manual  * 3 +
         owned   * 3 +
@@ -255,11 +293,14 @@ exports.handler = async (event) => {
         scraped * 1 +
         (c.audience_recurring_boolean        ? 4 : 0) +
         ((c.new_signals_since_review ?? 0) > 0 ? 2 : 0) +
-        (isWatchlist                          ? 5 : 0);
+        (isWatchlist                          ? 5 : 0) +
+        performanceBonus;
 
       return {
         ...c,
-        _inCatalog:   inCatalog,
+        _inCatalog:       inCatalog,
+        _priorVideo:      priorVideo || null,
+        _hasFollowupDemand: hasFollowupDemand,
         _isWatchlist: isWatchlist,
         _asc:    asc,
         _manual: manual,
@@ -287,7 +328,7 @@ exports.handler = async (event) => {
           catalog_plants: c.plant_or_product ? [c.plant_or_product] : [],
           platforms:     c.platforms || [],
           change_from_prior: (c.new_signals_since_review || 0) > 0 ? "growing" : "stable",
-          related_owned_content: null,
+          related_owned_content: c._priorVideo?.video_title || null,
           why_prominent: [
             `${c._asc} audience signals`,
             c._manual > 0 ? `${c._manual} manual` : null,
@@ -295,6 +336,8 @@ exports.handler = async (event) => {
             c.distinct_source_count > 1 ? `${c.distinct_source_count} sources` : null,
             (c.question_count ?? 0) > 0 ? `${c.question_count} questions` : null,
             c.audience_recurring_boolean ? "Audience recurring" : null,
+            c._hasFollowupDemand ? "✅ Proven: audience asked for more" : null,
+            c._priorVideo && !c._hasFollowupDemand ? `Prior video: ${c._priorVideo.video_title || "published"}` : null,
             c.covered_before_boolean ? "⚠️ Covered before" : null,
             c.novelty_status && !["None","Unclear"].includes(c.novelty_status) ? c.novelty_status : null,
             catalogLabel,
@@ -360,6 +403,21 @@ exports.handler = async (event) => {
       }));
 
     // ── 4. CALL CLAUDE — PLAIN TEXT SUMMARY ONLY (no JSON parsing) ───────────
+    // Build compact performance text for the top 3 prominent topics
+    const topPerformanceNotes = prominentTopics.slice(0, 3)
+      .map(t => {
+        const c = scoredClusters.find(sc => sc.id === t.cluster_ids?.[0]);
+        if (!c?._priorVideo) return null;
+        const v = c._priorVideo;
+        const parts = [
+          `"${t.theme}"`,
+          v.performance_summary ? `perf: ${v.performance_summary}` : null,
+          c._hasFollowupDemand ? `audience asked follow-up questions` : null,
+        ].filter(Boolean);
+        return parts.join(" — ");
+      })
+      .filter(Boolean);
+
     const summaryPrompt = buildSummaryPrompt({
       totalClusters: activeClusters.length,
       newSignalCount: newSignals.length,
@@ -368,6 +426,8 @@ exports.handler = async (event) => {
       competitorCount: recentCompetitors.length,
       marketWatchCount: trulyNonCatalogMW.length,
       briefingType, periodStart, periodEnd,
+      learningBlock,
+      topPerformanceNotes,
     });
 
     let summaryText = "";
@@ -646,14 +706,24 @@ exports.handler = async (event) => {
 // ── SUMMARY PROMPT (plain text only — no JSON) ────────────────────────────────
 function buildSummaryPrompt(ctx) {
   const { totalClusters, newSignalCount, changedCount, topTopics,
-    competitorCount, marketWatchCount, briefingType, periodStart, periodEnd } = ctx;
-  return `Write 2 sentences summarizing this social listening briefing for Succulents Box (succulent plant subscriptions).
+    competitorCount, marketWatchCount, briefingType, periodStart, periodEnd,
+    learningBlock, topPerformanceNotes } = ctx;
+
+  const performanceSection = topPerformanceNotes?.length
+    ? `\nPrior content performance on top topics:\n${topPerformanceNotes.join("\n")}`
+    : "";
+
+  const learningSection = learningBlock
+    ? `\nReviewer lessons from past content (apply these when describing what's actionable):\n${learningBlock}`
+    : "";
+
+  return `Write 2-3 sentences summarizing this social listening briefing for Succulents Box (succulent plant subscriptions). Highlight what's most actionable based on the data and any lessons below.
 
 Data: ${totalClusters} active discovery clusters, ${newSignalCount} new signals (${periodStart?.slice(0,10)} to ${periodEnd?.slice(0,10)}), ${changedCount} clusters updated.
 Top topics: ${topTopics.join(", ") || "none yet"}.
-Competitor activity: ${competitorCount} items. Market watch: ${marketWatchCount} plants.
+Competitor activity: ${competitorCount} items. Market watch: ${marketWatchCount} plants.${performanceSection}${learningSection}
 
-Write only the 2-sentence summary. No intro, no lists, no JSON.`;
+Write only the 2-3 sentence summary. No intro, no lists, no JSON.`;
 }
 
 

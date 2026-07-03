@@ -123,7 +123,8 @@ exports.handler = async (event) => {
         .order("severity");
 
       const lessons = await fetchBriefLessons(supabase);
-      prompt = buildGenerateBriefPrompt(data, rules || [], lessons);
+      const learningMemory = await fetchLearningMemory(supabase, data.plant_or_product || data.topic || data.title);
+      prompt = buildGenerateBriefPrompt(data, rules || [], lessons, data.human_notes || null, learningMemory);
       const gen = await callClaude(prompt, 1024);
 
       const row = {
@@ -165,7 +166,7 @@ exports.handler = async (event) => {
         .order("severity");
 
       const lessons = await fetchBriefLessons(supabase);
-      prompt = buildBriefRevisionPrompt(orig, feedback, rules || [], lessons);
+      prompt = buildBriefRevisionPrompt(orig, feedback, rules || [], lessons, data.human_notes || null);
       const gen = await callClaude(prompt, 1024);
 
       const updates = {
@@ -285,7 +286,8 @@ exports.handler = async (event) => {
 
       const target = Math.min(600, Math.max(5, Number(data.target_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
-      prompt = buildScriptGenPrompt(data, rules || [], target, lessons);
+      const learningMemory = await fetchLearningMemory(supabase, data.featured_product || data.title);
+      prompt = buildScriptGenPrompt(data, rules || [], target, lessons, learningMemory);
       const gen = await callClaude(prompt, 2048);
 
       // Auto duration: ~150 words/min ≈ 2.5 words/sec of voiceover
@@ -337,7 +339,7 @@ exports.handler = async (event) => {
 
       const target = Math.min(600, Math.max(5, Number(orig.estimated_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
-      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons);
+      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null);
       const gen = await callClaude(prompt, 2048);
 
       const words   = (gen.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
@@ -1151,6 +1153,34 @@ Review this brief and return ONLY valid JSON:
 
 // Lessons learned from past brief-review gaps — injected into brief
 // generation/revision prompts so the same gaps stop recurring.
+// Fetch Active/Approved learning_memory rows, optionally filtered by topic hint.
+// Used by generate_brief and generate_script to inject reviewer lessons.
+async function fetchLearningMemory(supabase, topicHint) {
+  try {
+    let q = supabase
+      .from("learning_memory")
+      .select("applies_to, topic, what_happened, recommendation_next_time, confidence")
+      .in("status", ["Active", "Approved rule"])
+      .order("date_added", { ascending: false })
+      .limit(15);
+    const { data } = await q;
+    const rows = data || [];
+    if (!rows.length) return null;
+    // If a topic hint is provided, prioritise matching rows (put them first)
+    if (topicHint) {
+      const hint = (topicHint || "").toLowerCase();
+      rows.sort((a, b) => {
+        const aMatch = (a.topic || "").toLowerCase().includes(hint) || hint.includes((a.topic || "").toLowerCase()) ? -1 : 0;
+        const bMatch = (b.topic || "").toLowerCase().includes(hint) || hint.includes((b.topic || "").toLowerCase()) ? -1 : 0;
+        return aMatch - bMatch;
+      });
+    }
+    return rows.slice(0, 10).map(m =>
+      `[${m.applies_to || "general"}${m.topic ? ` · ${m.topic}` : ""}] ${m.what_happened} → ${m.recommendation_next_time}`
+    ).join("\n");
+  } catch (e) { return null; }
+}
+
 async function fetchBriefLessons(supabase) {
   try {
     const { data } = await supabase
@@ -1179,7 +1209,7 @@ PRE-FLIGHT CHECKLIST — the brief will be marked incomplete if ANY of these are
 // Source (`c`) is usually a content_review_candidates row (optionally with a
 // joined `cluster`), or an opportunities row — both fields sets are read
 // defensively since either can be passed in.
-function buildGenerateBriefPrompt(c, rules, lessons) {
+function buildGenerateBriefPrompt(c, rules, lessons, humanNotes, learningMemory) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1200,7 +1230,8 @@ APPROVED DIRECTION (reviewer's chosen angle — follow this if given): ${c.appro
 POSSIBLE DIRECTIONS: ${directions.length ? directions.join(", ") : "not specified"}
 SUGGESTED HOOK FROM RESEARCH: ${c.suggested_hook || "none — write your own"}
 SUGGESTED FORMAT: ${c.suggested_format || "not specified"}
-
+${humanNotes ? `\nHUMAN EDITOR NOTES (incorporate these into the brief):\n${humanNotes}` : ""}
+${learningMemory ? `\nREVIEWER LESSONS FROM PAST CONTENT — apply these when writing the brief:\n${learningMemory}` : ""}
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
 ${BRIEF_PREFLIGHT_CHECKLIST}
@@ -1225,7 +1256,7 @@ Return ONLY valid JSON:
 }
 
 // ── BRIEF REVISION PROMPT ──────────────────────────────────────────────────────
-function buildBriefRevisionPrompt(orig, feedback, rules, lessons) {
+function buildBriefRevisionPrompt(orig, feedback, rules, lessons, humanNotes) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1251,6 +1282,7 @@ ${gaps ? `Gaps to fix:\n${gaps}` : "No gaps listed."}
 ${angles ? `\nSuggested angles not yet covered:\n${angles}` : ""}
 ${feedback.suggested_hook ? `\nReviewer's suggested hook: "${feedback.suggested_hook}"` : ""}
 ${feedback.notes ? `\nReviewer notes: ${feedback.notes}` : ""}
+${humanNotes ? `\nHUMAN EDITOR NOTES (incorporate these into the revision):\n${humanNotes}` : ""}
 
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
@@ -1302,7 +1334,7 @@ PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing
 4. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
 5. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".`;
 
-function buildScriptGenPrompt(b, rules, targetSecs, lessons) {
+function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1322,6 +1354,7 @@ CTA: ${b.cta || "not specified"}
 
 TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
 
+${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
 ${SCRIPT_PREFLIGHT_CHECKLIST}
@@ -1350,7 +1383,7 @@ Return ONLY valid JSON:
 
 
 // ── SCRIPT REVISION PROMPT ────────────────────────────────────────────────────
-function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons) {
+function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, humanNotes) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1380,6 +1413,7 @@ ${violationsText ? `Brand issues to fix — ALL Required issues MUST be resolved
 ${hookIdeas ? `\nStronger hook ideas from the reviewer (use one or write something equally strong):\n${hookIdeas}` : ""}
 ${improvements ? `\nSuggested improvements:\n${improvements}` : ""}
 ${feedback.notes ? `\nReviewer notes: ${feedback.notes}` : ""}
+${humanNotes ? `\nHUMAN EDITOR NOTES (incorporate these into the revision):\n${humanNotes}` : ""}
 
 TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
 
