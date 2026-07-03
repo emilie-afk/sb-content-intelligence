@@ -1928,11 +1928,7 @@ async function generateScriptFromBrief(briefId) {
     const result = await resp.json();
     if (!result.success) { toast('Error: ' + (result.error || 'generation failed'), true); return; }
     const s = result.analysis;
-    toast(`✅ Script created: "${s.script_title}" — ${s.estimated_duration_seconds}s (${s.voiceover_words} words). Running brand check…`);
-    // Open the new script and auto-run the brand check so the verdict is
-    // visible immediately — no manual click needed.
-    await viewScript(s.id);
-    runAIAnalysis('script', window._viewedScript);
+    toast(`✅ Script created: "${s.script_title}" — ${s.estimated_duration_seconds}s (${s.voiceover_words} words). Find it in Scripts as Draft.`);
   } catch (e) {
     toast('Error: ' + e.message, true);
   }
@@ -2458,16 +2454,17 @@ async function viewBrief(id) {
   el.innerHTML = `
     <h3 style="margin:0 0 12px">${esc(b.title)}</h3>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;font-size:13px">
-      <div><b>Platform:</b> ${esc(b.platform||'—')}</div>
+      <div><b>Featured product:</b> ${esc(b.featured_product||'—')}</div>
       <div><b>Status:</b> ${esc(b.status||'—')}</div>
-      <div><b>Content pillar:</b> ${esc(b.content_pillar||'—')}</div>
-      <div><b>Shelf life:</b> ${esc(b.shelf_life||'—')}</div>
+      <div><b>Video format:</b> ${esc(b.video_format||'—')}</div>
+      <div><b>Deadline:</b> ${b.deadline ? new Date(b.deadline).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '—'}</div>
     </div>
-    ${b.topic ? `<div style="margin-bottom:10px"><b>Topic:</b> ${esc(b.topic)}</div>` : ''}
-    ${b.target_audience ? `<div style="margin-bottom:10px"><b>Target audience:</b> ${esc(b.target_audience)}</div>` : ''}
-    ${b.key_message ? `<div style="margin-bottom:10px"><b>Key message:</b> ${esc(b.key_message)}</div>` : ''}
+    ${b.audience_problem ? `<div style="margin-bottom:10px"><b>Audience problem:</b> ${esc(b.audience_problem)}</div>` : ''}
+    ${b.opening_hook ? `<div style="background:#f8f9fa;padding:10px 12px;border-radius:6px;margin-bottom:10px"><b>Opening hook:</b><br>${esc(b.opening_hook)}</div>` : ''}
+    ${b.visual_hook ? `<div style="margin-bottom:10px"><b>Visual hook:</b> ${esc(b.visual_hook)}</div>` : ''}
+    ${b.video_flow ? `<div style="margin-bottom:10px"><b>Video flow:</b><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:#f8f9fa;padding:10px 12px;border-radius:6px;margin-top:4px">${esc(b.video_flow)}</pre></div>` : ''}
+    ${b.caption ? `<div style="margin-bottom:10px"><b>Caption:</b> ${esc(b.caption)}</div>` : ''}
     ${b.cta ? `<div style="margin-bottom:10px"><b>CTA:</b> ${esc(b.cta)}</div>` : ''}
-    ${b.notes ? `<div style="margin-bottom:10px"><b>Notes:</b> ${esc(b.notes)}</div>` : ''}
     <div id="ai-analysis-result" style="margin-top:16px"></div>
     <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('brief', window._viewedBrief)">🤖 AI Review</button>
   `;
@@ -2509,6 +2506,7 @@ async function runAIAnalysis(type, data) {
         }).catch(() => { clusterBadge.textContent = '🔍 Cluster: could not auto-cluster'; });
       }
     } else if (type === 'brief') {
+      window._lastBriefAnalysis = a; // used by generateRevisedBrief()
       resultEl.innerHTML = renderBriefAnalysis(a);
     } else if (type === 'script') {
       window._lastScriptAnalysis = a; // used by generateRevisedScript()
@@ -2547,7 +2545,30 @@ function renderBriefAnalysis(a) {
     ${a.suggested_hook ? `<div style="font-size:13px;margin-bottom:8px"><b>Hook idea:</b> "${esc(a.suggested_hook)}"</div>` : ''}
     ${a.revenue_priority_match ? `<div style="font-size:13px;margin-bottom:8px"><b>💰 Revenue priority:</b> <span style="color:${a.revenue_priority_match==='Yes'?'#27ae60':a.revenue_priority_match==='Needs check'?'#e67e22':'#999'}">${esc(a.revenue_priority_match)}</span>${a.revenue_priority_note ? ` — ${esc(a.revenue_priority_note)}` : ''}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
+    ${a.overall !== 'Strong' ? `<button id="revise-brief-btn" class="btn btn-primary" style="margin-top:12px" onclick="generateRevisedBrief()">✨ Regenerate brief from this feedback</button>` : ''}
   </div>`;
+}
+
+async function generateRevisedBrief() {
+  const b = window._viewedBrief;
+  const a = window._lastBriefAnalysis;
+  if (!b || !a) { toast('Run AI Review first', true); return; }
+  const btn = document.getElementById('revise-brief-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Rewriting brief…'; }
+  try {
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ type: 'revise_brief', data: { brief: b, feedback: a } }),
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error || 'Revision failed');
+    toast('✨ Brief updated with the reviewer\'s feedback');
+    await viewBrief(b.id); // reload the same brief with the new content
+  } catch (err) {
+    toast('Error: ' + err.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Regenerate brief from this feedback'; }
+  }
 }
 
 function renderScriptAnalysis(a) {
@@ -2588,10 +2609,9 @@ async function generateRevisedScript() {
     });
     const result = await resp.json();
     if (!result.success) throw new Error(result.error || 'Revision failed');
-    toast(`✨ ${result.analysis.script_version} created as a new Draft — running brand check…`);
+    toast(`✨ ${result.analysis.script_version} created as a new Draft`);
     loadScripts();
-    await viewScript(result.analysis.id); // open the new version right away
-    runAIAnalysis('script', window._viewedScript); // auto-verify the revision
+    viewScript(result.analysis.id); // open the new version right away
   } catch (err) {
     toast('Error: ' + err.message, true);
     if (btn) { btn.disabled = false; btn.textContent = '✨ Generate revised script from this feedback'; }
@@ -3399,7 +3419,7 @@ async function loadContentReview() {
   const risk   = document.getElementById('cr-risk-filter')?.value;
 
   let q = sb.from('content_review_candidates')
-    .select('*, cluster:discovery_clusters(id,title,signal_count,novelty_status,platforms,audience_wording)')
+    .select('*, cluster:discovery_clusters(id,title,signal_count,novelty_status,platforms,audience_wording,plant_or_product)')
     .not('status', 'in', '("Dismissed","Already covered")')
     .order('created_at', { ascending: false })
     .limit(80);
@@ -3508,9 +3528,34 @@ async function loadContentReview() {
           <button class="btn btn-secondary" style="font-size:12px" onclick="crDecision('${c.id}','Approved for brief',document.getElementById('cr-direction-${c.id}').value)">Save</button>
         </div>
         ${c.reviewer_note ? `<div style="font-size:12px;color:#9ca3af;margin-top:6px">Note: ${esc(c.reviewer_note)}</div>` : ''}
+        ${c.status === 'Approved for brief' ? `<button class="btn btn-primary" style="font-size:12px;margin-top:8px" onclick="generateBriefFromCandidate('${c.id}', this)">🪄 Generate Brief</button>` : ''}
       </div>
     </div>`;
   }).join('');
+}
+
+async function generateBriefFromCandidate(candidateId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing brief…'; }
+  try {
+    const { data: candidate, error } = await sb.from('content_review_candidates')
+      .select('*, cluster:discovery_clusters(id,title,plant_or_product,audience_wording)')
+      .eq('id', candidateId).single();
+    if (error || !candidate) throw new Error(error?.message || 'Candidate not found');
+
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ type: 'generate_brief', data: candidate }),
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error || 'Brief generation failed');
+
+    toast(`✅ Brief created: "${result.analysis.title}". Find it in Briefs as Draft.`);
+    loadContentReview();
+  } catch (err) {
+    toast('Error: ' + err.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '🪄 Generate Brief'; }
+  }
 }
 
 async function crDecision(id, status, direction) {
