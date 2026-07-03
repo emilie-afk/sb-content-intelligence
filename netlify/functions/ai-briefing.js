@@ -108,13 +108,17 @@ exports.handler = async (event) => {
         .select("id, briefing_type, summary, prominent_topics, generated_at")
         .eq("briefing_type", briefingType).order("generated_at", { ascending: false }).limit(1),
       supabase.from("competitor_activity")
-        .select("id, plant_name, activity_type, ai_summary, source_account_name, observed_at, status")
+        .select("id, plant_name, activity_type, ai_summary, source_account_name, source_account_handle, observed_at, status")
         .gte("observed_at", periodStart)
         .not("status", "in", '("Dismissed","Reviewed")')
         .order("observed_at", { ascending: false }).limit(10),
       supabase.from("market_watch_plants")
         .select("id, plant_name, signal_count, question_count, purchase_intent_count, distinct_source_count, platforms, last_seen_at, reviewer_status")
-        .gte("last_seen_at", periodStart).order("signal_count", { ascending: false }).limit(10),
+        .gte("last_seen_at", periodStart)
+        // Skip plants the reviewer already handled — Done on the Today board sets
+        // reviewer_status='Reviewed' so the alert doesn't reappear every day
+        .or('reviewer_status.is.null,reviewer_status.not.in.("Reviewed","Dismissed")')
+        .order("signal_count", { ascending: false }).limit(10),
       supabase.from("published_videos")
         .select("video_title, topic, plant_or_product, platform, publish_date, performance_summary, audience_followup_questions")
         .order("publish_date", { ascending: false }).limit(15),
@@ -129,7 +133,21 @@ exports.handler = async (event) => {
     const newSignals        = recentSignals     || [];
     const clustersChanged   = changedClusters   || [];
     const previousBriefing  = prevBriefings?.[0] || null;
-    const recentCompetitors = competitorActivity || [];
+    // Filter out reviewer-blocked competitor accounts (marked "Noise" on the Today board)
+    let blockedCompetitorAccounts = [];
+    try {
+      const { data: blockSetting } = await supabase
+        .from("settings").select("value").eq("key", "competitor_blocked_accounts").single();
+      blockedCompetitorAccounts = (blockSetting?.value?.accounts || []).map(a => String(a).toLowerCase());
+    } catch (e) { /* no blocklist yet */ }
+    const recentCompetitors = (competitorActivity || []).filter(ca => {
+      const name   = (ca.source_account_name   || "").toLowerCase();
+      const handle = (ca.source_account_handle || "").toLowerCase().replace(/^@/, "");
+      return !blockedCompetitorAccounts.some(b => {
+        const bh = b.replace(/^@/, "");
+        return (name && name === b) || (handle && handle === bh);
+      });
+    });
     const marketWatchPlants = marketWatch        || [];
     const published         = ownedContent       || [];
     const catalogPlantNames = (watchlist || []).map(p => p.plant_name.toLowerCase());
@@ -437,6 +455,19 @@ exports.handler = async (event) => {
       (existingBoardItems || []).map(i => `${i.section}|${i.cluster_id ?? "null"}`)
     );
 
+    // Cross-day suppression: cluster+section combos the reviewer already resolved
+    // on ANY previous day must not be re-inserted on later boards. Without this,
+    // "Done" only hid the card for one day and the same alert reappeared tomorrow.
+    const { data: priorResolved } = await supabase
+      .from("today_board_items")
+      .select("cluster_id, section")
+      .in("status", ["Resolved", "Cleanup confirmed", "Already covered", "Dismissed", "Move to Content Review"])
+      .not("cluster_id", "is", null)
+      .limit(1000);
+    for (const i of (priorResolved || [])) {
+      existingBoardKeys.add(`${i.section}|${i.cluster_id}`);
+    }
+
     const todayRows = [];
     let rank = 0;
 
@@ -520,7 +551,8 @@ exports.handler = async (event) => {
         title: `${mw.plant_name} — market activity`,
         summary: `${mw.signal_count} signals, ${mw.question_count} questions`,
         why_today: "Active in market watch this period",
-        evidence_summary: `${mw.distinct_source_count} sources · ${(mw.platforms || []).join(", ")}`,
+        // Prefix mw.id so the Done button can mark the plant Reviewed without a lookup
+        evidence_summary: `[mw:${mw.id}] ${mw.distinct_source_count} sources · ${(mw.platforms || []).join(", ")}`,
         ai_confidence: "Medium", recommended_action: "Review market watch",
         status: "New today", board_date: boardDate,
         created_at: now.toISOString(), updated_at: now.toISOString(),

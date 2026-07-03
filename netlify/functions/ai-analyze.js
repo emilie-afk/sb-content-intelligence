@@ -264,6 +264,23 @@ exports.handler = async (event) => {
         .select("video_title, topic, plant_or_product, hook_used, angle_used, platform, publish_date, performance_summary, audience_followup_questions")
         .order("publish_date", { ascending: false }).limit(30);
 
+      // Blocked competitor accounts (reviewer marked "Noise" on the Today board).
+      // Stored in settings so no schema migration is needed. Names/handles lowercase.
+      let blockedAccounts = [];
+      try {
+        const { data: blockSetting } = await supabase
+          .from("settings").select("value").eq("key", "competitor_blocked_accounts").single();
+        blockedAccounts = (blockSetting?.value?.accounts || []).map(a => String(a).toLowerCase());
+      } catch (e) { /* no blocklist yet — fine */ }
+      const isBlockedAccount = (attr) => {
+        const name   = (attr?.source_account_name   || "").toLowerCase();
+        const handle = (attr?.source_account_handle || "").toLowerCase().replace(/^@/, "");
+        return blockedAccounts.some(b => {
+          const bh = b.replace(/^@/, "");
+          return (name && name === b) || (handle && handle === bh);
+        });
+      };
+
       // Step 3: Process each extracted idea independently
       const clusterResults = [];
 
@@ -272,6 +289,17 @@ exports.handler = async (event) => {
 
         // ── COMPETITOR ACTIVITY routing ────────────────────────────────────────
         if (route === "Competitor Activity" || idea.processing_path === "Competitor routed") {
+          // Reviewer-blocked account → drop silently, never alert again
+          if (isBlockedAccount(attr)) {
+            clusterResults.push({
+              processing_path: "Competitor blocked",
+              cluster_id: null, cluster_title: null,
+              match_type: "competitor_activity",
+              qualifies: false,
+              discovery_reason: `Account "${attr?.source_account_name || attr?.source_account_handle}" is on the competitor blocklist`,
+            });
+            continue;
+          }
           const caPayload = {
             signal_id:              signalId,
             source_url:             data.source_url || null,
@@ -1140,11 +1168,17 @@ D) Section routing (assign based on ownership + purpose + catalog status)
   GEOGRAPHIC FILTER — apply when there is clear non-US evidence:
   Succulents Box ships within the US only. Apply this filter if the caption, bio, or content contains
   one or more of these signals:
-    - Non-US currency (£, €, AUS$, NZ$, CAD$, R for ZAR, etc.)
-    - Explicit non-US shipping phrase ("ships to Chile", "envíos a todo Chile", "deliver to Australia", "EU shipping", "ships to Canada")
-    - A city or country clearly outside the US named in the caption or bio (e.g. "Cairns", "Sydney", "Melbourne", "London", "Toronto", "Cape Town", "Santiago", "Chile", "Australia", "UK", "Serbia", "Turkey", "Korea", "Brazil")
-    - Caption or audience wording written primarily in a non-English language (Spanish, Serbian, Turkish, Korean, French, Portuguese, etc.)
-    - Hashtags indicating non-US geography (#australia, #serbia, #türkiye, #chile, #uk, #southafrica, etc.)
+    - Non-US currency (£, €, ₹, ₱, ¥, ₩, AUS$, NZ$, CAD$, R for ZAR, "Rs.", "INR", etc.)
+    - Explicit non-US shipping phrase ("ships to Chile", "envíos a todo Chile", "deliver to Australia", "EU shipping", "ships to Canada", "all India delivery", "pan India shipping", "COD available")
+    - A city or country clearly outside the US named in the caption or bio (e.g. "Cairns", "Sydney", "Melbourne", "London", "Toronto", "Cape Town", "Santiago", "Chile", "Australia", "UK", "Serbia", "Turkey", "Korea", "Brazil", "India", "Delhi", "Mumbai", "Bangalore", "Pune", "Manila", "Jakarta")
+    - Caption or audience wording written primarily in a non-English language (Spanish, Serbian, Turkish, Korean, French, Portuguese, Hindi, Tagalog, etc.)
+    - Hashtags indicating non-US geography (#australia, #serbia, #türkiye, #chile, #uk, #southafrica, #india, #plantsofindia, #nurserylife (when paired with other India cues), etc.)
+    - Phone numbers in non-US formats (+91, +63, +44, WhatsApp ordering with country codes)
+
+  Extra caution for Competitor Activity specifically: a seller is only a real competitor if a US
+  customer could plausibly buy from them. If the seller's location or shipping region cannot be
+  determined AND there are weak non-US cues (spelling, phrasing, currency ambiguity), prefer
+  "Mention Tracking" over "Competitor Activity".
 
   If ANY of the above are present → Set section_route to "Mention Tracking", processing_path to "Mention only".
 
