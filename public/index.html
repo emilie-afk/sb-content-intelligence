@@ -887,6 +887,7 @@ tbody tr:hover { background: #fafffe; }
     <h2>📤 Mark as Published</h2>
     <p style="color:#666;font-size:13px;margin-bottom:16px">This will add a row to the Video Tracker sheet so you can log performance metrics later.</p>
     <input type="hidden" id="pub-opportunity-id">
+    <input type="hidden" id="pub-cluster-id">
     <div class="form-group"><label>Post URL <span style="color:red">*</span></label><input type="url" id="pub-post-url" placeholder="https://www.instagram.com/reel/..."></div>
     <div class="form-group"><label>Platform</label>
       <select id="pub-platform">
@@ -2018,8 +2019,9 @@ async function decideOpportunity(id, decision) {
   loadCommandCenter();
 }
 
-function openPublishedModal(opportunityId, topic, platform, format) {
+function openPublishedModal(opportunityId, topic, platform, format, clusterId) {
   document.getElementById('pub-opportunity-id').value = opportunityId;
+  document.getElementById('pub-cluster-id').value     = clusterId || '';
   document.getElementById('pub-topic-display').value  = topic;
   document.getElementById('pub-post-url').value       = '';
   document.getElementById('pub-published-on').value   = new Date().toISOString().slice(0,10);
@@ -2048,6 +2050,7 @@ async function submitPublished() {
       headers: await authHeaders(),
       body: JSON.stringify({
         opportunityId: document.getElementById('pub-opportunity-id').value,
+        clusterId:     document.getElementById('pub-cluster-id').value || null,
         postUrl,
         platform:    document.getElementById('pub-platform').value,
         format:      document.getElementById('pub-format').value,
@@ -2938,7 +2941,7 @@ async function loadDiscovery() {
       novelty_status,contradiction_status,ai_confidence,status,maintenance_status,
       review_required,last_ai_updated_at,ai_update_summary,revenue_priority_match,
       audience_recurring_boolean,repetition_source_type,covered_before_boolean,ai_reason`)
-    .not('status', 'in', '("Closed","Blocked irrelevant")')
+    .not('status', 'in', '("Closed","Blocked irrelevant","Brief created","Published")')
     .order('audience_signal_count', { ascending: false, nullsFirst: false })
     .limit(150);
   if (plant)    q = q.ilike('plant_or_product', `%${plant}%`);
@@ -2998,8 +3001,12 @@ function discClusterCard(c) {
   const asc      = c.audience_signal_count ?? c.signal_count ?? 0;
   const condMatch = (c.ai_reason||'').match(/Conditions:\s*([^|]+)/);
   const conditions = condMatch ? condMatch[1].trim() : null;
+  const canBrief = ['Pattern detected','Content review ready'].includes(c.status);
   const reviewReadyBtn = c.status === 'Pattern detected'
     ? `<button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="moveClusterToReview('${c.id}',event)">→ Review</button>`
+    : '';
+  const briefBtn = canBrief
+    ? `<button class="btn btn-primary" style="font-size:11px;padding:3px 8px" onclick="generateBriefFromCluster('${c.id}',event)">🪄 Brief</button>`
     : '';
   return `
   <div class="stat-card" style="cursor:pointer;border-left:3px solid ${statusColor[c.status]||'#444'}" onclick="openDiscoveryPanel('${c.id}')">
@@ -3026,9 +3033,38 @@ function discClusterCard(c) {
     ${wording.length?`<div style="font-size:11px;color:#9ca3af;font-style:italic;margin-bottom:6px">"${wording.map(esc).join('" · "')}"</div>`:''}
     <div style="display:flex;justify-content:space-between;align-items:center">
       ${nb?`<span style="font-size:11px;font-weight:600;color:${nb.bg}">${nb.text}</span>`:'<span></span>'}
-      ${reviewReadyBtn}
+      <div style="display:flex;gap:6px">${reviewReadyBtn}${briefBtn}</div>
     </div>
   </div>`;
+}
+
+async function generateBriefFromCluster(clusterId, event) {
+  if (event) event.stopPropagation();
+  const btn = event?.target;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing…'; }
+  try {
+    const { data: cluster, error } = await sb.from('discovery_clusters')
+      .select('*, plant_or_product, audience_wording, title, summary, primary_question, platforms')
+      .eq('id', clusterId).single();
+    if (error || !cluster) throw new Error(error?.message || 'Cluster not found');
+
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ type: 'generate_brief', data: { ...cluster, cluster_id: cluster.id } }),
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error || 'Brief generation failed');
+
+    // Mark cluster as Brief created so it drops off Discovery/Today board
+    await sb.from('discovery_clusters').update({ status: 'Brief created' }).eq('id', clusterId);
+
+    toast(`✅ Brief created: "${result.analysis?.title || 'New brief'}". Find it in Briefs as Draft.`);
+    if (btn) { btn.disabled = false; btn.textContent = '🪄 Brief'; }
+  } catch (err) {
+    toast('Error: ' + err.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '🪄 Brief'; }
+  }
 }
 
 // ── SECTIONS VIEW ─────────────────────────────────────────────────────────────
@@ -3578,7 +3614,7 @@ async function loadContentReview() {
     <div class="stat-card" style="border-left:3px solid ${statusColor[c.status]||'#444'}">
       <!-- Header -->
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px">
-        <h3 style="margin:0;font-size:15px;line-height:1.3">${esc(c.title)}</h3>
+        <h3 style="margin:0;font-size:15px;line-height:1.3;cursor:pointer;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.2)" onclick="openDiscoveryPanel('${c.cluster_id}')">${esc(c.title)}</h3>
         <div style="display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
           <span style="font-size:11px;font-weight:600;color:${statusColor[c.status]||'#888'}">${esc(c.status)}</span>
           ${c.repetition_risk ? `<span style="font-size:11px;font-weight:600;color:${riskColor[c.repetition_risk]||'#888'}">Risk: ${esc(c.repetition_risk)}</span>` : ''}
@@ -3624,19 +3660,15 @@ async function loadContentReview() {
       <!-- Reviewer decision -->
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
         <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">Reviewer decision</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-          <button class="btn btn-primary"    style="font-size:12px" onclick="crDecision('${c.id}','Approved for brief',null)">✅ Approve direction</button>
+        <input id="cr-direction-${c.id}" type="text" placeholder="Direction note (optional)…" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px;margin-bottom:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary"    style="font-size:12px" onclick="crApproveAndGenerate('${c.id}')">✅ Approve → Generate Brief</button>
           <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Needs research',null)">🔬 Needs research</button>
           <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Hold for repetition',null)">⏸ Hold</button>
           <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Already covered',null)">✓ Already covered</button>
           <button class="btn btn-secondary"  style="font-size:12px" onclick="crDecision('${c.id}','Dismissed',null)">✕ Dismiss</button>
         </div>
-        <div style="display:flex;gap:8px">
-          <input id="cr-direction-${c.id}" type="text" placeholder="Approved direction or note…" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px">
-          <button class="btn btn-secondary" style="font-size:12px" onclick="crDecision('${c.id}','Approved for brief',document.getElementById('cr-direction-${c.id}').value)">Save</button>
-        </div>
         ${c.reviewer_note ? `<div style="font-size:12px;color:#9ca3af;margin-top:6px">Note: ${esc(c.reviewer_note)}</div>` : ''}
-        ${c.status === 'Approved for brief' ? `<button class="btn btn-primary" style="font-size:12px;margin-top:8px" onclick="generateBriefFromCandidate('${c.id}', this)">🪄 Generate Brief</button>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -3658,6 +3690,11 @@ async function generateBriefFromCandidate(candidateId, btn) {
     const result = await resp.json();
     if (!result.success) throw new Error(result.error || 'Brief generation failed');
 
+    // Close the source cluster so it drops off Discovery/Today board
+    if (candidate.cluster_id) {
+      await sb.from('discovery_clusters').update({ status: 'Brief created' }).eq('id', candidate.cluster_id);
+    }
+
     toast(`✅ Brief created: "${result.analysis.title}". Find it in Briefs as Draft.`);
     loadContentReview();
   } catch (err) {
@@ -3666,19 +3703,21 @@ async function generateBriefFromCandidate(candidateId, btn) {
   }
 }
 
+async function crApproveAndGenerate(id) {
+  const directionNote = document.getElementById(`cr-direction-${id}`)?.value?.trim() || null;
+  const updates = { status: 'Approved for brief', reviewed_at: new Date().toISOString() };
+  if (directionNote) updates.approved_direction = directionNote;
+  await sb.from('content_review_candidates').update(updates).eq('id', id);
+  toast('✅ Approved — generating brief…');
+  loadContentReview();
+  await generateBriefFromCandidate(id, null);
+}
+
 async function crDecision(id, status, direction) {
   const updates = { status, reviewed_at: new Date().toISOString() };
   if (direction) updates.approved_direction = direction;
-  if (document.getElementById(`cr-direction-${id}`)?.value && !direction) {
-    updates.reviewer_note = document.getElementById(`cr-direction-${id}`).value;
-  }
   await sb.from('content_review_candidates').update(updates).eq('id', id);
-
-  if (status === 'Approved for brief') {
-    toast('✅ Approved — run second content check before creating brief');
-  } else {
-    toast(`Status updated: ${status}`);
-  }
+  toast(`Status updated: ${status}`);
   loadContentReview();
 }
 
