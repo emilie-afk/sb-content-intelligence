@@ -83,6 +83,112 @@ exports.handler = async (event) => {
       prompt = buildBriefPrompt(data, watchlistText);
       result = await callClaude(prompt);
 
+      // FEEDBACK LOOP: persist review gaps as lessons so brief generation
+      // stops repeating the same mistakes. Mirrors the script_gen_lessons
+      // mechanism. Stored in settings, deduped by gap text, capped at 20.
+      try {
+        const gaps = (result.gaps || []).filter(Boolean);
+        if (gaps.length) {
+          const { data: lessonSetting } = await supabase
+            .from("settings").select("value").eq("key", "brief_gen_lessons").maybeSingle();
+          const lessons = lessonSetting?.value?.lessons || [];
+          const byIssue = new Map(lessons.map(l => [l.issue.toLowerCase().trim(), l]));
+          for (const g of gaps) {
+            const key = g.toLowerCase().trim();
+            const existing = byIssue.get(key);
+            if (existing) {
+              existing.count = (existing.count || 1) + 1;
+              existing.last_seen = new Date().toISOString();
+            } else {
+              byIssue.set(key, { issue: g, count: 1, last_seen: new Date().toISOString() });
+            }
+          }
+          const merged = [...byIssue.values()].sort((a, b) => (b.count || 0) - (a.count || 0)).slice(0, 20);
+          await supabase.from("settings").upsert(
+            { key: "brief_gen_lessons", value: { lessons: merged } },
+            { onConflict: "key" }
+          );
+        }
+      } catch (e) { console.warn("Could not save brief lessons:", e.message); }
+
+    } else if (type === "generate_brief") {
+      // ── GENERATE A FIRST-DRAFT BRIEF FROM AN APPROVED CANDIDATE ─────────────
+      // data = a content_review_candidates row (optionally with joined `cluster`),
+      // or an opportunities row. Both dead-end today at a status flag with no
+      // brief ever created — this fills that gap.
+      const { data: rules } = await supabase
+        .from("brand_content_rules")
+        .select("category, rule_name, rule_text, severity")
+        .eq("active", true)
+        .order("severity");
+
+      const lessons = await fetchBriefLessons(supabase);
+      prompt = buildGenerateBriefPrompt(data, rules || [], lessons);
+      const gen = await callClaude(prompt, 1024);
+
+      const row = {
+        opportunity_id:   data.opportunity_id || null, // only set when sourced from an opportunity
+        title:            gen.title || data.title || data.topic || "Untitled brief",
+        featured_product: gen.featured_product || data.plant_or_product || null,
+        audience_problem: gen.audience_problem || null,
+        opening_hook:     gen.opening_hook || null,
+        visual_hook:      gen.visual_hook || null,
+        video_format:     gen.video_format || "Talking head",
+        video_flow:       gen.video_flow || null,
+        caption:          gen.caption || null,
+        cta:              gen.cta || null,
+        status:           "Draft",
+      };
+
+      const { data: inserted, error: insErr } = await supabase
+        .from("briefs")
+        .insert(row)
+        .select("id")
+        .single();
+      if (insErr) throw new Error("Brief insert failed: " + insErr.message);
+
+      result = { ...row, id: inserted.id };
+
+    } else if (type === "revise_brief") {
+      // ── REWRITE A BRIEF IN PLACE FROM AI REVIEW FEEDBACK ────────────────────
+      // data = { brief: <original briefs row>, feedback: <brief review analysis> }
+      const orig     = data.brief    || {};
+      const feedback = data.feedback || {};
+      if (!orig.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "original brief id required for revision" }) };
+      }
+
+      const { data: rules } = await supabase
+        .from("brand_content_rules")
+        .select("category, rule_name, rule_text, severity")
+        .eq("active", true)
+        .order("severity");
+
+      const lessons = await fetchBriefLessons(supabase);
+      prompt = buildBriefRevisionPrompt(orig, feedback, rules || [], lessons);
+      const gen = await callClaude(prompt, 1024);
+
+      const updates = {
+        title:            gen.title || orig.title,
+        featured_product: gen.featured_product || orig.featured_product || null,
+        audience_problem: gen.audience_problem || null,
+        opening_hook:     gen.opening_hook || null,
+        visual_hook:      gen.visual_hook || null,
+        video_format:     gen.video_format || orig.video_format || null,
+        video_flow:       gen.video_flow || null,
+        caption:          gen.caption || null,
+        cta:              gen.cta || null,
+        updated_at:       new Date().toISOString(),
+      };
+
+      const { error: updErr } = await supabase
+        .from("briefs")
+        .update(updates)
+        .eq("id", orig.id);
+      if (updErr) throw new Error("Brief revision update failed: " + updErr.message);
+
+      result = { ...orig, ...updates };
+
     } else if (type === "opportunity") {
       // Fetch content history from the 2026 Google Sheet (all monthly tabs)
       let sheetEntries = [];
@@ -1008,16 +1114,22 @@ If no similar entry exists, set repetition_risk to Low and similar fields to nul
 
 
 // ── BRIEF PROMPT ──────────────────────────────────────────────────────────────
+// NOTE: these are the REAL columns on the `briefs` table (see saveBrief() in
+// index.html and schema.sql). This prompt previously read topic/platform/
+// target_audience/key_message/notes, none of which exist on the table, so
+// AI Review was silently reviewing blank fields regardless of brief content.
 function buildBriefPrompt(b, watchlistText) {
   return `You are reviewing a video brief for Succulents Box, a succulent plant subscription company.
 
 BRIEF TITLE: ${b.title || ""}
-TOPIC: ${b.topic || ""}
-PLATFORM: ${b.platform || ""}
-TARGET AUDIENCE: ${b.target_audience || "not specified"}
-KEY MESSAGE: ${b.key_message || "not specified"}
+FEATURED PRODUCT: ${b.featured_product || "not specified"}
+AUDIENCE PROBLEM: ${b.audience_problem || "not specified"}
+OPENING HOOK: ${b.opening_hook || "not specified"}
+VISUAL HOOK: ${b.visual_hook || "not specified"}
+VIDEO FORMAT: ${b.video_format || "not specified"}
+VIDEO FLOW: ${b.video_flow || "not specified"}
+CAPTION DRAFT: ${b.caption || "not specified"}
 CALL TO ACTION: ${b.cta || "not specified"}
-NOTES: ${b.notes || "none"}
 
 HIGH-REVENUE PLANT WATCHLIST (genus — revenue tier — stock):
 ${watchlistText}
@@ -1034,6 +1146,129 @@ Review this brief and return ONLY valid JSON:
   "revenue_priority_match": "Yes | No | Needs check",
   "revenue_priority_note": "note if plant is high-revenue and whether stock is confirmed",
   "notes": "any other recommendations in 1-2 sentences"
+}`;
+}
+
+// Lessons learned from past brief-review gaps — injected into brief
+// generation/revision prompts so the same gaps stop recurring.
+async function fetchBriefLessons(supabase) {
+  try {
+    const { data } = await supabase
+      .from("settings").select("value").eq("key", "brief_gen_lessons").maybeSingle();
+    return data?.value?.lessons || [];
+  } catch (e) { return []; }
+}
+
+function briefLessonsBlock(lessons) {
+  if (!lessons?.length) return "";
+  const lines = lessons.map(l =>
+    `- ${l.issue}${l.count > 1 ? ` (flagged ${l.count}× before)` : ""}`
+  ).join("\n");
+  return `\nPAST REVIEWER FEEDBACK — previous briefs were marked "Needs work"/"Incomplete" for these exact gaps. Do NOT repeat them:\n${lines}\n`;
+}
+
+const BRIEF_PREFLIGHT_CHECKLIST = `
+PRE-FLIGHT CHECKLIST — the brief will be marked incomplete if ANY of these are missing:
+1. Audience problem: must name the specific problem/question the audience has, in their own words — not just a topic label.
+2. Opening hook: must create curiosity or name the problem in one line — never a generic restatement of the title.
+3. Visual hook: must describe a specific, filmable first shot (not "show the plant").
+4. Video flow: must lay out concrete steps/beats the video follows, not a vague summary.
+5. CTA: every brief must end with a clear call to action.`;
+
+// ── BRIEF GENERATION PROMPT ────────────────────────────────────────────────────
+// Source (`c`) is usually a content_review_candidates row (optionally with a
+// joined `cluster`), or an opportunities row — both fields sets are read
+// defensively since either can be passed in.
+function buildGenerateBriefPrompt(c, rules, lessons) {
+  const rulesText = rules.map(r =>
+    `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
+  ).join("\n");
+  const cluster = c.cluster || {};
+  const wording = (c.representative_wording || cluster.audience_wording || []).slice(0, 5);
+  const directions = (c.possible_directions || []).slice(0, 5);
+
+  return `You are writing a first-draft video brief for Succulents Box, a succulent plant subscription company, based on an approved audience-research finding.
+
+SOURCE TITLE: ${c.title || c.topic || ""}
+PLANT / PRODUCT: ${c.plant_or_product || cluster.plant_or_product || "not specified"}
+WHAT PEOPLE ARE SAYING: ${c.what_people_are_saying || c.evidence_summary || c.why_now || "not specified"}
+AUDIENCE WORDING (exact phrases): ${wording.length ? wording.map(w => `"${w}"`).join(", ") : "none captured"}
+WHAT APPEARS NEW: ${c.what_appears_new || "not specified"}
+CLAIMS NEEDING VERIFICATION: ${c.claims_needing_verification || "none"}
+CONTRADICTORY ADVICE FOUND: ${c.contradictory_advice || "none"}
+APPROVED DIRECTION (reviewer's chosen angle — follow this if given): ${c.approved_direction || "not specified — pick the strongest of the possible directions below"}
+POSSIBLE DIRECTIONS: ${directions.length ? directions.join(", ") : "not specified"}
+SUGGESTED HOOK FROM RESEARCH: ${c.suggested_hook || "none — write your own"}
+SUGGESTED FORMAT: ${c.suggested_format || "not specified"}
+
+BRAND RULES (follow all Required rules, never do Forbidden ones):
+${rulesText || "No rules loaded"}
+${BRIEF_PREFLIGHT_CHECKLIST}
+${briefLessonsBlock(lessons)}
+Writing guidance:
+- The audience problem must be written in plain audience language, grounded in the wording above — not a generic restatement of the title.
+- The opening hook must create curiosity or name the problem in the first line.
+- Video flow should read as a short numbered/beat outline a filmmaker could follow.
+
+Return ONLY valid JSON:
+{
+  "title": "short internal title",
+  "featured_product": "plant or product name, or null",
+  "audience_problem": "the specific problem/question in plain audience language",
+  "opening_hook": "first line of the video, under 12 words",
+  "visual_hook": "specific first shot — what's on screen in the first 2 seconds",
+  "video_format": "Talking head | Tutorial | Before & after | POV | Timelapse | Voiceover",
+  "video_flow": "Step 1: … Step 2: … one per line",
+  "caption": "post caption, 1-2 sentences",
+  "cta": "closing call to action"
+}`;
+}
+
+// ── BRIEF REVISION PROMPT ──────────────────────────────────────────────────────
+function buildBriefRevisionPrompt(orig, feedback, rules, lessons) {
+  const rulesText = rules.map(r =>
+    `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
+  ).join("\n");
+  const gaps = (feedback.gaps || []).map(g => `- ${g}`).join("\n");
+  const angles = (feedback.suggested_angles || []).map(a => `- ${a}`).join("\n");
+
+  return `You are revising a video brief for Succulents Box, a succulent plant subscription company.
+A reviewer flagged gaps in the current brief. Write an improved version that fixes EVERY gap while keeping what already works.
+
+CURRENT BRIEF:
+Title: ${orig.title || ""}
+Featured product: ${orig.featured_product || "not specified"}
+Audience problem: ${orig.audience_problem || "not specified"}
+Opening hook: ${orig.opening_hook || "not specified"}
+Visual hook: ${orig.visual_hook || "not specified"}
+Video format: ${orig.video_format || "not specified"}
+Video flow: ${orig.video_flow || "not specified"}
+Caption: ${orig.caption || "not specified"}
+CTA: ${orig.cta || "not specified"}
+
+REVIEWER FEEDBACK (verdict: ${feedback.overall || "Needs work"}):
+${gaps ? `Gaps to fix:\n${gaps}` : "No gaps listed."}
+${angles ? `\nSuggested angles not yet covered:\n${angles}` : ""}
+${feedback.suggested_hook ? `\nReviewer's suggested hook: "${feedback.suggested_hook}"` : ""}
+${feedback.notes ? `\nReviewer notes: ${feedback.notes}` : ""}
+
+BRAND RULES (follow all Required rules, never do Forbidden ones):
+${rulesText || "No rules loaded"}
+${BRIEF_PREFLIGHT_CHECKLIST}
+${briefLessonsBlock(lessons)}
+Keep the parts of the original that were NOT flagged — this is a revision, not a rewrite from scratch.
+
+Return ONLY valid JSON:
+{
+  "title": "short internal title (keep the original unless it was flagged)",
+  "featured_product": "plant or product name, or null",
+  "audience_problem": "the specific problem/question in plain audience language",
+  "opening_hook": "first line of the video, under 12 words",
+  "visual_hook": "specific first shot — what's on screen in the first 2 seconds",
+  "video_format": "Talking head | Tutorial | Before & after | POV | Timelapse | Voiceover",
+  "video_flow": "Step 1: … Step 2: … one per line",
+  "caption": "post caption, 1-2 sentences",
+  "cta": "closing call to action"
 }`;
 }
 
