@@ -1,0 +1,34 @@
+name: Daily Video Metrics Sync
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 9:00 AM Vietnam (UTC+7) — after sheets are updated
+  workflow_dispatch:       # allow manual trigger from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync video performance from Google Sheet to Supabase
+        run: |
+          RESPONSE=$(curl -s -w '\n%{http_code}' -X POST \
+            https://sb-content-intelligence.netlify.app/.netlify/functions/sync-video-metrics \
+            -H "Content-Type: application/json" \
+            -H "x-internal-secret: ${{ secrets.INTERNAL_SECRET }}" \
+            -d '{}' \
+            --max-time 30) || true
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP $HTTP_CODE"
+          echo "$BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Sync failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          SYNCED=$(echo "$BODY" | jq -r '.synced // 0')
+          SKIPPED=$(echo "$BODY" | jq -r '.skipped // 0')
+          echo "✅ Done — synced=$SYNCED, skipped=$SKIPPED"
