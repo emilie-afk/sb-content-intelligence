@@ -3409,21 +3409,23 @@ async function updateClusterStatus(id, status) {
     const { data: existing } = await sb.from('content_review_candidates').select('id').eq('cluster_id', id).maybeSingle();
     if (!existing) {
       const { data: cl } = await sb.from('discovery_clusters')
-        .select('title,plant_or_product,signal_count,distinct_source_count,question_count,audience_wording')
+        .select('title,signal_count,distinct_source_count,question_count,audience_wording,platforms,first_seen_at,last_seen_at')
         .eq('id', id).single();
       if (cl) {
-        await sb.from('content_review_candidates').insert({
-          cluster_id:    id,
-          title:         cl.title,
-          plant_or_product: cl.plant_or_product || null,
-          signal_count:  cl.signal_count || 0,
-          source_count:  cl.distinct_source_count || 0,
-          question_count: cl.question_count || 0,
-          representative_wording: cl.audience_wording || [],
-          status:        'Ready for review',
-          repetition_risk: 'Low',
-          created_at:    new Date().toISOString(),
+        const { error: insErr } = await sb.from('content_review_candidates').insert({
+          cluster_id:             id,
+          title:                  cl.title,
+          signal_count:           cl.signal_count || 0,
+          distinct_source_count:  cl.distinct_source_count || 0,
+          question_count:         cl.question_count || 0,
+          representative_wording: Array.isArray(cl.audience_wording) ? cl.audience_wording : [],
+          platforms:              Array.isArray(cl.platforms) ? cl.platforms : [],
+          first_seen_at:          cl.first_seen_at || null,
+          last_seen_at:           cl.last_seen_at || null,
+          status:                 'Ready for review',
+          repetition_risk:        'Low',
         });
+        if (insErr) console.error('Content review candidate insert failed:', insErr.message);
       }
     }
     loadContentReview();
