@@ -137,6 +137,36 @@ exports.handler = async (event) => {
       prompt = buildScriptPrompt(data, rules || []);
       result = await callClaude(prompt);
 
+      // FEEDBACK LOOP: persist Required violations as lessons so the script
+      // generator stops repeating the same mistakes. Stored in settings
+      // (no migration needed), deduped by rule name, capped at 20.
+      try {
+        const requiredViolations = (result.brand_violations || [])
+          .filter(v => String(v.severity).toLowerCase() === "required");
+        if (requiredViolations.length) {
+          const { data: lessonSetting } = await supabase
+            .from("settings").select("value").eq("key", "script_gen_lessons").maybeSingle();
+          const lessons = lessonSetting?.value?.lessons || [];
+          const byRule = new Map(lessons.map(l => [l.rule, l]));
+          for (const v of requiredViolations) {
+            const existing = byRule.get(v.rule);
+            if (existing) {
+              existing.count = (existing.count || 1) + 1;
+              existing.fix = v.fix || existing.fix;
+              existing.last_seen = new Date().toISOString();
+            } else {
+              byRule.set(v.rule, { rule: v.rule, fix: v.fix || v.issue, count: 1, last_seen: new Date().toISOString() });
+            }
+          }
+          // Keep the 20 most frequent lessons
+          const merged = [...byRule.values()].sort((a, b) => (b.count || 0) - (a.count || 0)).slice(0, 20);
+          await supabase.from("settings").upsert(
+            { key: "script_gen_lessons", value: { lessons: merged } },
+            { onConflict: "key" }
+          );
+        }
+      } catch (e) { console.warn("Could not save script lessons:", e.message); }
+
     } else if (type === "generate_script") {
       // ── GENERATE A PRODUCTION-READY SCRIPT FROM A BRIEF ────────────────────
       // data = the brief row (+ optional target_duration_seconds, default 20).
@@ -148,7 +178,8 @@ exports.handler = async (event) => {
         .order("severity");
 
       const target = Math.min(600, Math.max(5, Number(data.target_duration_seconds) || 20));
-      prompt = buildScriptGenPrompt(data, rules || [], target);
+      const lessons = await fetchScriptLessons(supabase);
+      prompt = buildScriptGenPrompt(data, rules || [], target, lessons);
       const gen = await callClaude(prompt, 2048);
 
       // Auto duration: ~150 words/min ≈ 2.5 words/sec of voiceover
@@ -182,6 +213,59 @@ exports.handler = async (event) => {
       if (insErr) throw new Error("Script insert failed: " + insErr.message);
 
       result = { ...row, id: inserted.id, voiceover_words: words, target_duration_seconds: target };
+
+    } else if (type === "revise_script") {
+      // ── GENERATE A NEW SCRIPT VERSION FROM BRAND-CHECK FEEDBACK ────────────
+      // data = { script: <original script_outputs row>, feedback: <brand check analysis> }
+      const orig     = data.script   || {};
+      const feedback = data.feedback || {};
+      if (!orig.script_title && !orig.full_voiceover_script) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "original script required for revision" }) };
+      }
+
+      const { data: rules } = await supabase
+        .from("brand_content_rules")
+        .select("category, rule_name, rule_text, severity")
+        .eq("active", true)
+        .order("severity");
+
+      const target = Math.min(600, Math.max(5, Number(orig.estimated_duration_seconds) || 20));
+      const lessons = await fetchScriptLessons(supabase);
+      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons);
+      const gen = await callClaude(prompt, 2048);
+
+      const words   = (gen.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
+      const estSecs = words ? Math.max(5, Math.round(words / 2.5)) : target;
+      // v1 → v2 → v3 …
+      const nextVersion = "v" + ((parseInt(String(orig.script_version || "v1").replace(/\D/g, ""), 10) || 1) + 1);
+
+      const row = {
+        brief_id:                   orig.brief_id || null,
+        platform:                   gen.platform || orig.platform || "TikTok",
+        script_title:               gen.script_title || orig.script_title || "Untitled script",
+        script_version:             nextVersion,
+        script_type:                gen.script_type || orig.script_type || "TikTok / Reel short script",
+        opening_hook:               gen.opening_hook || null,
+        full_voiceover_script:      gen.full_voiceover_script || null,
+        on_screen_text:             gen.on_screen_text || null,
+        shot_list:                  gen.shot_list || null,
+        broll_notes:                gen.broll_notes || null,
+        product_mention:            gen.product_mention || orig.product_mention || null,
+        cta:                        gen.cta || null,
+        caption:                    gen.caption || null,
+        hashtags:                   gen.hashtags || orig.hashtags || null,
+        estimated_duration_seconds: estSecs,
+        review_status:              "Draft",
+      };
+
+      const { data: inserted, error: insErr } = await supabase
+        .from("script_outputs")
+        .insert(row)
+        .select("id")
+        .single();
+      if (insErr) throw new Error("Revised script insert failed: " + insErr.message);
+
+      result = { ...row, id: inserted.id, voiceover_words: words };
 
     } else if (type === "cluster") {
       // ── DISCOVERY CLUSTERING ──────────────────────────────────────────────
@@ -955,7 +1039,35 @@ Review this brief and return ONLY valid JSON:
 
 
 // ── SCRIPT GENERATION PROMPT ──────────────────────────────────────────────────
-function buildScriptGenPrompt(b, rules, targetSecs) {
+// Lessons learned from past brand-check failures — injected into generation
+// prompts so the same mistakes stop recurring.
+async function fetchScriptLessons(supabase) {
+  try {
+    const { data } = await supabase
+      .from("settings").select("value").eq("key", "script_gen_lessons").maybeSingle();
+    return data?.value?.lessons || [];
+  } catch (e) { return []; }
+}
+
+function lessonsBlock(lessons) {
+  if (!lessons?.length) return "";
+  const lines = lessons.map(l =>
+    `- ${l.rule}${l.count > 1 ? ` (flagged ${l.count}× before)` : ""}: ${l.fix}`
+  ).join("\n");
+  return `\nPAST REVIEWER FEEDBACK — previous scripts failed brand review for these exact reasons. Do NOT repeat them:\n${lines}\n`;
+}
+
+// Hard requirements the brand check always verifies — bake them in up front so
+// v1 passes review instead of needing a revision round.
+const SCRIPT_PREFLIGHT_CHECKLIST = `
+PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing:
+1. CTA: every script MUST end with a clear call to action matched to viewer intent (e.g. "Save this before you water." / "Comment which one yours looks like.").
+2. Caption: the "caption" field MUST be filled in — it doubles as the cover/text overlay.
+3. Visual opening: the shot list MUST specify what is on screen in the first 2 seconds, and it must show the plant/symptom/comparison immediately.
+4. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
+5. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".`;
+
+function buildScriptGenPrompt(b, rules, targetSecs, lessons) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -977,7 +1089,8 @@ TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBud
 
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
-
+${SCRIPT_PREFLIGHT_CHECKLIST}
+${lessonsBlock(lessons)}
 Writing guidance:
 - The opening hook must create curiosity or name the audience problem in the first sentence — never restate the title.
 - Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
@@ -1000,6 +1113,66 @@ Return ONLY valid JSON:
 }`;
 }
 
+
+// ── SCRIPT REVISION PROMPT ────────────────────────────────────────────────────
+function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons) {
+  const rulesText = rules.map(r =>
+    `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
+  ).join("\n");
+  const wordBudget = Math.round(targetSecs * 2.5);
+
+  const violationsText = (feedback.brand_violations || []).map(v =>
+    `[${v.severity}] ${v.rule}: ${v.issue}\n  Fix: ${v.fix}`
+  ).join("\n");
+  const hookIdeas     = (feedback.hook_suggestions || []).map(h => `- "${h}"`).join("\n");
+  const improvements  = (feedback.improvements || []).map(i => `- ${i}`).join("\n");
+
+  return `You are revising a short-form video script for Succulents Box, a succulent plant subscription company.
+A brand reviewer flagged issues in the current version. Write an improved version that fixes EVERY flagged issue while keeping what already works.
+
+CURRENT SCRIPT (${orig.script_version || "v1"}):
+Title: ${orig.script_title || ""}
+Platform: ${orig.platform || ""}
+Hook: ${orig.opening_hook || ""}
+Voiceover:
+${orig.full_voiceover_script || ""}
+On-screen text: ${orig.on_screen_text || "none"}
+CTA: ${orig.cta || "none"}
+Caption: ${orig.caption || "none"}
+
+REVIEWER FEEDBACK (score ${feedback.score ?? "?"}/100, verdict: ${feedback.overall || "Needs revision"}):
+${violationsText ? `Brand issues to fix — ALL Required issues MUST be resolved:\n${violationsText}` : "No brand violations."}
+${hookIdeas ? `\nStronger hook ideas from the reviewer (use one or write something equally strong):\n${hookIdeas}` : ""}
+${improvements ? `\nSuggested improvements:\n${improvements}` : ""}
+${feedback.notes ? `\nReviewer notes: ${feedback.notes}` : ""}
+
+TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
+
+BRAND RULES (follow all Required rules, never do Forbidden ones):
+${rulesText || "No rules loaded"}
+${SCRIPT_PREFLIGHT_CHECKLIST}
+${lessonsBlock(lessons)}
+Writing guidance:
+- The opening hook must create curiosity or name the audience problem in the first sentence — never restate the title.
+- Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
+- Keep the parts of the original that were NOT flagged — this is a revision, not a rewrite from scratch.
+
+Return ONLY valid JSON:
+{
+  "script_title": "short internal title (keep the original unless it was flagged)",
+  "platform": "TikTok | Instagram | YouTube | Facebook",
+  "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | UGC-style script",
+  "opening_hook": "first line of the video, under 12 words",
+  "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
+  "on_screen_text": "text overlays, one per line",
+  "shot_list": "Shot 1: … one per line",
+  "broll_notes": "b-roll / close-up suggestions",
+  "product_mention": "how/when the product is mentioned, or null",
+  "cta": "closing call to action",
+  "caption": "post caption, 1-2 sentences",
+  "hashtags": "#space #separated #hashtags"
+}`;
+}
 
 // ── SCRIPT PROMPT ─────────────────────────────────────────────────────────────
 function buildScriptPrompt(s, rules) {

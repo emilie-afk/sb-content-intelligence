@@ -1928,7 +1928,11 @@ async function generateScriptFromBrief(briefId) {
     const result = await resp.json();
     if (!result.success) { toast('Error: ' + (result.error || 'generation failed'), true); return; }
     const s = result.analysis;
-    toast(`✅ Script created: "${s.script_title}" — ${s.estimated_duration_seconds}s (${s.voiceover_words} words). Find it in Scripts as Draft.`);
+    toast(`✅ Script created: "${s.script_title}" — ${s.estimated_duration_seconds}s (${s.voiceover_words} words). Running brand check…`);
+    // Open the new script and auto-run the brand check so the verdict is
+    // visible immediately — no manual click needed.
+    await viewScript(s.id);
+    runAIAnalysis('script', window._viewedScript);
   } catch (e) {
     toast('Error: ' + e.message, true);
   }
@@ -2507,6 +2511,7 @@ async function runAIAnalysis(type, data) {
     } else if (type === 'brief') {
       resultEl.innerHTML = renderBriefAnalysis(a);
     } else if (type === 'script') {
+      window._lastScriptAnalysis = a; // used by generateRevisedScript()
       resultEl.innerHTML = renderScriptAnalysis(a);
     }
   } catch (err) {
@@ -2565,7 +2570,32 @@ function renderScriptAnalysis(a) {
       </div>`).join('')}</div>` : '<div style="font-size:13px;color:#27ae60;margin-bottom:8px">✅ No brand violations found</div>'}
     ${a.improvements?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Improvements:</b> ${a.improvements.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
+    ${a.overall !== 'Approved' ? `<button id="revise-script-btn" class="btn btn-primary" style="margin-top:12px" onclick="generateRevisedScript()">✨ Generate revised script from this feedback</button>` : ''}
   </div>`;
+}
+
+async function generateRevisedScript() {
+  const s = window._viewedScript;
+  const a = window._lastScriptAnalysis;
+  if (!s || !a) { toast('Run AI Brand Check first', true); return; }
+  const btn = document.getElementById('revise-script-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing new version…'; }
+  try {
+    const resp = await fetch('/.netlify/functions/ai-analyze', {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a } }),
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error || 'Revision failed');
+    toast(`✨ ${result.analysis.script_version} created as a new Draft — running brand check…`);
+    loadScripts();
+    await viewScript(result.analysis.id); // open the new version right away
+    runAIAnalysis('script', window._viewedScript); // auto-verify the revision
+  } catch (err) {
+    toast('Error: ' + err.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Generate revised script from this feedback'; }
+  }
 }
 
 // ── PLANT WATCHLIST ───────────────────────────────────────────────────
