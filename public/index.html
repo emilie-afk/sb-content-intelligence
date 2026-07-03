@@ -2248,6 +2248,10 @@ async function updateScriptStatus(id, status) {
 async function viewScript(id) {
   const { data: s } = await sb.from('script_outputs').select('*').eq('id', id).single();
   if (!s) { toast('Script not found', true); return; }
+  // Cache the script object — inlining JSON into an onclick attribute breaks the
+  // HTML (JSON's double quotes terminate the attribute), so the button must
+  // reference this variable instead.
+  window._viewedScript = s;
   const el = document.getElementById('modal-view-content');
   el.innerHTML = `
     <h3 style="margin:0 0 12px">${esc(s.script_title)}</h3>
@@ -2262,7 +2266,7 @@ async function viewScript(id) {
     ${s.cta ? `<div style="margin-bottom:12px"><b>CTA:</b> ${esc(s.cta)}</div>` : ''}
     ${s.caption ? `<div style="margin-bottom:12px"><b>Caption:</b><br><span style="font-size:13px">${esc(s.caption)}</span></div>` : ''}
     <div id="ai-analysis-result" style="margin-top:16px"></div>
-    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('script',${JSON.stringify(s).replace(/</g,'&lt;')})">🤖 AI Brand Check</button>
+    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('script', window._viewedScript)">🤖 AI Brand Check</button>
   `;
   document.getElementById('modal-view').style.display = 'flex';
 }
@@ -2444,6 +2448,8 @@ function showError(msg) {
 async function viewBrief(id) {
   const { data: b } = await sb.from('briefs').select('*').eq('id', id).single();
   if (!b) { toast('Brief not found', true); return; }
+  // Same fix as viewScript: never inline JSON into an onclick attribute
+  window._viewedBrief = b;
   const el = document.getElementById('modal-view-content');
   el.innerHTML = `
     <h3 style="margin:0 0 12px">${esc(b.title)}</h3>
@@ -2459,7 +2465,7 @@ async function viewBrief(id) {
     ${b.cta ? `<div style="margin-bottom:10px"><b>CTA:</b> ${esc(b.cta)}</div>` : ''}
     ${b.notes ? `<div style="margin-bottom:10px"><b>Notes:</b> ${esc(b.notes)}</div>` : ''}
     <div id="ai-analysis-result" style="margin-top:16px"></div>
-    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('brief',${JSON.stringify(b).replace(/</g,'&lt;')})">🤖 AI Review</button>
+    <button class="btn btn-secondary" style="margin-top:12px" onclick="runAIAnalysis('brief', window._viewedBrief)">🤖 AI Review</button>
   `;
   document.getElementById('modal-view').style.display = 'flex';
 }
@@ -3219,7 +3225,7 @@ function filterMergeCandidates(winnerId, query) {
   container.innerHTML = matches.map(c => `
     <div style="background:#1e293b;border-radius:6px;padding:9px 12px;cursor:pointer;border:1px solid transparent"
       onmouseover="this.style.borderColor='#4f46e5'" onmouseout="this.style.borderColor='transparent'"
-      onclick="confirmMerge('${winnerId}','${c.id}',${JSON.stringify(c.title)})">
+      onclick="confirmMerge('${winnerId}','${c.id}',${JSON.stringify(c.title).replace(/"/g,'&quot;')})">
       <div style="font-size:12px;font-weight:600;color:#e2e8f0">${esc(c.title)}</div>
       <div style="font-size:11px;color:#64748b;margin-top:2px">
         ${c.plant_or_product ? `🌱 ${esc(c.plant_or_product)} · ` : ''}
