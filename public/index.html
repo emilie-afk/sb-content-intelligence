@@ -1577,13 +1577,20 @@ function renderTodayItem(item, actionType) {
       ${sourceUrl ? `<a href="${sourceUrl}" target="_blank" class="btn btn-secondary btn-sm">🔗 View post</a>` : ''}
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs decision')">📋 Mark for review</button>
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
-      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Done</button>
+      ${caId
+        ? `<button class="btn btn-secondary btn-sm" onclick="competitorDone('${caId}','${item.id}')">✓ Done</button>`
+        : `<button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Done</button>`}
+      ${caId ? `<button class="btn btn-secondary btn-sm" style="color:#f59e0b" onclick="blockCompetitorAccount('${caId}','${item.id}')" title="Block this account — all future posts from it are auto-dismissed">🚫 Noise</button>` : ''}
       ${caId ? `<button class="btn btn-secondary btn-sm" style="color:#ef4444" onclick="deleteCompetitorActivity('${caId}','${item.id}')">🗑 Delete</button>` : ''}`;
   } else {
+    const mwIdMatch = /\[mw:([^\]]+)\]/.exec(item.evidence_summary || '');
+    const mwId = mwIdMatch ? mwIdMatch[1] : '';
     actionBtns = `
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs decision')">📋 Mark for review</button>
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
-      <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Done</button>`;
+      ${mwId
+        ? `<button class="btn btn-secondary btn-sm" onclick="marketWatchDone('${mwId}','${item.id}')">✓ Done</button>`
+        : `<button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Resolved')">✓ Done</button>`}`;
   }
 
   return `
@@ -1601,7 +1608,7 @@ function renderTodayItem(item, actionType) {
       </div>
       ${item.summary ? `<p class="today-item-summary">${esc(item.summary)}</p>` : ''}
       ${item.why_today ? `<p class="today-item-why"><strong>Why today:</strong> ${esc(item.why_today)}</p>` : ''}
-      ${item.evidence_summary ? `<p class="today-item-evidence">📊 ${esc(item.evidence_summary.replace(/^\[ca:[^\]]+\]\s*/, ''))}</p>` : ''}
+      ${item.evidence_summary ? `<p class="today-item-evidence">📊 ${esc(item.evidence_summary.replace(/^\[(?:ca|mw):[^\]]+\]\s*/, ''))}</p>` : ''}
       ${item.recommended_action ? `<p class="today-item-action">→ ${esc(item.recommended_action)}</p>` : ''}
       <div class="today-item-actions">
         ${actionBtns}
@@ -1620,6 +1627,70 @@ async function todayItemDecide(itemId, status) {
   }).eq('id', itemId);
   if (error) { toast('Error: ' + error.message, true); return; }
   toast('Saved: ' + status);
+  loadToday();
+}
+
+async function competitorDone(competitorActivityId, todayItemId) {
+  // Done = handled. Mark the source competitor_activity row 'Reviewed' so the
+  // briefing query (which excludes Dismissed/Reviewed) never re-inserts it.
+  const { error: caErr } = await sb.from('competitor_activity')
+    .update({ status: 'Reviewed', updated_at: new Date().toISOString() })
+    .eq('id', competitorActivityId);
+  if (caErr) { toast('Error: ' + caErr.message, true); return; }
+  await todayItemDecide(todayItemId, 'Resolved');
+}
+
+async function marketWatchDone(marketWatchPlantId, todayItemId) {
+  // Done = handled. Mark the market_watch_plants row 'Reviewed' so the briefing
+  // stops alerting on it (it still lives in the Market Watch tab if needed).
+  const { error: mwErr } = await sb.from('market_watch_plants')
+    .update({ reviewer_status: 'Reviewed', updated_at: new Date().toISOString() })
+    .eq('id', marketWatchPlantId);
+  if (mwErr) { toast('Error: ' + mwErr.message, true); return; }
+  await todayItemDecide(todayItemId, 'Resolved');
+}
+
+async function blockCompetitorAccount(competitorActivityId, todayItemId) {
+  // Look up the account behind this alert
+  const { data: ca, error: caErr } = await sb.from('competitor_activity')
+    .select('source_account_name, source_account_handle')
+    .eq('id', competitorActivityId).single();
+  if (caErr || !ca) { toast('Could not load competitor account', true); return; }
+
+  const accountLabel = ca.source_account_name || ca.source_account_handle;
+  if (!accountLabel) { toast('This alert has no account name to block', true); return; }
+  if (!confirm(`Block "${accountLabel}"? All current and future posts from this account will be dismissed automatically.`)) return;
+
+  // 1. Add to the blocklist in settings (name + handle, lowercase)
+  const { data: setting } = await sb.from('settings')
+    .select('value').eq('key', 'competitor_blocked_accounts').maybeSingle();
+  const accounts = new Set((setting?.value?.accounts || []).map(a => String(a).toLowerCase()));
+  if (ca.source_account_name)   accounts.add(ca.source_account_name.toLowerCase());
+  if (ca.source_account_handle) accounts.add(ca.source_account_handle.toLowerCase());
+  const { error: setErr } = await sb.from('settings')
+    .upsert({ key: 'competitor_blocked_accounts', value: { accounts: [...accounts] } }, { onConflict: 'key' });
+  if (setErr) { toast('Error saving blocklist: ' + setErr.message, true); return; }
+
+  // 2. Dismiss ALL existing competitor_activity rows from this account
+  if (ca.source_account_name) {
+    await sb.from('competitor_activity')
+      .update({ status: 'Dismissed', updated_at: new Date().toISOString() })
+      .ilike('source_account_name', ca.source_account_name);
+  }
+  if (ca.source_account_handle) {
+    await sb.from('competitor_activity')
+      .update({ status: 'Dismissed', updated_at: new Date().toISOString() })
+      .ilike('source_account_handle', ca.source_account_handle);
+  }
+
+  // 3. Resolve the board card
+  await sb.from('today_board_items').update({
+    status: 'Resolved',
+    resolved_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }).eq('id', todayItemId);
+
+  toast(`🚫 "${accountLabel}" blocked — future posts auto-dismissed`);
   loadToday();
 }
 
@@ -1721,7 +1792,7 @@ async function exportTodayReport(date) {
       md += `### ${item.title}${tag}\n`;
       if (item.summary)          md += `${item.summary}\n\n`;
       if (item.why_today)        md += `**Why today:** ${item.why_today}\n\n`;
-      if (item.evidence_summary && !item.evidence_summary.startsWith('[ca:'))
+      if (item.evidence_summary && !/^\[(?:ca|mw):/.test(item.evidence_summary))
                                  md += `**Evidence:** ${item.evidence_summary}\n\n`;
       if (item.recommended_action) md += `**Action:** ${item.recommended_action}\n\n`;
       md += `---\n\n`;
