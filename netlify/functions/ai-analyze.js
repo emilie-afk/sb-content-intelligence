@@ -312,7 +312,7 @@ exports.handler = async (event) => {
         product_mention:            gen.product_mention || data.featured_product || null,
         cta:                        gen.cta || data.cta || null,
         caption:                    gen.caption || null,
-        hashtags:                   gen.hashtags || null,
+        hashtags:                   toHashtagArray(gen.hashtags),
         estimated_duration_seconds: estSecs,
         review_status:              "Draft",
       };
@@ -365,7 +365,7 @@ exports.handler = async (event) => {
         product_mention:            gen.product_mention || orig.product_mention || null,
         cta:                        gen.cta || null,
         caption:                    gen.caption || null,
-        hashtags:                   gen.hashtags || orig.hashtags || null,
+        hashtags:                   toHashtagArray(gen.hashtags) || toHashtagArray(orig.hashtags),
         estimated_duration_seconds: estSecs,
         review_status:              "Draft",
       };
@@ -553,8 +553,12 @@ exports.handler = async (event) => {
 
         // ── NEEDS CATALOG REVIEW ───────────────────────────────────────────────
         if (route === "Needs Catalog Review") {
-          // Flag signal for human review; don't cluster
-          await supabase.from("signals").update({ status: "Needs cleanup" }).eq("id", signalId);
+          // Scraper signals: delete (low quality automated). Manual: flag for review.
+          if (data.is_manual_submission) {
+            await supabase.from("signals").update({ status: "Needs cleanup" }).eq("id", signalId);
+          } else {
+            await supabase.from("signals").delete().eq("id", signalId);
+          }
           clusterResults.push({
             processing_path: "Needs review",
             cluster_id:      null,
@@ -881,13 +885,20 @@ exports.handler = async (event) => {
 
   } catch (err) {
     console.error("ai-analyze error:", err);
-    // If clustering failed, mark the signal so it doesn't stay stuck as New forever
+    // If clustering failed: scraper signals → delete; manual → mark Needs cleanup
     if (type === "cluster" && data?.id) {
       try {
-        await supabase.from("signals")
-          .update({ status: "Needs cleanup" })
-          .eq("id", data.id)
-          .in("status", ["New", "Clustering"]);  // don't overwrite manual decisions
+        if (data.is_manual_submission) {
+          await supabase.from("signals")
+            .update({ status: "Needs cleanup" })
+            .eq("id", data.id)
+            .in("status", ["New", "Clustering"]);
+        } else {
+          await supabase.from("signals")
+            .delete()
+            .eq("id", data.id)
+            .in("status", ["New", "Clustering"]);
+        }
       } catch (_) {}
     }
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
@@ -968,6 +979,14 @@ async function upsertMarketWatchPlant(supabase, idea, signalId, signal, attr) {
   }
 }
 
+
+// ── HASHTAG HELPER ────────────────────────────────────────────────────────────
+// Converts AI hashtag output (string or array) to a JS array for Postgres text[]
+function toHashtagArray(val) {
+  if (!val) return null;
+  if (Array.isArray(val)) return val.filter(Boolean);
+  return val.trim().split(/\s+/).filter(Boolean);
+}
 
 // ── REPETITION SOURCE TYPE HELPERS ────────────────────────────────────────────
 // Maps ownership_type from the extraction prompt to the DB enum value.
