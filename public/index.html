@@ -87,6 +87,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   box-shadow: 0 1px 4px rgba(0,0,0,0.08); border-top: 3px solid #e0e0e0;
 }
 .stat-card.red { border-top-color: #e74c3c; }
+.cmd-pipeline-stage {
+  flex:1; padding:16px 20px; cursor:pointer; transition:background 0.15s;
+}
+.cmd-pipeline-stage:hover { background:#f8fdf8; }
+.cmd-pipeline-num { font-size:28px; font-weight:700; color:#1a2e1a; }
+.cmd-pipeline-label { font-size:13px; font-weight:600; color:#1a2e1a; margin-top:2px; }
+.cmd-pipeline-sub { font-size:11px; color:#888; margin-top:2px; }
+.cmd-pipeline-arrow { font-size:20px; color:#c8e6c9; padding:0 4px; align-self:center; }
 .stat-card.amber { border-top-color: #f39c12; }
 .stat-card.green { border-top-color: #27ae60; }
 .stat-card.blue { border-top-color: #3498db; }
@@ -379,6 +387,33 @@ tbody tr:hover { background: #fafffe; }
         </div>
       </div>
 
+      <!-- Production pipeline strip -->
+      <div style="display:flex;align-items:center;gap:0;margin-bottom:28px;background:white;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,0.08);overflow:hidden">
+        <div class="cmd-pipeline-stage" onclick="showView('content-review',document.querySelector('[data-view=content-review]'))" style="border-left:4px solid #8b5cf6">
+          <div class="cmd-pipeline-num" id="pipe-review">–</div>
+          <div class="cmd-pipeline-label">Content Review</div>
+          <div class="cmd-pipeline-sub">awaiting decision</div>
+        </div>
+        <div class="cmd-pipeline-arrow">→</div>
+        <div class="cmd-pipeline-stage" onclick="showView('briefs',document.querySelector('[data-view=briefs]'))" style="border-left:4px solid #f39c12">
+          <div class="cmd-pipeline-num" id="pipe-briefs">–</div>
+          <div class="cmd-pipeline-label">Briefs</div>
+          <div class="cmd-pipeline-sub">needs review / draft</div>
+        </div>
+        <div class="cmd-pipeline-arrow">→</div>
+        <div class="cmd-pipeline-stage" onclick="showView('scripts',document.querySelector('[data-view=scripts]'))" style="border-left:4px solid #3b82f6">
+          <div class="cmd-pipeline-num" id="pipe-scripts">–</div>
+          <div class="cmd-pipeline-label">Scripts</div>
+          <div class="cmd-pipeline-sub">needs review / draft</div>
+        </div>
+        <div class="cmd-pipeline-arrow">→</div>
+        <div class="cmd-pipeline-stage" onclick="showView('published',document.querySelector('[data-view=published]'))" style="border-left:4px solid #27ae60">
+          <div class="cmd-pipeline-num" id="pipe-published">–</div>
+          <div class="cmd-pipeline-label">Published</div>
+          <div class="cmd-pipeline-sub">snapshots due</div>
+        </div>
+      </div>
+
       <div class="section-header">
         <h2>Today's Decisions</h2>
         <button class="btn btn-secondary btn-sm" onclick="showView('daily-board', document.querySelector('[data-view=daily-board]'))">Open Today →</button>
@@ -400,6 +435,17 @@ tbody tr:hover { background: #fafffe; }
         </table>
       </div>
 
+      <div class="section-header">
+        <h2>Scripts Needing Review</h2>
+        <button class="btn btn-secondary btn-sm" onclick="showView('scripts',document.querySelector('[data-view=scripts]'))">Open Scripts →</button>
+      </div>
+      <div class="table-wrap" style="margin-bottom:24px">
+        <table>
+          <thead><tr><th>Title</th><th>Platform</th><th>Type</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody id="cmd-scripts"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+        </table>
+      </div>
+
       <div class="section-header"><h2>Performance Checkpoints Due</h2></div>
       <div class="table-wrap">
         <table>
@@ -417,6 +463,11 @@ tbody tr:hover { background: #fafffe; }
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="filters">
+          <select class="filter-select" id="inbox-source-filter" onchange="loadInbox()">
+            <option value="">All Sources</option>
+            <option value="manual">✍️ Manual (Intake App)</option>
+            <option value="scraper">🤖 Instagram Scraper</option>
+          </select>
           <select class="filter-select" id="inbox-platform-filter" onchange="loadInbox()">
             <option value="">All Platforms</option>
             <option>Instagram</option><option>TikTok</option><option>YouTube</option><option>Facebook</option>
@@ -426,6 +477,7 @@ tbody tr:hover { background: #fafffe; }
             <option>High</option><option>Medium</option><option>Low</option>
           </select>
           <select class="filter-select" id="inbox-status-filter" onchange="loadInbox()">
+            <option value="unclustered">Unclustered</option>
             <option value="New">New Only</option>
             <option value="">All Statuses</option>
             <option>Needs cleanup</option><option>Needs scoring</option><option>Watch</option>
@@ -436,6 +488,7 @@ tbody tr:hover { background: #fafffe; }
           <button class="btn btn-primary btn-sm" onclick="openSignalModal()">+ Add Signal</button>
         </div>
       </div>
+      <div id="inbox-cleanup-callout"></div>
       <div class="table-wrap">
         <table>
           <thead><tr>
@@ -1195,6 +1248,34 @@ tbody tr:hover { background: #fafffe; }
 
 <!-- (Schedule modal removed — calendar push is automatic on approval) -->
 
+<!-- Signal Detail Modal -->
+<div class="modal-overlay" id="modal-signal-detail" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal" style="max-width:620px;max-height:85vh;overflow-y:auto">
+    <h2>Signal Details</h2>
+    <div id="modal-signal-detail-content" style="font-size:13px;line-height:1.7;color:#1a1a2e"></div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn btn-secondary" onclick="document.getElementById('modal-signal-detail').style.display='none'">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Signal Modal (for Needs cleanup — manual submissions) -->
+<div class="modal-overlay" id="modal-edit-signal" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal" style="max-width:520px">
+    <h2>Fix Signal</h2>
+    <p style="font-size:13px;color:#64748b;margin-bottom:16px">Correct the fields the AI couldn't fill in, then save to re-queue for clustering.</p>
+    <input type="hidden" id="edit-sig-id">
+    <div class="form-group"><label>Topic</label><input type="text" id="edit-sig-topic" placeholder="e.g. overwatering succulents"></div>
+    <div class="form-group"><label>Plant / Product</label><input type="text" id="edit-sig-plant" placeholder="e.g. Echeveria, Succulent mix"></div>
+    <div class="form-group"><label>Caption / Summary</label><textarea id="edit-sig-caption" rows="3" placeholder="What does this post say?"></textarea></div>
+    <div class="form-group"><label>Audience Problem</label><input type="text" id="edit-sig-problem" placeholder="e.g. leaves turning yellow"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="document.getElementById('modal-edit-signal').style.display='none'">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEditSignal()">Save &amp; Re-queue</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -1296,12 +1377,15 @@ function showView(viewId, el) {
 
 // ── COMMAND CENTER ────────────────────────────────────────────────────
 async function loadCommandCenter() {
-  // Stats
-  const [high, inbox, briefs, snapshots] = await Promise.all([
+  // Stats + pipeline counts
+  const [high, inbox, briefs, snapshots, pipeReview, pipeBriefs, pipeScripts] = await Promise.all([
     sb.from('opportunities').select('id', {count:'exact'}).eq('priority','High').is('reviewer_decision', null),
-    sb.from('signals').select('id', {count:'exact'}).eq('status','New'),
+    sb.from('signals').select('id', {count:'exact'}).not('status', 'in', '("Clustered","Watch","Mention only","Noise","Dismissed")'),
     sb.from('briefs').select('id', {count:'exact'}).eq('status','Approved'),
     sb.from('published_videos').select('id', {count:'exact'}).or('snapshot_24h_status.eq.Pending,snapshot_72h_status.eq.Pending,snapshot_7d_status.eq.Pending'),
+    sb.from('content_review_candidates').select('id', {count:'exact'}).in('status',['Ready for review','Recommended follow-up']),
+    sb.from('briefs').select('id', {count:'exact'}).in('status',['Draft','Needs review']),
+    sb.from('scripts').select('id', {count:'exact'}).in('status',['Draft','Needs review','Needs revision']),
   ]);
   document.getElementById('stat-high').textContent      = high.count ?? 0;
   document.getElementById('stat-inbox').textContent     = inbox.count ?? 0;
@@ -1309,6 +1393,11 @@ async function loadCommandCenter() {
   document.getElementById('stat-snapshots').textContent = snapshots.count ?? 0;
   document.getElementById('badge-inbox').textContent    = inbox.count ?? 0;
   document.getElementById('badge-snapshots').textContent = snapshots.count ?? 0;
+  // Pipeline strip
+  document.getElementById('pipe-review').textContent    = pipeReview.count ?? 0;
+  document.getElementById('pipe-briefs').textContent    = pipeBriefs.count ?? 0;
+  document.getElementById('pipe-scripts').textContent   = pipeScripts.count ?? 0;
+  document.getElementById('pipe-published').textContent = snapshots.count ?? 0;
 
   // Top opportunities
   const { data: opps } = await sb.from('opportunities').select('*')
@@ -1338,6 +1427,19 @@ async function loadCommandCenter() {
       <td><button class="btn btn-primary btn-sm" onclick="updateBriefStatus('${b.id}','Approved')">Approve</button></td>
     </tr>`).join('');
 
+  // Scripts needing review
+  const { data: scrs } = await sb.from('scripts').select('*').in('status',['Draft','Needs review','Needs revision']).order('created_at',{ascending:false}).limit(5);
+  const sTbody = document.getElementById('cmd-scripts');
+  if (!scrs?.length) { sTbody.innerHTML = '<tr><td colspan="5"><div class="empty"><p>No scripts needing review</p></div></td></tr>'; }
+  else sTbody.innerHTML = scrs.map(s => `
+    <tr>
+      <td class="truncate">${esc(s.title||'—')}</td>
+      <td>${esc(s.platform||'—')}</td>
+      <td>${esc(s.script_type||'—')}</td>
+      <td><span class="badge badge-${(s.status||'').toLowerCase().replace(/ /g,'-')}">${s.status}</span></td>
+      <td><button class="btn btn-primary btn-sm" onclick="updateScriptStatus('${s.id}','Approved')">Approve</button></td>
+    </tr>`).join('');
+
   // Checkpoints due
   const { data: vids } = await sb.from('published_videos').select('*')
     .or('snapshot_24h_status.eq.Pending,snapshot_72h_status.eq.Pending,snapshot_7d_status.eq.Pending').limit(10);
@@ -1358,15 +1460,37 @@ async function loadCommandCenter() {
 }
 
 // ── INBOX ─────────────────────────────────────────────────────────────
+const CLUSTERABLE_EXCLUDE = '("Clustered","Watch","Mention only","Noise","Dismissed")';
+
 async function loadInbox() {
-  let q = sb.from('signals').select('*').order('created_at', {ascending:false}).limit(100);
+  const source   = document.getElementById('inbox-source-filter')?.value;
   const platform = document.getElementById('inbox-platform-filter')?.value;
   const priority = document.getElementById('inbox-priority-filter')?.value;
   const status   = document.getElementById('inbox-status-filter')?.value;
-  if (platform) q = q.eq('platform', platform);
-  if (priority) q = q.eq('priority', priority);
-  if (status)   q = q.eq('status', status);
-  const { data } = await q;
+
+  const applyFilters = q => {
+    if (source === 'manual')  q = q.eq('is_manual_submission', true);
+    if (source === 'scraper') q = q.eq('is_manual_submission', false);
+    if (platform) q = q.eq('platform', platform);
+    if (priority) q = q.eq('priority', priority);
+    if (status === 'unclustered') q = q.not('status', 'in', CLUSTERABLE_EXCLUDE);
+    else if (status) q = q.eq('status', status);
+    return q;
+  };
+
+  // Build data query
+  let q = applyFilters(sb.from('signals').select('*').order('created_at', {ascending:false}).limit(200));
+
+  // Build count query with same filters
+  let cq = applyFilters(sb.from('signals').select('id', {count:'exact', head:true}));
+
+  const [{ data }, { count }] = await Promise.all([q, cq]);
+  window._inboxData = data || [];
+
+  // Update badge to match current view
+  const badge = document.getElementById('badge-inbox');
+  if (badge) badge.textContent = count ?? (data?.length ?? 0);
+
   const tbody = document.getElementById('inbox-table');
   if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📥</div><p>No signals found</p></div></td></tr>'; return; }
   // Manual submissions first, then by priority
@@ -1376,8 +1500,37 @@ async function loadInbox() {
     if (manualDelta) return manualDelta;
     return (priorityRank[b.priority] || 0) - (priorityRank[a.priority] || 0);
   });
-  tbody.innerHTML = data.map(s => `
-    <tr>
+  // Separate Needs cleanup manual submissions — show them as a callout above the table
+  const needsCleanup = data.filter(s => s.status === 'Needs cleanup' && s.is_manual_submission);
+  const rest = data.filter(s => !(s.status === 'Needs cleanup' && s.is_manual_submission));
+
+  let callout = '';
+  if (needsCleanup.length) {
+    callout = `
+      <div style="background:#fffbeb;border:1px solid #f59e0b;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-weight:700;color:#92400e;margin-bottom:10px">⚠️ ${needsCleanup.length} manual submission${needsCleanup.length>1?'s':''} need${needsCleanup.length===1?'s':''} cleanup</div>
+        ${needsCleanup.map(s => `
+          <div style="background:white;border:1px solid #fde68a;border-radius:8px;padding:12px;margin-bottom:8px;font-size:13px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+              <div style="flex:1">
+                <div style="font-weight:600;color:#1a2e1a;margin-bottom:6px">${esc(s.topic||'No topic')} · <span style="color:#888;font-weight:400">${esc(s.platform||'?')} · ${esc(s.creator_name||'unknown')}</span></div>
+                ${s.caption_summary ? `<div style="color:#555;margin-bottom:4px"><b>Caption:</b> ${esc(s.caption_summary)}</div>` : '<div style="color:#f59e0b;margin-bottom:4px">⚠️ No caption captured</div>'}
+                ${s.audience_problem ? `<div style="color:#555;margin-bottom:4px"><b>Audience problem:</b> ${esc(s.audience_problem)}</div>` : '<div style="color:#f59e0b;margin-bottom:4px">⚠️ No audience problem captured</div>'}
+                ${s.plant_or_product ? `<div style="color:#555;margin-bottom:4px"><b>Plant/product:</b> ${esc(s.plant_or_product)}</div>` : ''}
+                <div style="color:#999;font-size:11px">${s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="color:#4CAF50">View source ↗</a>` : 'No source URL'} · ${s.date_found||'?'}</div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+                <button class="btn btn-primary btn-sm" onclick="openEditSignalModal('${s.id}')">✏️ Fix</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteSignal('${s.id}')">🗑️ Delete</button>
+              </div>
+            </div>
+          </div>`).join('')}
+      </div>`;
+  }
+  document.getElementById('inbox-cleanup-callout').innerHTML = callout;
+
+  tbody.innerHTML = rest.map(s => `
+    <tr style="${s.status==='Needs cleanup'?'opacity:0.5':''}">
       <td>${s.date_found||'—'}</td>
       <td>${esc(s.platform||'—')}</td>
       <td class="truncate">${esc(s.creator_name||'—')}</td>
@@ -1392,8 +1545,64 @@ async function loadInbox() {
           ${['New','Needs cleanup','Needs scoring','Duplicate','Watch','Reject','Promote to Daily Board'].map(opt=>`<option${s.status===opt?' selected':''}>${opt}</option>`).join('')}
         </select>
       </td>
-      <td>${s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="font-size:12px;color:#4CAF50">View ↗</a>` : '—'}</td>
+      <td style="display:flex;gap:6px;align-items:center">
+        <button class="btn btn-secondary btn-sm" onclick="openSignalDetail('${s.id}')" title="View what the system recorded">🔍</button>
+        ${s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="font-size:12px;color:#4CAF50">View ↗</a>` : '—'}
+      </td>
     </tr>`).join('');
+}
+
+function openSignalDetail(id) {
+  const s = (window._inboxData||[]).find(x => x.id === id);
+  if (!s) return;
+  const rows = [
+    ['Topic', s.topic], ['Platform', s.platform], ['Creator', s.creator_name],
+    ['Date found', s.date_found], ['Status', s.status], ['Priority', s.priority],
+    ['Score', s.score], ['Plant / Product', s.plant_or_product],
+    ['Caption summary', s.caption_summary], ['Audience problem', s.audience_problem],
+    ['Likes', s.likes_count], ['Comments', s.comments_count],
+    ['Manual submission', s.is_manual_submission ? 'Yes' : 'No'],
+    ['Source URL', s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="color:#4CAF50">${esc(s.source_url)}</a>` : null],
+  ].filter(([,v]) => v != null && v !== '');
+  document.getElementById('modal-signal-detail-content').innerHTML = rows.map(([k,v]) =>
+    `<div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px">
+      <div style="width:140px;flex-shrink:0;color:#888;font-weight:500">${k}</div>
+      <div style="color:#1a2e1a">${v}</div>
+    </div>`).join('');
+  document.getElementById('modal-signal-detail').style.display = 'flex';
+}
+
+async function deleteSignal(id) {
+  if (!confirm('Delete this signal permanently?')) return;
+  await sb.from('signals').delete().eq('id', id);
+  toast('Signal deleted');
+  loadInbox();
+}
+
+function openEditSignalModal(id) {
+  const s = (window._inboxData||[]).find(x => x.id === id);
+  if (!s) return;
+  document.getElementById('edit-sig-id').value = s.id;
+  document.getElementById('edit-sig-topic').value = s.topic || '';
+  document.getElementById('edit-sig-plant').value = s.plant_or_product || '';
+  document.getElementById('edit-sig-caption').value = s.caption_summary || '';
+  document.getElementById('edit-sig-problem').value = s.audience_problem || '';
+  document.getElementById('modal-edit-signal').style.display = 'flex';
+}
+
+async function saveEditSignal() {
+  const id = document.getElementById('edit-sig-id').value;
+  const { error } = await sb.from('signals').update({
+    topic:            document.getElementById('edit-sig-topic').value,
+    plant_or_product: document.getElementById('edit-sig-plant').value,
+    caption_summary:  document.getElementById('edit-sig-caption').value,
+    audience_problem: document.getElementById('edit-sig-problem').value,
+    status:           'New',  // reset to New so it can be clustered
+  }).eq('id', id);
+  if (error) { toast('Error saving: ' + error.message); return; }
+  toast('Signal updated — ready to cluster');
+  closeModal('modal-edit-signal');
+  loadInbox();
 }
 
 // ── DAILY BOARD ───────────────────────────────────────────────────────
@@ -3882,14 +4091,27 @@ async function clusterAllSignals() {
   btn.disabled = true;
   btn.textContent = '🔍 Loading signals…';
 
-  // Fetch all signals that haven't been clustered yet — includes New, Needs cleanup, Needs scoring
-  // Excludes terminal statuses: Clustered, Watch, Mention only, Noise
-  const { data: allSignals } = await sb
+  // Fetch signals using the same filters currently applied in the inbox
+  const source   = document.getElementById('inbox-source-filter')?.value;
+  const platform = document.getElementById('inbox-platform-filter')?.value;
+  const priority = document.getElementById('inbox-priority-filter')?.value;
+  const status   = document.getElementById('inbox-status-filter')?.value;
+
+  let sq = sb
     .from('signals')
     .select('id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission')
-    .not('status', 'in', '("Clustered","Watch","Mention only","Noise")')
     .order('created_at', { ascending: true })
     .limit(200);
+
+  if (source === 'manual')  sq = sq.eq('is_manual_submission', true);
+  if (source === 'scraper') sq = sq.eq('is_manual_submission', false);
+  if (platform) sq = sq.eq('platform', platform);
+  if (priority) sq = sq.eq('priority', priority);
+  if (status === 'unclustered') sq = sq.not('status', 'in', CLUSTERABLE_EXCLUDE);
+  else if (status) sq = sq.eq('status', status);
+  else sq = sq.not('status', 'in', CLUSTERABLE_EXCLUDE); // default: all unclustered
+
+  const { data: allSignals } = await sq;
 
   // Also skip any that already have a cluster link (double-check)
   const { data: linked } = await sb.from('signal_cluster_links').select('signal_id');
