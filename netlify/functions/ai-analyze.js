@@ -981,11 +981,11 @@ async function upsertMarketWatchPlant(supabase, idea, signalId, signal, attr) {
 
 
 // ── HASHTAG HELPER ────────────────────────────────────────────────────────────
-// Converts AI hashtag output (string or array) to a JS array for Postgres text[]
+// Normalises AI hashtag output to a plain space-separated string for text column.
 function toHashtagArray(val) {
   if (!val) return null;
-  if (Array.isArray(val)) return val.filter(Boolean);
-  return val.trim().split(/\s+/).filter(Boolean);
+  if (Array.isArray(val)) return val.filter(Boolean).join(' ');
+  return val.trim(); // already a string
 }
 
 // ── REPETITION SOURCE TYPE HELPERS ────────────────────────────────────────────
