@@ -3663,7 +3663,7 @@ async function loadContentReview() {
       <!-- Repetition check -->
       ${c.closest_published_title ? `<div style="background:#1e293b;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12.5px">
         <div style="color:#94a3b8;margin-bottom:3px">Closest published content</div>
-        <div style="font-weight:500">${esc(c.closest_published_title)}</div>
+        <div style="font-weight:500;color:#e2e8f0">${esc(c.closest_published_title)}</div>
         <div style="color:#9ca3af;margin-top:2px">${c.closest_published_date ? new Date(c.closest_published_date).toLocaleDateString('en-US', {year:'numeric',month:'short'}) : '—'}${c.days_since_similar ? ` · ${c.days_since_similar} days ago` : ''}</div>
         ${c.freshness_reason ? `<div style="color:#d1d5db;margin-top:4px;font-style:italic">${esc(c.freshness_reason)}</div>` : ''}
       </div>` : ''}
