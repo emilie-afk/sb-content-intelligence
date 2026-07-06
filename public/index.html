@@ -340,6 +340,9 @@ tbody tr:hover { background: #fafffe; }
       <div class="nav-item" data-view="activity-log" onclick="showView('activity-log',this)">
         <span class="icon">📜</span> Activity Log
       </div>
+      <div class="nav-item" data-view="help" onclick="showView('help',this)">
+        <span class="icon">❓</span> Help
+      </div>
     </nav>
     <div class="sidebar-user">
       <strong id="user-name">Loading…</strong>
@@ -730,6 +733,17 @@ tbody tr:hover { background: #fafffe; }
       </div>
       <div id="mw-list" style="display:flex;flex-direction:column;gap:12px">
         <div class="empty"><div class="icon">📈</div><p>Loading market watch plants…</p></div>
+      </div>
+    </div>
+
+    <!-- ── HELP ── -->
+    <div id="view-help" class="view">
+      <div class="view-header">
+        <h1>Help & User Manual</h1>
+        <p>How to use this dashboard</p>
+      </div>
+      <div id="help-content" style="max-width:760px;line-height:1.7;color:#e2e8f0;font-size:14px">
+        <p style="color:#94a3b8">Loading…</p>
       </div>
     </div>
 
@@ -1261,6 +1275,7 @@ function showView(viewId, el) {
     'content-review':       loadContentReview,
     'competitor-activity':  loadCompetitorActivity,
     'market-watch':         loadMarketWatch,
+    'help':                 loadHelp,
   };
   if (loaders[viewId]) loaders[viewId]();
 }
@@ -2352,6 +2367,27 @@ async function saveScript() {
 }
 
 // ── ACTIVITY LOG ──────────────────────────────────────────────────────
+// ── HELP ──────────────────────────────────────────────────────────────
+async function loadHelp() {
+  const el = document.getElementById('help-content');
+  const { data, error } = await sb.from('help_docs').select('content').eq('id', 'user-manual').maybeSingle();
+  if (error || !data) { el.innerHTML = '<p style="color:#f87171">Could not load manual.</p>'; return; }
+  // Simple markdown → HTML renderer (headings, bold, code, lists, hr)
+  const md = data.content
+    .replace(/^### (.+)$/gm, '<h3 style="color:#4ade80;margin:20px 0 6px">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 style="color:#86efac;margin:28px 0 8px;border-bottom:1px solid #2d5a27;padding-bottom:6px">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 style="color:#bbf7d0;margin:0 0 16px">$1</h1>')
+    .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #2d5a27;margin:20px 0">')
+    .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#bbf7d0">$1</strong>')
+    .replace(/`([^`]+)`/g, '<code style="background:#1a2e1a;color:#86efac;padding:1px 5px;border-radius:3px;font-size:13px">$1</code>')
+    .replace(/```([\s\S]*?)```/g, '<pre style="background:#1a2e1a;padding:12px;border-radius:6px;font-size:12px;color:#86efac;overflow-x:auto;margin:10px 0">$1</pre>')
+    .replace(/^- (.+)$/gm, '<li style="margin:3px 0">$1</li>')
+    .replace(/(<li[\s\S]*?<\/li>)/g, '<ul style="padding-left:20px;margin:8px 0">$1</ul>')
+    .replace(/\n\n/g, '</p><p style="margin:8px 0">')
+    .replace(/\n/g, '<br>');
+  el.innerHTML = `<p style="margin:8px 0">${md}</p>`;
+}
+
 async function loadActivityLog() {
   const typeFilter = document.getElementById('log-type-filter')?.value;
   let q = sb.from('activity_log')
@@ -3738,6 +3774,18 @@ async function crDecision(id, status, direction) {
   const updates = { status, reviewed_at: new Date().toISOString() };
   if (direction) updates.approved_direction = direction;
   await sb.from('content_review_candidates').update(updates).eq('id', id);
+
+  // Send cluster back to Discovery when marked Needs research
+  if (status === 'Needs research') {
+    const { data: candidate } = await sb.from('content_review_candidates').select('cluster_id').eq('id', id).maybeSingle();
+    if (candidate?.cluster_id) {
+      await sb.from('discovery_clusters').update({
+        status: 'Pattern detected',
+        reviewer_status: 'Needs research — sent back',
+      }).eq('id', candidate.cluster_id);
+    }
+  }
+
   toast(`Status updated: ${status}`);
   loadContentReview();
 }
