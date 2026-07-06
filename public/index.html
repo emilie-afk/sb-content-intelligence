@@ -742,8 +742,15 @@ tbody tr:hover { background: #fafffe; }
         <h1>Help & User Manual</h1>
         <p>How to use this dashboard</p>
       </div>
-      <div id="help-content" style="max-width:760px;line-height:1.7;color:#1a1a2e;font-size:14px">
-        <p style="color:#94a3b8">Loading…</p>
+      <div style="display:flex;gap:32px;align-items:flex-start">
+        <!-- TOC sidebar -->
+        <div id="help-toc" style="width:200px;flex-shrink:0;position:sticky;top:24px;background:#f0f7f0;border-radius:10px;padding:16px;font-size:13px;line-height:1.8">
+          <p style="color:#94a3b8;font-size:12px">Loading…</p>
+        </div>
+        <!-- Content -->
+        <div id="help-content" style="flex:1;min-width:0;line-height:1.7;color:#1a1a2e;font-size:14px">
+          <p style="color:#94a3b8">Loading…</p>
+        </div>
       </div>
     </div>
 
@@ -800,9 +807,16 @@ tbody tr:hover { background: #fafffe; }
           <option value="">All platforms</option>
           <option>TikTok</option><option>Instagram</option><option>Facebook</option><option>YouTube</option>
         </select>
-        <select class="filter-select" id="disc-status-filter" onchange="loadDiscovery()">
-          <option value="">All statuses</option>
-          <option>Collecting</option><option>Pattern detected</option><option>Content review ready</option><option>Keep watching</option><option>Mention only</option>
+        <select class="filter-select" id="disc-section-filter" onchange="filterDiscBySection(this.value)">
+          <option value="">All sections</option>
+          <option value="ready">✅ Ready for Content Review</option>
+          <option value="questions">❓ Repeated Audience Questions</option>
+          <option value="manual">✍️ Manual Submissions</option>
+          <option value="owned">💬 Owned Comment Follow-ups</option>
+          <option value="claims">🔬 New Tips / Claims to Verify</option>
+          <option value="emerging">📈 Emerging Topics</option>
+          <option value="recurring">🔁 Audience Recurring</option>
+          <option value="collecting">📡 Collecting</option>
         </select>
         <button class="btn btn-secondary" onclick="loadDiscovery()">↺ Refresh</button>
         <button class="btn btn-secondary" id="maintenance-btn" onclick="runMaintenance()" title="Re-run qualification checks on all existing clusters">⚙️ Run Maintenance</button>
@@ -2369,14 +2383,25 @@ async function saveScript() {
 // ── ACTIVITY LOG ──────────────────────────────────────────────────────
 // ── HELP ──────────────────────────────────────────────────────────────
 async function loadHelp() {
-  const el = document.getElementById('help-content');
+  const el  = document.getElementById('help-content');
+  const toc = document.getElementById('help-toc');
   const { data, error } = await sb.from('help_docs').select('content').eq('id', 'user-manual').maybeSingle();
   if (error || !data) { el.innerHTML = '<p style="color:#f87171">Could not load manual.</p>'; return; }
-  // Simple markdown → HTML renderer (headings, bold, code, lists, hr)
+
+  // Build slug from heading text
+  const slug = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+  // Collect h2/h3 headings for TOC before rendering
+  const tocItems = [];
+  data.content.replace(/^(#{2,3}) (.+)$/gm, (_, hashes, text) => {
+    tocItems.push({ level: hashes.length, text: text.replace(/[*`]/g, ''), id: slug(text) });
+  });
+
+  // Render markdown → HTML with anchor IDs on headings
   const md = data.content
-    .replace(/^### (.+)$/gm, '<h3 style="color:#1a5c2a;margin:20px 0 6px">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 style="color:#1a2e1a;margin:28px 0 8px;border-bottom:2px solid #c8e6c9;padding-bottom:6px">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 style="color:#1a2e1a;margin:0 0 16px">$1</h1>')
+    .replace(/^### (.+)$/gm, (_, t) => `<h3 id="${slug(t)}" style="color:#1a5c2a;margin:20px 0 6px;scroll-margin-top:16px">${t}</h3>`)
+    .replace(/^## (.+)$/gm,  (_, t) => `<h2 id="${slug(t)}" style="color:#1a2e1a;margin:32px 0 8px;border-bottom:2px solid #c8e6c9;padding-bottom:6px;scroll-margin-top:16px">${t}</h2>`)
+    .replace(/^# (.+)$/gm,   (_, t) => `<h1 id="${slug(t)}" style="color:#1a2e1a;margin:0 0 16px;scroll-margin-top:16px">${t}</h1>`)
     .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #c8e6c9;margin:20px 0">')
     .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#1a2e1a">$1</strong>')
     .replace(/`([^`]+)`/g, '<code style="background:#e8f5e9;color:#1a5c2a;padding:1px 5px;border-radius:3px;font-size:13px">$1</code>')
@@ -2386,6 +2411,19 @@ async function loadHelp() {
     .replace(/\n\n/g, '</p><p style="margin:8px 0;color:#333">')
     .replace(/\n/g, '<br>');
   el.innerHTML = `<p style="margin:8px 0;color:#333">${md}</p>`;
+
+  // Render TOC
+  toc.innerHTML = `
+    <div style="font-weight:700;color:#1a2e1a;margin-bottom:10px;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">Contents</div>
+    ${tocItems.map(item => `
+      <div style="padding-left:${item.level === 3 ? '12px' : '0'}">
+        <a href="#${item.id}"
+           onclick="document.getElementById('${item.id}')?.scrollIntoView({behavior:'smooth'});return false;"
+           style="color:${item.level === 2 ? '#1a5c2a' : '#555'};text-decoration:none;font-weight:${item.level === 2 ? '600' : '400'};font-size:${item.level === 2 ? '12.5px' : '12px'};display:block;padding:2px 0;line-height:1.4"
+           onmouseover="this.style.color='#4CAF50'" onmouseout="this.style.color='${item.level === 2 ? '#1a5c2a' : '#555'}'">
+          ${item.text}
+        </a>
+      </div>`).join('')}`;
 }
 
 async function loadActivityLog() {
@@ -2987,7 +3025,7 @@ function setDiscMode(mode, btn) {
 async function loadDiscovery() {
   const plant    = document.getElementById('disc-plant-filter')?.value;
   const platform = document.getElementById('disc-platform-filter')?.value;
-  const status   = document.getElementById('disc-status-filter')?.value;
+
 
   let q = sb.from('discovery_clusters')
     .select(`id,title,summary,plant_or_product,primary_question,
@@ -3003,7 +3041,6 @@ async function loadDiscovery() {
     .limit(150);
   if (plant)    q = q.ilike('plant_or_product', `%${plant}%`);
   if (platform) q = q.contains('platforms', [platform]);
-  if (status)   q = q.eq('status', status);
 
   const { data, error } = await q;
   if (error) {
@@ -3195,30 +3232,78 @@ function renderDiscoverySections(all) {
     const isCollapsed = collapsed[sec.id];
     const shown  = isCollapsed ? [] : items.slice(0, limit);
     const hasMore = items.length > limit;
-    const countColor = items.length ? '#e2e8f0' : '#4b5563';
 
     return `
     <div class="disc-section" id="disc-sec-${sec.id}" style="margin-bottom:24px">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;cursor:pointer" onclick="toggleDiscSection('${sec.id}')">
-        <span style="font-size:16px">${sec.icon}</span>
-        <div style="flex:1">
-          <span style="font-size:15px;font-weight:700;color:#e2e8f0">${sec.title}</span>
-          ${items.length ? '' : `<span style="font-size:11px;color:#4b5563;margin-left:6px">empty</span>`}
-          <span style="margin-left:6px;background:${items.length?'#1e3a5f':'#1e293b'};color:${countColor};border-radius:10px;padding:1px 8px;font-size:11px;font-weight:600">${items.length}</span>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer" onclick="toggleDiscSection('${sec.id}')">
+          <span style="font-size:16px">${sec.icon}</span>
+          <span style="font-size:14px;font-weight:700;color:#1a2e1a">${sec.title}</span>
+          <span style="background:${items.length?'#c8e6c9':'#e5e7eb'};color:${items.length?'#1a5c2a':'#888'};border-radius:10px;padding:1px 8px;font-size:11px;font-weight:600">${items.length}</span>
+          <span style="color:#aaa;font-size:12px">${isCollapsed?'▶':'▾'}</span>
         </div>
-        <span style="color:#4b5563;font-size:13px">${isCollapsed?'▶':'▾'}</span>
+        ${!isCollapsed && items.length ? `
+          <input type="text" placeholder="Filter…"
+            style="border:1px solid #ddd;border-radius:6px;padding:4px 8px;font-size:12px;width:160px;color:#333;outline:none"
+            oninput="filterDiscSection('${sec.id}', this.value)"
+            onclick="event.stopPropagation()">
+        ` : ''}
       </div>
       ${!isCollapsed && items.length ? `
-        <div style="font-size:12px;color:#64748b;margin-bottom:10px;margin-left:26px">${sec.desc}</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-left:0">
-          ${shown.map(discClusterCard).join('')}
+        <div style="font-size:12px;color:#888;margin-bottom:10px;margin-left:24px">${sec.desc}</div>
+        <div id="disc-grid-${sec.id}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
+          ${shown.map(c => `<div data-search="${esc((c.title+' '+(c.plant_or_product||'')+' '+(c.summary||'')).toLowerCase())}">${discClusterCard(c)}</div>`).join('')}
         </div>
         ${hasMore && !isCollapsed ? `<button class="btn btn-secondary" style="margin-top:10px;font-size:12px" onclick="expandDiscSection('${sec.id}',${items.length})">Show all ${items.length} →</button>` : ''}
       ` : ''}
-      ${!isCollapsed && !items.length ? `<div style="color:#4b5563;font-size:13px;padding:12px 0 4px 26px;font-style:italic">${sec.empty}</div>` : ''}
-      <div style="border-top:1px solid #1e293b;margin-top:14px"></div>
+      ${!isCollapsed && !items.length ? `<div style="color:#aaa;font-size:13px;padding:8px 0 4px 24px;font-style:italic">${sec.empty}</div>` : ''}
+      <div style="border-top:1px solid #e5e7eb;margin-top:14px"></div>
     </div>`;
   }).join('');
+}
+
+function filterDiscSection(id, query) {
+  const grid = document.getElementById('disc-grid-' + id);
+  if (!grid) return;
+  const q = query.toLowerCase();
+  grid.querySelectorAll('[data-search]').forEach(wrapper => {
+    wrapper.style.display = (!q || wrapper.dataset.search.includes(q)) ? '' : 'none';
+  });
+}
+
+const DISC_SECTION_FILTERS = {
+  ready:     c => ['Pattern detected','Content review ready'].includes(c.status),
+  questions: c => (c.question_count||0) >= 1 && c.status !== 'Mention only',
+  manual:    c => (c.manual_signal_count||0) >= 1 && c.status !== 'Mention only',
+  owned:     c => (c.owned_comment_signal_count||0) >= 1,
+  claims:    c => ['New tip or claim','New contradiction'].includes(c.novelty_status) && c.status !== 'Mention only',
+  emerging:  c => (c.previous_mention_count||0) > 0 && (c.recent_mention_count||0) >= (c.previous_mention_count||0) * 1.5 && !['Pattern detected','Content review ready'].includes(c.status),
+  recurring: c => c.audience_recurring_boolean && !['Pattern detected','Content review ready'].includes(c.status),
+  collecting:c => c.status === 'Collecting' && !(c.manual_signal_count||0) && !(c.question_count||0) && !c.audience_recurring_boolean,
+};
+
+function filterDiscBySection(sectionId) {
+  const all = window._discClusters || [];
+  const filtered = sectionId ? all.filter(DISC_SECTION_FILTERS[sectionId] || (() => true)) : all;
+  if (_discMode === 'sections') {
+    if (!sectionId) {
+      // Reset — show all sections normally
+      window._discCollapsed = {};
+      renderDiscoverySections(all);
+    } else {
+      // Collapse all sections except the selected one
+      const allIds = ['ready','questions','manual','owned','claims','emerging','recurring','collecting'];
+      window._discCollapsed = Object.fromEntries(allIds.map(id => [id, id !== sectionId]));
+      renderDiscoverySections(all);
+      setTimeout(() => document.getElementById('disc-sec-' + sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    }
+  } else {
+    // All mode — re-render flat grid with filtered clusters
+    const grid = document.getElementById('discovery-clusters-grid');
+    if (grid) grid.innerHTML = filtered.length
+      ? filtered.map(c => `<div data-search="${esc((c.title+' '+(c.plant_or_product||'')+' '+(c.summary||'')).toLowerCase())}">${discClusterCard(c)}</div>`).join('')
+      : `<div style="color:#888;padding:40px;text-align:center;grid-column:1/-1">No clusters in this section.</div>`;
+  }
 }
 
 window._discCollapsed = {};
@@ -3243,8 +3328,8 @@ function expandDiscSection(id, total) {
   };
   const filter = SECTIONS[id] || (() => true);
   const items = all.filter(filter);
-  const cardsEl = sec.querySelector('div[style*="grid-template-columns"]');
-  if (cardsEl) cardsEl.innerHTML = items.map(discClusterCard).join('');
+  const cardsEl = document.getElementById('disc-grid-' + id);
+  if (cardsEl) cardsEl.innerHTML = items.map(c => `<div data-search="${esc((c.title+' '+(c.plant_or_product||'')+' '+(c.summary||'')).toLowerCase())}">${discClusterCard(c)}</div>`).join('');
   const moreBtn = sec.querySelector('button[onclick*="expandDiscSection"]');
   if (moreBtn) moreBtn.remove();
 }
@@ -3797,12 +3882,12 @@ async function clusterAllSignals() {
   btn.disabled = true;
   btn.textContent = '🔍 Loading signals…';
 
-  // Only fetch signals that haven't been processed yet (status = New)
-  // Already-processed signals (Clustered, Watch, Mention only, Noise, etc.) are excluded
+  // Fetch all signals that haven't been clustered yet — includes New, Needs cleanup, Needs scoring
+  // Excludes terminal statuses: Clustered, Watch, Mention only, Noise
   const { data: allSignals } = await sb
     .from('signals')
     .select('id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission')
-    .eq('status', 'New')
+    .not('status', 'in', '("Clustered","Watch","Mention only","Noise")')
     .order('created_at', { ascending: true })
     .limit(200);
 
