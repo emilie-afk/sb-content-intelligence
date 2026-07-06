@@ -3274,7 +3274,7 @@ async function openDiscoveryPanel(clusterId) {
     </div>
     ${cluster.summary ? `<p style="font-size:13.5px;line-height:1.6;color:#ccc;margin-bottom:16px">${esc(cluster.summary)}</p>` : ''}
     ${cluster.primary_question ? `<div style="background:#1e293b;border-radius:6px;padding:10px 12px;margin-bottom:16px"><span style="font-size:12px;color:#94a3b8">Primary question:</span><div style="font-style:italic;margin-top:4px">"${esc(cluster.primary_question)}"</div></div>` : ''}
-    ${wording.length ? `<div style="margin-bottom:12px"><div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Audience wording</div><div style="display:flex;flex-wrap:wrap;gap:6px">${wording.map(w => `<span style="background:#1e293b;border-radius:12px;padding:3px 10px;font-size:12px;font-style:italic">"${esc(w)}"</span>`).join('')}</div></div>` : ''}
+    ${wording.length ? `<div style="margin-bottom:12px"><div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Audience wording</div><div style="display:flex;flex-wrap:wrap;gap:6px">${wording.map(w => `<span style="background:#1e293b;border-radius:12px;padding:3px 10px;font-size:12px;font-style:italic;color:#e2e8f0">"${esc(w)}"</span>`).join('')}</div></div>` : ''}
     ${problems.length ? `<div style="margin-bottom:12px"><div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Problems mentioned</div>${problems.map(p => `<div style="font-size:13px;color:#fbbf24">• ${esc(p)}</div>`).join('')}</div>` : ''}
     ${tips.length ? `<div style="margin-bottom:12px"><div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Tips &amp; claims</div>${tips.map(t => `<div style="font-size:13px;color:#34d399">• ${esc(t)}</div>`).join('')}</div>` : ''}
     <div style="display:flex;gap:20px;font-size:12px;color:#9ca3af;margin-bottom:16px;flex-wrap:wrap">
@@ -3655,7 +3655,7 @@ async function loadContentReview() {
       ${c.what_people_are_saying ? `<p style="font-size:13px;line-height:1.6;color:#ccc;margin-bottom:10px">${esc(c.what_people_are_saying)}</p>` : ''}
 
       <!-- Audience wording chips -->
-      ${wording.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">${wording.map(w => `<span style="background:#1e293b;border-radius:12px;padding:3px 10px;font-size:12px;font-style:italic">"${esc(w)}"</span>`).join('')}</div>` : ''}
+      ${wording.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">${wording.map(w => `<span style="background:#1e293b;border-radius:12px;padding:3px 10px;font-size:12px;font-style:italic;color:#e2e8f0">"${esc(w)}"</span>`).join('')}</div>` : ''}
 
       <!-- What's new -->
       ${c.what_appears_new ? `<div style="margin-bottom:8px"><span style="font-size:12px;color:#94a3b8">What's new: </span><span style="font-size:13px">${esc(c.what_appears_new)}</span></div>` : ''}
@@ -3671,7 +3671,7 @@ async function loadContentReview() {
       <!-- Possible directions -->
       ${dirs.length ? `<div style="margin-bottom:12px">
         <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Possible directions</div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">${dirs.map(d => `<span style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:3px 10px;font-size:12px">${esc(d)}</span>`).join('')}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">${dirs.map(d => `<span style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:3px 10px;font-size:12px;color:#e2e8f0">${esc(d)}</span>`).join('')}</div>
       </div>` : ''}
 
       <!-- Claims / contradictions flags -->
