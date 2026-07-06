@@ -246,7 +246,7 @@ exports.handler = async (event) => {
         .eq("active", true)
         .order("severity");
       prompt = buildScriptPrompt(data, rules || []);
-      result = await callClaude(prompt);
+      result = await callClaude(prompt, 2048);
 
       // FEEDBACK LOOP: persist Required violations as lessons so the script
       // generator stops repeating the same mistakes. Stored in settings
