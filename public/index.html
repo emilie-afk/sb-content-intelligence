@@ -1599,10 +1599,34 @@ async function deleteScraperCleanupSignals() {
   const ids = window._scraperCleanupIds || [];
   if (!ids.length) return;
   if (!confirm(`Delete ${ids.length} Instagram Scraper "Needs cleanup" signal${ids.length>1?'s':''}? This cannot be undone.`)) return;
-  const { error } = await sb.from('signals').delete().in('id', ids);
-  if (error) { toast('❌ Delete failed: ' + error.message); return; }
-  toast(`🗑️ Deleted ${ids.length} scraper signal${ids.length>1?'s':''}`);
-  loadInbox();
+
+  // Show working state in the callout
+  const callout = document.getElementById('inbox-cleanup-callout');
+  if (callout) callout.innerHTML += `<div id="scraper-delete-status" style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:12px 16px;margin-bottom:8px;font-size:13px;color:#7f1d1d">⏳ Deleting ${ids.length} signals…</div>`;
+
+  const { error, count } = await sb.from('signals').delete({ count: 'exact' }).in('id', ids);
+  const statusDiv = document.getElementById('scraper-delete-status');
+
+  if (error) {
+    if (statusDiv) statusDiv.innerHTML = `❌ Delete failed: ${error.message}`;
+    toast('❌ Delete failed: ' + error.message, true);
+    return;
+  }
+
+  // Show persistent success banner before reloading
+  if (statusDiv) {
+    statusDiv.style.background = '#f0fdf4';
+    statusDiv.style.border = '1px solid #86efac';
+    statusDiv.style.color = '#14532d';
+    statusDiv.innerHTML = `✅ Deleted ${ids.length} scraper signal${ids.length>1?'s':''}. Reloading…`;
+  }
+
+  // Reset status filter so user sees remaining signals, not empty table
+  const statusFilter = document.getElementById('inbox-status-filter');
+  if (statusFilter) statusFilter.value = '';
+
+  window._scraperCleanupIds = [];
+  setTimeout(() => loadInbox(), 1200);
 }
 
 function openEditSignalModal(id) {
