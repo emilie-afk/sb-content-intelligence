@@ -2374,18 +2374,18 @@ async function loadHelp() {
   if (error || !data) { el.innerHTML = '<p style="color:#f87171">Could not load manual.</p>'; return; }
   // Simple markdown → HTML renderer (headings, bold, code, lists, hr)
   const md = data.content
-    .replace(/^### (.+)$/gm, '<h3 style="color:#4ade80;margin:20px 0 6px">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 style="color:#86efac;margin:28px 0 8px;border-bottom:1px solid #2d5a27;padding-bottom:6px">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 style="color:#bbf7d0;margin:0 0 16px">$1</h1>')
-    .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #2d5a27;margin:20px 0">')
-    .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#bbf7d0">$1</strong>')
-    .replace(/`([^`]+)`/g, '<code style="background:#1a2e1a;color:#86efac;padding:1px 5px;border-radius:3px;font-size:13px">$1</code>')
-    .replace(/```([\s\S]*?)```/g, '<pre style="background:#1a2e1a;padding:12px;border-radius:6px;font-size:12px;color:#86efac;overflow-x:auto;margin:10px 0">$1</pre>')
-    .replace(/^- (.+)$/gm, '<li style="margin:3px 0">$1</li>')
+    .replace(/^### (.+)$/gm, '<h3 style="color:#1a5c2a;margin:20px 0 6px">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 style="color:#1a2e1a;margin:28px 0 8px;border-bottom:2px solid #c8e6c9;padding-bottom:6px">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 style="color:#1a2e1a;margin:0 0 16px">$1</h1>')
+    .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #c8e6c9;margin:20px 0">')
+    .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#1a2e1a">$1</strong>')
+    .replace(/`([^`]+)`/g, '<code style="background:#e8f5e9;color:#1a5c2a;padding:1px 5px;border-radius:3px;font-size:13px">$1</code>')
+    .replace(/```([\s\S]*?)```/g, '<pre style="background:#e8f5e9;padding:12px;border-radius:6px;font-size:12px;color:#1a5c2a;overflow-x:auto;margin:10px 0">$1</pre>')
+    .replace(/^- (.+)$/gm, '<li style="margin:3px 0;color:#333">$1</li>')
     .replace(/(<li[\s\S]*?<\/li>)/g, '<ul style="padding-left:20px;margin:8px 0">$1</ul>')
-    .replace(/\n\n/g, '</p><p style="margin:8px 0">')
+    .replace(/\n\n/g, '</p><p style="margin:8px 0;color:#333">')
     .replace(/\n/g, '<br>');
-  el.innerHTML = `<p style="margin:8px 0">${md}</p>`;
+  el.innerHTML = `<p style="margin:8px 0;color:#333">${md}</p>`;
 }
 
 async function loadActivityLog() {
