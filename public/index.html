@@ -1500,9 +1500,10 @@ async function loadInbox() {
     if (manualDelta) return manualDelta;
     return (priorityRank[b.priority] || 0) - (priorityRank[a.priority] || 0);
   });
-  // Separate Needs cleanup manual submissions — show them as a callout above the table
-  const needsCleanup = data.filter(s => s.status === 'Needs cleanup' && s.is_manual_submission);
-  const rest = data.filter(s => !(s.status === 'Needs cleanup' && s.is_manual_submission));
+  // Separate Needs cleanup signals — manual (fix UI) vs scraper (bulk delete)
+  const needsCleanup   = data.filter(s => s.status === 'Needs cleanup' && s.is_manual_submission);
+  const scraperCleanup = data.filter(s => s.status === 'Needs cleanup' && !s.is_manual_submission);
+  const rest           = data.filter(s => s.status !== 'Needs cleanup');
 
   let callout = '';
   if (needsCleanup.length) {
@@ -1527,6 +1528,19 @@ async function loadInbox() {
           </div>`).join('')}
       </div>`;
   }
+  // Scraper cleanup callout
+  if (scraperCleanup.length) {
+    const ids = JSON.stringify(scraperCleanup.map(s => s.id));
+    callout += `
+      <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:14px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:16px">
+        <div>
+          <span style="font-weight:700;color:#7f1d1d">🤖 ${scraperCleanup.length} Instagram Scraper signal${scraperCleanup.length>1?'s':''} need cleanup</span>
+          <span style="font-size:12px;color:#991b1b;margin-left:8px">AI couldn't route these — safe to delete</span>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="deleteScraperCleanupSignals(${ids})">🗑️ Delete All</button>
+      </div>`;
+  }
+
   document.getElementById('inbox-cleanup-callout').innerHTML = callout;
 
   tbody.innerHTML = rest.map(s => `
@@ -1576,6 +1590,15 @@ async function deleteSignal(id) {
   if (!confirm('Delete this signal permanently?')) return;
   await sb.from('signals').delete().eq('id', id);
   toast('Signal deleted');
+  loadInbox();
+}
+
+async function deleteScraperCleanupSignals(ids) {
+  if (!ids?.length) return;
+  if (!confirm(`Delete ${ids.length} Instagram Scraper "Needs cleanup" signal${ids.length>1?'s':''}? This cannot be undone.`)) return;
+  const { error } = await sb.from('signals').delete().in('id', ids);
+  if (error) { toast('❌ Delete failed: ' + error.message); return; }
+  toast(`🗑️ Deleted ${ids.length} scraper signal${ids.length>1?'s':''}`);
   loadInbox();
 }
 
