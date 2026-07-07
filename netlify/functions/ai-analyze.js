@@ -316,6 +316,14 @@ exports.handler = async (event) => {
       prompt = buildScriptGenPrompt(data, rules || [], target, lessons, learningMemory);
       const gen = await callClaude(prompt, 2048);
 
+      // Ensure the voiceover starts with the hook (safety net if AI forgot)
+      if (gen.opening_hook && gen.full_voiceover_script) {
+        const vo = gen.full_voiceover_script.trimStart();
+        if (!vo.startsWith(gen.opening_hook)) {
+          gen.full_voiceover_script = gen.opening_hook + " " + vo;
+        }
+      }
+
       // Auto duration: ~150 words/min ≈ 2.5 words/sec of voiceover
       const words = (gen.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
       const estSecs = words ? Math.max(5, Math.round(words / 2.5)) : target;
@@ -327,6 +335,7 @@ exports.handler = async (event) => {
         script_version:             "v1",
         script_type:                ALLOWED_SCRIPT_TYPES.includes(gen.script_type) ? gen.script_type : "TikTok / Reel short script",
         opening_hook:               gen.opening_hook || null,
+        thumbnail_title:            gen.thumbnail_title || null,
         full_voiceover_script:      gen.full_voiceover_script || null,
         on_screen_text:             gen.on_screen_text || null,
         shot_list:                  gen.shot_list || null,
@@ -385,6 +394,14 @@ exports.handler = async (event) => {
       prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null, data.hook_pattern || null, data.force_fresh || false);
       const gen = await callClaude(prompt, 2048);
 
+      // Safety net: ensure hook is literally the first line of the voiceover
+      if (gen.opening_hook && gen.full_voiceover_script) {
+        const vo = gen.full_voiceover_script.trimStart();
+        if (!vo.startsWith(gen.opening_hook)) {
+          gen.full_voiceover_script = gen.opening_hook + " " + vo;
+        }
+      }
+
       const words   = (gen.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
       const estSecs = words ? Math.max(5, Math.round(words / 2.5)) : target;
       // v1 → v2 → v3 …
@@ -397,6 +414,7 @@ exports.handler = async (event) => {
         script_version:             nextVersion,
         script_type:                ALLOWED_SCRIPT_TYPES.includes(gen.script_type) ? gen.script_type : (ALLOWED_SCRIPT_TYPES.includes(orig.script_type) ? orig.script_type : "TikTok / Reel short script"),
         opening_hook:               gen.opening_hook || null,
+        thumbnail_title:            gen.thumbnail_title || null,
         full_voiceover_script:      gen.full_voiceover_script || null,
         on_screen_text:             gen.on_screen_text || null,
         shot_list:                  gen.shot_list || null,
@@ -1432,11 +1450,12 @@ const ALLOWED_SCRIPT_TYPES = [
 // v1 passes review instead of needing a revision round.
 const SCRIPT_PREFLIGHT_CHECKLIST = `
 PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing:
-1. CTA: every script MUST end with a clear call to action matched to viewer intent (e.g. "Save this before you water." / "Comment which one yours looks like.").
-2. Caption: the "caption" field MUST be filled in — it doubles as the cover/text overlay.
-3. Visual opening: the shot list MUST specify what is on screen in the first 2 seconds, and it must show the plant/symptom/comparison immediately.
-4. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
-5. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".`;
+1. Hook is the first line: the "full_voiceover_script" MUST open with the exact text from "opening_hook". The hook is not a separate intro card — it IS the first spoken sentence.
+2. CTA: every script MUST end with a clear call to action matched to viewer intent (e.g. "Save this before you water." / "Comment which one yours looks like.").
+3. Caption: the "caption" field MUST be filled in — it doubles as the cover/text overlay.
+4. Visual opening: the shot list MUST specify what is on screen in the first 2 seconds, and it must show the plant/symptom/comparison immediately.
+5. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
+6. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".`;
 
 function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory) {
   const rulesText = rules.map(r =>
@@ -1501,6 +1520,7 @@ Return ONLY valid JSON:
   "platform": "TikTok | Instagram | YouTube | Facebook",
   "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | UGC-style script",
   "opening_hook": "first line of the video, under 12 words",
+  "thumbnail_title": "bold 3-6 word text that appears on the video thumbnail cover — grabs attention at a glance",
   "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
   "on_screen_text": "text overlays, one per line",
   "shot_list": "Shot 1: … one per line",
@@ -1571,6 +1591,7 @@ Return ONLY valid JSON:
   "platform": "TikTok | Instagram | YouTube | Facebook",
   "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | Caption-only variant | UGC-style script",
   "opening_hook": "first line of the video, under 10 words",
+  "thumbnail_title": "bold 3-6 word text that appears on the video thumbnail cover — grabs attention at a glance",
   "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
   "on_screen_text": "text overlays, one per line",
   "shot_list": "Shot 1: ... one per line",
@@ -1634,6 +1655,7 @@ Return ONLY valid JSON:
   "platform": "TikTok | Instagram | YouTube | Facebook",
   "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | UGC-style script",
   "opening_hook": "first line of the video, under 12 words",
+  "thumbnail_title": "bold 3-6 word text that appears on the video thumbnail cover — grabs attention at a glance",
   "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
   "on_screen_text": "text overlays, one per line",
   "shot_list": "Shot 1: … one per line",
