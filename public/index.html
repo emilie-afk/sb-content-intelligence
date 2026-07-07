@@ -4098,20 +4098,27 @@ async function crApproveAndGenerate(id) {
 async function crDecision(id, status, direction) {
   const updates = { status, reviewed_at: new Date().toISOString() };
   if (direction) updates.approved_direction = direction;
-  await sb.from('content_review_candidates').update(updates).eq('id', id);
+  const { error: updErr } = await sb.from('content_review_candidates').update(updates).eq('id', id);
+  if (updErr) { toast('❌ Update failed: ' + updErr.message, true); return; }
 
   // Send cluster back to Discovery when marked Needs research
   if (status === 'Needs research') {
-    const { data: candidate } = await sb.from('content_review_candidates').select('cluster_id').eq('id', id).maybeSingle();
+    const { data: candidate, error: fetchErr } = await sb.from('content_review_candidates').select('cluster_id').eq('id', id).maybeSingle();
+    if (fetchErr) { toast('❌ Could not fetch cluster: ' + fetchErr.message, true); return; }
     if (candidate?.cluster_id) {
-      await sb.from('discovery_clusters').update({
+      const { error: clErr } = await sb.from('discovery_clusters').update({
         status: 'Pattern detected',
         reviewer_status: 'Needs research — sent back',
       }).eq('id', candidate.cluster_id);
+      if (clErr) { toast('❌ Could not update cluster: ' + clErr.message, true); return; }
+      toast('🔬 Sent back to Discovery for more research');
+    } else {
+      toast('⚠️ Candidate updated but no linked cluster found');
     }
+  } else {
+    toast(`Status updated: ${status}`);
   }
 
-  toast(`Status updated: ${status}`);
   loadContentReview();
 }
 
