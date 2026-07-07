@@ -2707,6 +2707,7 @@ async function viewScript(id) {
       <div><b>Status:</b> ${esc(s.review_status||'—')}</div>
     </div>
     ${s.opening_hook ? `<div style="background:#f8f9fa;padding:12px;border-radius:6px;margin-bottom:12px"><b>Hook:</b><br>${esc(s.opening_hook)}</div>` : ''}
+    ${s.thumbnail_title ? `<div style="background:#fef3c7;border:1px solid #fcd34d;padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:13px"><b>🖼 Thumbnail title:</b> <span style="font-weight:700;font-size:15px">${esc(s.thumbnail_title)}</span></div>` : ''}
     ${s.full_voiceover_script ? `<div style="margin-bottom:12px"><b>Script:</b><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:#f8f9fa;padding:12px;border-radius:6px">${esc(s.full_voiceover_script)}</pre></div>` : ''}
     ${s.cta ? `<div style="margin-bottom:12px"><b>CTA:</b> ${esc(s.cta)}</div>` : ''}
     ${s.caption ? `<div style="margin-bottom:12px"><b>Caption:</b><br><span style="font-size:13px">${esc(s.caption)}</span></div>` : ''}
