@@ -55,6 +55,9 @@ exports.handler = async (event) => {
   if (fetchErr || !script)
     return { statusCode: 404, headers, body: JSON.stringify({ error: "Script not found" }) };
 
+  if (script.review_status !== "Approved")
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Only Approved scripts can be sent to the sheet" }) };
+
   // ── Post to Apps Script web app ───────────────────────────────────────────
   try {
     // Ensure hook is the first line of the voiceover (safety net for older scripts)
