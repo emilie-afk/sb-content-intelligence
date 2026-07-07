@@ -13,6 +13,7 @@
 //   4. Type: Web app | Execute as: Me | Who has access: Anyone
 //   5. Click Deploy → copy the Web app URL
 //   6. In the dashboard → Scripts → ⚙ Calendar URL → paste → Save
+//   7. Add a Script Property: SCRIPT_SECRET → (same value as CALENDAR_SCRIPT_SECRET in Netlify)
 //
 // For a new year: deploy same script on the new year's sheet,
 // paste the new URL in the dashboard settings.
@@ -21,14 +22,26 @@
 var MONTHS = ['January','February','March','April','May','June',
               'July','August','September','October','November','December'];
 
+// ── Shared-secret guard ───────────────────────────────────────────────────────
+// The Netlify push-to-calendar function sends x-script-secret in the POST body.
+// Set SCRIPT_SECRET in Apps Script → Project Settings → Script Properties.
+function checkSecret(data) {
+  var expected = PropertiesService.getScriptProperties().getProperty('SCRIPT_SECRET');
+  if (!expected) return; // not configured — skip check (safe during initial setup)
+  if (data['x-script-secret'] !== expected) {
+    throw new Error('Unauthorized');
+  }
+}
 
 function doPost(e) {
   try {
     var data        = JSON.parse(e.postData ? e.postData.contents : '{}');
+    checkSecret(data);
     var title       = data.title       || '';
-    var style       = data.style       || '';
+    var content     = data.content     || ''; // thumbnail title or hook
     var script_text = data.script_text || '';
     var platform    = data.platform    || '';
+    var note        = data.note        || (platform ? 'Platform: ' + platform : '');
 
     if (!title) throw new Error('title is required');
 
@@ -52,12 +65,13 @@ function doPost(e) {
 
     // Write the row
     if (cols['no.'])         sheet.getRange(newRow, cols['no.']).setValue(nextNum);
-    if (cols['style'])       sheet.getRange(newRow, cols['style']).setValue(style);
     if (cols['title'])       sheet.getRange(newRow, cols['title']).setValue(title);
+    if (cols['content'])     sheet.getRange(newRow, cols['content']).setValue(content);
     if (cols['script'])      sheet.getRange(newRow, cols['script']).setValue(script_text);
-    if (cols['note'])        sheet.getRange(newRow, cols['note']).setValue(platform ? 'Platform: ' + platform : '');
+    if (cols['note'])        sheet.getRange(newRow, cols['note']).setValue(note);
     if (cols['status'])      sheet.getRange(newRow, cols['status']).setValue('');
     if (cols['link sample']) sheet.getRange(newRow, cols['link sample']).setValue('');
+    if (cols['script'])      sheet.getRange(newRow, cols['script']).setWrap(true);
 
     // Match row height to content (auto-resize the Script column row)
     sheet.setRowHeight(newRow, 21); // let it expand naturally with wrapping
@@ -122,9 +136,13 @@ function jsonResponse(obj) {
 }
 
 // ── GET: return all 2026 content entries for repetition checking ──────
-// Called by the dashboard's repetition check (no auth required — URL is secret)
+// Called by Netlify get-sheet-history; validates x-script-secret query parameter.
 function doGet(e) {
   try {
+    var expected = PropertiesService.getScriptProperties().getProperty('SCRIPT_SECRET');
+    if (expected && (!e.parameter || e.parameter['secret'] !== expected)) {
+      return jsonResponse({ success: false, error: 'Unauthorized' });
+    }
     var ss      = SpreadsheetApp.getActiveSpreadsheet();
     var entries = [];
 
