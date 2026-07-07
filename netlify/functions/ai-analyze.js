@@ -152,6 +152,17 @@ exports.handler = async (event) => {
         .single();
       if (insErr) throw new Error("Brief insert failed: " + insErr.message);
 
+      // Log AI brief generation
+      await supabase.from("activity_log").insert({
+        entity_type: "brief",
+        entity_id:   inserted.id,
+        entity_title: row.title,
+        action:      "AI generated brief",
+        old_value:   null,
+        new_value:   row.featured_product || null,
+        performed_by: null,
+      });
+
       result = { ...row, id: inserted.id };
 
     } else if (type === "revise_brief") {
@@ -191,6 +202,17 @@ exports.handler = async (event) => {
         .update(updates)
         .eq("id", orig.id);
       if (updErr) throw new Error("Brief revision update failed: " + updErr.message);
+
+      // Log AI brief revision
+      await supabase.from("activity_log").insert({
+        entity_type: "brief",
+        entity_id:   orig.id,
+        entity_title: updates.title || orig.title,
+        action:      "AI revised brief",
+        old_value:   null,
+        new_value:   "Rewritten from reviewer feedback",
+        performed_by: null,
+      });
 
       result = { ...orig, ...updates };
 
@@ -324,6 +346,23 @@ exports.handler = async (event) => {
         .single();
       if (insErr) throw new Error("Script insert failed: " + insErr.message);
 
+      // Log AI generation to activity_log (performed_by null = AI action)
+      // Fetch brief title so the log shows which brief triggered this
+      let briefTitle = null;
+      if (data.id) {
+        const { data: b } = await supabase.from("briefs").select("title").eq("id", data.id).maybeSingle();
+        briefTitle = b?.title || null;
+      }
+      await supabase.from("activity_log").insert({
+        entity_type:  "script",
+        entity_id:    inserted.id,
+        entity_title: row.script_title,
+        action:       "AI generated script",
+        old_value:    briefTitle ? `From brief: ${briefTitle}` : null,
+        new_value:    `${row.estimated_duration_seconds}s · ${row.platform} · v1`,
+        performed_by: null,
+      });
+
       result = { ...row, id: inserted.id, voiceover_words: words, target_duration_seconds: target };
 
     } else if (type === "revise_script") {
@@ -376,6 +415,17 @@ exports.handler = async (event) => {
         .select("id")
         .single();
       if (insErr) throw new Error("Revised script insert failed: " + insErr.message);
+
+      // Log AI revision to activity_log
+      await supabase.from("activity_log").insert({
+        entity_type: "script",
+        entity_id:   inserted.id,
+        entity_title: row.script_title,
+        action:      `AI revised script (${nextVersion})`,
+        old_value:   orig.script_version || "v1",
+        new_value:   `${nextVersion} · ${row.estimated_duration_seconds}s`,
+        performed_by: null,
+      });
 
       result = { ...row, id: inserted.id, voiceover_words: words };
 
