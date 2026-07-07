@@ -2781,12 +2781,32 @@ async function viewScript(id) {
   const el = document.getElementById('modal-view-content');
   el.innerHTML = `
     <h3 style="margin:0 0 12px">${esc(s.script_title)}</h3>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;font-size:13px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;font-size:13px">
       <div><b>Platform:</b> ${esc(s.platform||'—')}</div>
       <div><b>Type:</b> ${esc(s.script_type||'—')}</div>
       <div><b>Version:</b> ${esc(s.script_version||'v1')}</div>
       <div><b>Status:</b> ${esc(s.review_status||'—')}</div>
     </div>
+    ${(() => {
+      const words = (s.full_voiceover_script||'').trim().split(/\s+/).filter(Boolean).length;
+      const spokenSecs = Math.round(words / 2.5);
+      const target = s.estimated_duration_seconds || 0;
+      const ratio = target ? spokenSecs / target : 0;
+      // Risk levels: green ≤110%, yellow 110–130%, red >130%
+      const pct = target ? Math.round((spokenSecs / target) * 100) : null;
+      let badge = '';
+      if (target && ratio > 1.3) {
+        badge = `<span style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:3px 10px;border-radius:12px;font-weight:600;font-size:12px">⚠️ Runs ~${spokenSecs}s spoken — ${pct - 100}% over ${target}s target. Viewers may drop off.</span>`;
+      } else if (target && ratio > 1.1) {
+        badge = `<span style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d;padding:3px 10px;border-radius:12px;font-weight:600;font-size:12px">⏱ Runs ~${spokenSecs}s spoken — slightly over ${target}s target</span>`;
+      } else if (target) {
+        badge = `<span style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:3px 10px;border-radius:12px;font-weight:600;font-size:12px">✓ ~${spokenSecs}s spoken — on target</span>`;
+      }
+      return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+        <span style="font-size:13px;color:#555">${words} words · ~${spokenSecs}s at normal pace</span>
+        ${badge}
+      </div>`;
+    })()}
     ${s.opening_hook ? `<div style="background:#f8f9fa;padding:12px;border-radius:6px;margin-bottom:12px"><b>Hook:</b><br>${esc(s.opening_hook)}</div>` : ''}
     ${s.thumbnail_title ? `<div style="background:#fef3c7;border:1px solid #fcd34d;padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:13px"><b>🖼 Thumbnail title:</b> <span style="font-weight:700;font-size:15px">${esc(s.thumbnail_title)}</span></div>` : ''}
     ${s.full_voiceover_script ? `<div style="margin-bottom:12px"><b>Script:</b><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:#f8f9fa;padding:12px;border-radius:6px">${esc(s.full_voiceover_script)}</pre></div>` : ''}
