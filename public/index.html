@@ -675,9 +675,13 @@ tbody tr:hover { background: #fafffe; }
 
       <!-- All other scripts section -->
       <div>
-        <h2 style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+        <h2 style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           📄 All Scripts
           <span id="scripts-all-count" style="font-size:12px;font-weight:500;color:#555;background:#f3f4f6;padding:2px 8px;border-radius:12px"></span>
+          <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+            <a id="script-sheet-link" href="#" target="_blank" style="font-size:12px;font-weight:600;color:#fff;background:#16a34a;padding:5px 12px;border-radius:6px;text-decoration:none;white-space:nowrap">📊 Short Video Script Spreadsheet</a>
+            <button onclick="openScriptSheetSettings()" title="Update spreadsheet URL" style="background:#f3f4f6;border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:13px">⚙️</button>
+          </span>
         </h2>
         <div class="filters" style="margin-bottom:10px">
           <select class="filter-select" id="scripts-status-filter" onchange="loadScripts()">
@@ -1325,6 +1329,52 @@ const SUPABASE_ANON = typeof __SUPABASE_ANON__ !== 'undefined' ? __SUPABASE_ANON
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
+// ── SCRIPT SPREADSHEET CONFIG ─────────────────────────────────────────────────
+// Loaded from Supabase app_settings. Fallback keeps things working if fetch fails.
+let _scriptSheetConfig = {
+  base_url: { 2026: 'https://docs.google.com/spreadsheets/d/1iDg61cxy6oSxb8vL2AkaivTnQJuTVJY5bKIbtNBLHAQ/edit' },
+  gids: {
+    2026: { 1:543399107,2:1014332536,3:827394542,4:81707702,5:2020833859,6:917654142,
+            7:1509550029,8:1130813057,9:847982453,10:1941512612,11:768311302,12:1383995983 }
+  }
+};
+
+async function loadScriptSheetConfig() {
+  const { data } = await sb.from('app_settings').select('value').eq('id','script_sheet').maybeSingle();
+  if (data?.value) _scriptSheetConfig = data.value;
+}
+
+function getScriptSheetUrl(dateStr) {
+  const d = dateStr ? new Date(dateStr) : new Date();
+  const year = d.getFullYear();
+  const month = d.getMonth() + 1;
+  const base = _scriptSheetConfig.base_url?.[year] || _scriptSheetConfig.base_url?.[Math.max(...Object.keys(_scriptSheetConfig.base_url).map(Number))];
+  const gid  = _scriptSheetConfig.gids?.[year]?.[month];
+  if (!base) return '#';
+  return gid ? `${base}?gid=${gid}#gid=${gid}` : base;
+}
+
+function updateScriptSheetLink() {
+  const el = document.getElementById('script-sheet-link');
+  if (el) el.href = getScriptSheetUrl();
+}
+
+async function openScriptSheetSettings() {
+  const year = new Date().getFullYear();
+  const current = _scriptSheetConfig.base_url?.[year] || '';
+  const newUrl = prompt(`Short Video Script Spreadsheet URL for ${year}:\n(Paste the full Google Sheets URL)`, current);
+  if (!newUrl || newUrl === current) return;
+  const updated = { ..._scriptSheetConfig };
+  if (!updated.base_url) updated.base_url = {};
+  updated.base_url[year] = newUrl.split('?')[0].split('#')[0]; // strip params
+  const { error } = await sb.from('app_settings').upsert({ id: 'script_sheet', value: updated, updated_at: new Date().toISOString() });
+  if (error) { toast('❌ ' + error.message, true); return; }
+  _scriptSheetConfig = updated;
+  updateScriptSheetLink();
+  toast('✅ Spreadsheet link updated');
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 let currentUser = null;
 let userRole    = 'viewer';
 
@@ -1374,6 +1424,7 @@ async function loadUser(user) {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app').style.display = 'grid';
   document.getElementById('today-date').textContent = new Date().toLocaleDateString('en-US', {weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  loadScriptSheetConfig().then(updateScriptSheetLink);
   loadCommandCenter();
 }
 
@@ -2640,6 +2691,7 @@ function _scriptRow(s, showDelete) {
 }
 
 async function loadScripts() {
+  updateScriptSheetLink();
   const platform = document.getElementById('scripts-platform-filter')?.value;
   const statusFilter = document.getElementById('scripts-status-filter')?.value;
 
