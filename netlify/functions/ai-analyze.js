@@ -343,7 +343,7 @@ exports.handler = async (event) => {
 
       const target = Math.min(600, Math.max(5, Number(orig.estimated_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
-      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null, data.hook_pattern || null);
+      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null, data.hook_pattern || null, data.force_fresh || false);
       const gen = await callClaude(prompt, 2048);
 
       const words   = (gen.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
@@ -1454,7 +1454,7 @@ Return ONLY valid JSON:
 
 
 // ── SCRIPT REVISION PROMPT ────────────────────────────────────────────────────
-function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, humanNotes, hookPattern) {
+function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, humanNotes, hookPattern, forceFresh) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1465,6 +1465,62 @@ function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, h
   ).join("\n");
   const hookIdeas     = (feedback.hook_suggestions || []).map(h => `- "${h}"`).join("\n");
   const improvements  = (feedback.improvements || []).map(i => `- ${i}`).join("\n");
+
+  // Fresh rewrite mode: no brand check was run, user just wants a genuinely new take
+  if (forceFresh) {
+    return `You are writing a fresh new version of a short-form video script for Succulents Box, a succulent plant subscription company.
+The previous version is shown below as reference only — do NOT copy it. Write a meaningfully different script on the same topic.
+
+PREVIOUS SCRIPT (${orig.script_version || "v1"}) — for reference, do NOT reuse its hook or opening structure:
+Topic/title: ${orig.script_title || ""}
+Platform: ${orig.platform || ""}
+Previous hook (must be replaced): "${orig.opening_hook || ""}"
+Previous voiceover: ${orig.full_voiceover_script || ""}
+CTA: ${orig.cta || ""}
+
+${humanNotes ? `EDITOR DIRECTION (prioritize these above all else):\n${humanNotes}\n` : ""}
+TARGET DURATION: ${targetSecs} seconds — voiceover must be about ${wordBudget} words (±15%).
+
+BRAND RULES (follow all Required rules, never do Forbidden ones):
+${rulesText || "No rules loaded"}
+${SCRIPT_PREFLIGHT_CHECKLIST}
+${lessonsBlock(lessons)}
+Writing guidance:
+
+HOOK (write a brand new hook - do not use or paraphrase the previous one):
+${hookPattern ? `REQUESTED HOOK PATTERN: Use the "${hookPattern}" pattern specifically.\n` : "Pick whichever pattern creates the strongest hook for this topic."}
+Apply ONE of these proven TikTok hook patterns:
+1. SYMPTOM FIRST - lead with what the viewer already sees, not the topic name.
+   Good: "Your succulent leaves are getting mushy and you don't know why."
+2. CHALLENGE A BELIEF - counterintuitive opener.
+   Good: "The more you water a succulent, the faster it dies."
+3. STAKES / URGENCY - something is at risk right now.
+   Good: "If you don't fix this before summer, your plant won't make it."
+4. BOLD CLAIM - specific, surprising payoff.
+   Good: "Three signs your succulent is begging you to stop watering."
+5. MID-ACTION START - drop into the middle of something.
+   Good: "Wait - before you water that, look at the soil first."
+Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In this video", must name a problem or make a bold claim, no em dashes.
+
+Script: casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
+Structure: hook -> problem/payoff -> 2-3 concrete tips or steps -> CTA.
+
+Return ONLY valid JSON:
+{
+  "script_title": "short internal title",
+  "platform": "${orig.platform || "TikTok"}",
+  "script_type": "${orig.script_type || "TikTok / Reel short script"}",
+  "opening_hook": "first line of the video, under 10 words",
+  "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
+  "on_screen_text": "text overlays, one per line",
+  "shot_list": "Shot 1: ... one per line",
+  "broll_notes": "b-roll / close-up suggestions",
+  "product_mention": "how/when the product is mentioned, or null",
+  "cta": "closing call to action",
+  "caption": "post caption, 1-2 sentences",
+  "hashtags": "#space #separated #hashtags"
+}`;
+  }
 
   return `You are revising a short-form video script for Succulents Box, a succulent plant subscription company.
 A brand reviewer flagged issues in the current version. Write an improved version that fixes EVERY flagged issue while keeping what already works.
