@@ -343,7 +343,7 @@ exports.handler = async (event) => {
 
       const target = Math.min(600, Math.max(5, Number(orig.estimated_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
-      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null);
+      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null, data.hook_pattern || null);
       const gen = await callClaude(prompt, 2048);
 
       const words   = (gen.full_voiceover_script || "").trim().split(/\s+/).filter(Boolean).length;
@@ -378,6 +378,27 @@ exports.handler = async (event) => {
       if (insErr) throw new Error("Revised script insert failed: " + insErr.message);
 
       result = { ...row, id: inserted.id, voiceover_words: words };
+
+    } else if (type === "delete_scraper_cleanup") {
+      // ── BULK DELETE SCRAPER NEEDS-CLEANUP SIGNALS ─────────────────────────
+      // Deletes all signals where status='Needs cleanup' AND is_manual_submission=false
+      // (or a specific list of IDs if data.ids is provided)
+      let delQuery = supabase
+        .from("signals")
+        .delete({ count: "exact" })
+        .eq("status", "Needs cleanup")
+        .eq("is_manual_submission", false);
+
+      if (Array.isArray(data?.ids) && data.ids.length) {
+        delQuery = supabase
+          .from("signals")
+          .delete({ count: "exact" })
+          .in("id", data.ids);
+      }
+
+      const { count: deleted, error: delErr } = await delQuery;
+      if (delErr) throw new Error("Delete failed: " + delErr.message);
+      result = { deleted: deleted ?? 0 };
 
     } else if (type === "cluster") {
       // ── DISCOVERY CLUSTERING ──────────────────────────────────────────────
@@ -1383,7 +1404,34 @@ ${rulesText || "No rules loaded"}
 ${SCRIPT_PREFLIGHT_CHECKLIST}
 ${lessonsBlock(lessons)}
 Writing guidance:
-- The opening hook must create curiosity or name the audience problem in the first sentence — never restate the title.
+
+HOOK (opening_hook field - most important line of the script):
+The first line determines whether someone keeps watching. Apply ONE of these proven TikTok hook patterns:
+1. SYMPTOM FIRST - lead with what the viewer already sees or feels, not the topic name.
+   Good: "Your succulent leaves are getting mushy and you don't know why."
+   Bad: "Today we're talking about overwatering."
+2. CHALLENGE A BELIEF - open with something counterintuitive.
+   Good: "The more you water a succulent, the faster it dies."
+   Bad: "Succulents are easy to care for."
+3. STAKES / URGENCY - something is at risk right now.
+   Good: "If you don't fix this before summer, your plant won't make it."
+   Bad: "Here are some care tips for your succulent."
+4. BOLD CLAIM - promise a specific, surprising payoff.
+   Good: "Three signs your succulent is begging you to stop watering."
+   Bad: "Let me show you how to water your succulent."
+5. MID-ACTION START - drop the viewer into the middle of something.
+   Good: "Wait - before you water that, look at the soil first."
+   Bad: "Hi everyone, today I want to talk about..."
+
+Hook rules (non-negotiable):
+- Must use "you" or "your" - speak directly to the viewer, not about succulents in general.
+- Must be under 10 words.
+- Must NOT start with "Today", "Hi", "Welcome", "In this video", or a restatement of the title.
+- Must name a problem the viewer already has OR make a bold claim they haven't heard before.
+- Must create a reason to keep watching in the first 2 seconds.
+- No em dashes in the hook or anywhere in the script.
+
+Script structure:
 - Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
 - Structure: hook → problem/payoff → 2-3 concrete tips or steps → CTA.
 
@@ -1406,7 +1454,7 @@ Return ONLY valid JSON:
 
 
 // ── SCRIPT REVISION PROMPT ────────────────────────────────────────────────────
-function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, humanNotes) {
+function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, humanNotes, hookPattern) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1445,7 +1493,22 @@ ${rulesText || "No rules loaded"}
 ${SCRIPT_PREFLIGHT_CHECKLIST}
 ${lessonsBlock(lessons)}
 Writing guidance:
-- The opening hook must create curiosity or name the audience problem in the first sentence — never restate the title.
+
+HOOK (if the hook was flagged, rewrite it - if it wasn't, keep it or make it stronger):
+${hookPattern ? `REQUESTED HOOK PATTERN: Use the "${hookPattern}" pattern specifically.\n` : ''}Apply ONE of these proven TikTok hook patterns:
+1. SYMPTOM FIRST - lead with what the viewer already sees, not the topic name.
+   Good: "Your succulent leaves are getting mushy and you don't know why."
+2. CHALLENGE A BELIEF - counterintuitive opener.
+   Good: "The more you water a succulent, the faster it dies."
+3. STAKES / URGENCY - something is at risk right now.
+   Good: "If you don't fix this before summer, your plant won't make it."
+4. BOLD CLAIM - specific, surprising payoff.
+   Good: "Three signs your succulent is begging you to stop watering."
+5. MID-ACTION START - drop into the middle of something.
+   Good: "Wait - before you water that, look at the soil first."
+Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In this video", must name a problem or make a bold claim, no em dashes.
+
+Script:
 - Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
 - Keep the parts of the original that were NOT flagged — this is a revision, not a rewrite from scratch.
 
