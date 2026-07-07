@@ -3145,13 +3145,15 @@ async function generateRevisedScript() {
   if (!s) { toast('Open a script first', true); return; }
   const humanNotes = document.getElementById('script-human-notes')?.value?.trim() || null;
   const hookPattern = document.getElementById('revise-hook-pattern')?.value || null;
+  // No brand check run and no notes = ask for a genuinely fresh take, not a revision of flagged issues
+  const forceFresh = !a.overall;
   const btn = document.getElementById('revise-script-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing new version…'; }
   try {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
       headers: await authHeaders(),
-      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a, human_notes: humanNotes, hook_pattern: hookPattern || null } }),
+      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a, human_notes: humanNotes, hook_pattern: hookPattern || null, force_fresh: forceFresh } }),
     });
     const result = await resp.json();
     if (!result.success) throw new Error(result.error || 'Revision failed');
