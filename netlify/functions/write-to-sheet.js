@@ -65,6 +65,10 @@ exports.handler = async (event) => {
     if (script.opening_hook && !scriptText.trimStart().startsWith(script.opening_hook)) {
       scriptText = script.opening_hook + " " + scriptText;
     }
+    // Append CTA if not already present
+    if (script.cta && !scriptText.includes(script.cta)) {
+      scriptText = scriptText.trimEnd() + "\n\n" + script.cta;
+    }
 
     const res = await fetch(SCRIPT_SHEET_HOOK_URL, {
       method: "POST",
