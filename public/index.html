@@ -489,13 +489,20 @@ tbody tr:hover { background: #fafffe; }
         </div>
       </div>
       <div id="inbox-cleanup-callout"></div>
+      <!-- Bulk action toolbar -->
+      <div id="inbox-bulk-bar" style="display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:8px 14px;margin-bottom:8px;align-items:center;gap:12px;font-size:13px">
+        <span id="inbox-bulk-count" style="font-weight:600;color:#856404">0 selected</span>
+        <button class="btn btn-danger btn-sm" onclick="bulkDismissSelected()">✕ Dismiss Selected</button>
+        <button class="btn btn-secondary btn-sm" onclick="bulkClearSelection()">Clear</button>
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr>
+            <th style="width:32px"><input type="checkbox" id="inbox-select-all" title="Select all" onchange="inboxToggleAll(this.checked)"></th>
             <th>Date</th><th>Platform</th><th>Creator</th><th>Topic</th><th>Score</th>
             <th>Priority</th><th>Status</th><th>Action</th>
           </tr></thead>
-          <tbody id="inbox-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+          <tbody id="inbox-table"><tr><td colspan="9" class="loading">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1546,7 +1553,8 @@ async function loadInbox() {
   document.getElementById('inbox-cleanup-callout').innerHTML = callout;
 
   tbody.innerHTML = rest.map(s => `
-    <tr style="${s.status==='Needs cleanup'?'opacity:0.5':''}">
+    <tr id="inbox-row-${s.id}" style="${s.status==='Needs cleanup'?'opacity:0.5':''}">
+      <td><input type="checkbox" class="inbox-cb" data-id="${s.id}" onchange="inboxCbChange()"></td>
       <td>${s.date_found||'—'}</td>
       <td>${esc(s.platform||'—')}</td>
       <td class="truncate">${esc(s.creator_name||'—')}</td>
@@ -1558,11 +1566,12 @@ async function loadInbox() {
       </td>
       <td>
         <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateSignalStatus('${s.id}',this.value)">
-          ${['New','Needs cleanup','Needs scoring','Duplicate','Watch','Reject','Promote to Daily Board'].map(opt=>`<option${s.status===opt?' selected':''}>${opt}</option>`).join('')}
+          ${['New','Needs cleanup','Needs scoring','Duplicate','Watch','Dismissed','Reject','Promote to Daily Board'].map(opt=>`<option${s.status===opt?' selected':''}>${opt}</option>`).join('')}
         </select>
       </td>
       <td style="display:flex;gap:6px;align-items:center">
         <button class="btn btn-secondary btn-sm" onclick="openSignalDetail('${s.id}')" title="View what the system recorded">🔍</button>
+        <button class="btn btn-danger btn-sm" onclick="quickDismissSignal('${s.id}')" title="Dismiss this signal">✕</button>
         ${s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="font-size:12px;color:#4CAF50">View ↗</a>` : '—'}
       </td>
     </tr>`).join('');
@@ -1586,6 +1595,51 @@ function openSignalDetail(id) {
       <div style="color:#1a2e1a">${v}</div>
     </div>`).join('');
   document.getElementById('modal-signal-detail').style.display = 'flex';
+}
+
+// ── INBOX BULK SELECTION ──────────────────────────────────────────────
+function inboxCbChange() {
+  const cbs = [...document.querySelectorAll('.inbox-cb')];
+  const checked = cbs.filter(c => c.checked);
+  const bar = document.getElementById('inbox-bulk-bar');
+  const countEl = document.getElementById('inbox-bulk-count');
+  if (checked.length) {
+    bar.style.display = 'flex';
+    countEl.textContent = `${checked.length} selected`;
+  } else {
+    bar.style.display = 'none';
+  }
+  document.getElementById('inbox-select-all').indeterminate = checked.length > 0 && checked.length < cbs.length;
+  document.getElementById('inbox-select-all').checked = checked.length === cbs.length && cbs.length > 0;
+}
+
+function inboxToggleAll(checked) {
+  document.querySelectorAll('.inbox-cb').forEach(cb => cb.checked = checked);
+  inboxCbChange();
+}
+
+function bulkClearSelection() {
+  document.querySelectorAll('.inbox-cb').forEach(cb => cb.checked = false);
+  inboxCbChange();
+}
+
+async function bulkDismissSelected() {
+  const ids = [...document.querySelectorAll('.inbox-cb:checked')].map(cb => cb.dataset.id);
+  if (!ids.length) return;
+  if (!confirm(`Dismiss ${ids.length} signal${ids.length>1?'s':''}?`)) return;
+  const { error } = await sb.from('signals').update({ status: 'Dismissed' }).in('id', ids);
+  if (error) { toast('❌ ' + error.message, true); return; }
+  // Remove rows instantly without full reload
+  ids.forEach(id => document.getElementById(`inbox-row-${id}`)?.remove());
+  bulkClearSelection();
+  toast(`✕ ${ids.length} signal${ids.length>1?'s':''} dismissed`);
+}
+
+async function quickDismissSignal(id) {
+  const { error } = await sb.from('signals').update({ status: 'Dismissed' }).eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); return; }
+  document.getElementById(`inbox-row-${id}`)?.remove();
+  toast('✕ Dismissed');
 }
 
 async function deleteSignal(id) {
@@ -3010,7 +3064,18 @@ function renderScriptAnalysis(a) {
       </div>`).join('')}</div>` : '<div style="font-size:13px;color:#27ae60;margin-bottom:8px">✅ No brand violations found</div>'}
     ${a.improvements?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Improvements:</b> ${a.improvements.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
-    <button id="revise-script-btn" class="btn btn-primary" style="margin-top:12px" onclick="generateRevisedScript()">✨ Generate revised script</button>
+    <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <label style="font-size:12px;font-weight:600;color:#555;white-space:nowrap">Hook pattern:</label>
+      <select id="revise-hook-pattern" style="font-size:12px;padding:4px 8px;border:1px solid #ccc;border-radius:6px;background:#fff">
+        <option value="">Let AI choose</option>
+        <option value="Symptom first">Symptom first — lead with what they see</option>
+        <option value="Challenge a belief">Challenge a belief — counterintuitive opener</option>
+        <option value="Stakes / urgency">Stakes / urgency — something is at risk now</option>
+        <option value="Bold claim">Bold claim — specific, surprising payoff</option>
+        <option value="Mid-action start">Mid-action start — drop into the middle</option>
+      </select>
+      <button id="revise-script-btn" class="btn btn-primary" onclick="generateRevisedScript()">✨ Generate revised script</button>
+    </div>
   </div>`;
 }
 
@@ -3019,6 +3084,7 @@ async function generateRevisedScript() {
   const a = window._lastScriptAnalysis || {};
   if (!s) { toast('Open a script first', true); return; }
   const humanNotes = document.getElementById('script-human-notes')?.value?.trim() || null;
+  const hookPattern = document.getElementById('revise-hook-pattern')?.value || null;
   if (!a.overall && !humanNotes) { toast('Run AI Brand Check first, or add your own notes', true); return; }
   const btn = document.getElementById('revise-script-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing new version…'; }
@@ -3026,7 +3092,7 @@ async function generateRevisedScript() {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
       headers: await authHeaders(),
-      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a, human_notes: humanNotes } }),
+      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a, human_notes: humanNotes, hook_pattern: hookPattern || null } }),
     });
     const result = await resp.json();
     if (!result.success) throw new Error(result.error || 'Revision failed');
