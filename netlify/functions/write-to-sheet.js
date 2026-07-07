@@ -76,8 +76,9 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         "x-script-secret": SCRIPT_SHEET_TOKEN,
         title:             script.script_title || "",
-        content:           script.thumbnail_title || script.opening_hook || "",
+        thumbnail_title:   script.thumbnail_title || script.opening_hook || "",
         script_text:       scriptText,
+        caption:           script.caption || "",
         platform:          script.platform || "",
       }),
       redirect: "follow",
