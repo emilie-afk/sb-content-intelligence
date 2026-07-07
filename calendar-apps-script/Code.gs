@@ -37,11 +37,12 @@ function doPost(e) {
   try {
     var data        = JSON.parse(e.postData ? e.postData.contents : '{}');
     checkSecret(data);
-    var title       = data.title       || '';
-    var content     = data.content     || ''; // thumbnail title or hook
-    var script_text = data.script_text || '';
-    var platform    = data.platform    || '';
-    var note        = data.note        || (platform ? 'Platform: ' + platform : '');
+    var title           = data.title           || '';
+    var thumbnail_title = data.thumbnail_title || '';
+    var script_text     = data.script_text     || '';
+    var caption         = data.caption         || '';
+    var platform        = data.platform        || '';
+    var note            = platform ? 'Platform: ' + platform : '';
 
     if (!title) throw new Error('title is required');
 
@@ -63,15 +64,17 @@ function doPost(e) {
     var nextNum     = lastDataRow > header.row ? lastDataRow - header.row : 1;
     var newRow      = lastDataRow + 1;
 
-    // Write the row
-    if (cols['no.'])         sheet.getRange(newRow, cols['no.']).setValue(nextNum);
-    if (cols['title'])       sheet.getRange(newRow, cols['title']).setValue(title);
-    if (cols['content'])     sheet.getRange(newRow, cols['content']).setValue(content);
-    if (cols['script'])      sheet.getRange(newRow, cols['script']).setValue(script_text);
-    if (cols['note'])        sheet.getRange(newRow, cols['note']).setValue(note);
-    if (cols['status'])      sheet.getRange(newRow, cols['status']).setValue('');
-    if (cols['link sample']) sheet.getRange(newRow, cols['link sample']).setValue('');
-    if (cols['script'])      sheet.getRange(newRow, cols['script']).setWrap(true);
+    // Write the row — matches headers: No. | Title | Thumbnail Title | Script | Link sample | Note | Status | Uploaded | Caption
+    if (cols['no.'])             sheet.getRange(newRow, cols['no.']).setValue(nextNum);
+    if (cols['title'])           sheet.getRange(newRow, cols['title']).setValue(title);
+    if (cols['thumbnail title']) sheet.getRange(newRow, cols['thumbnail title']).setValue(thumbnail_title);
+    if (cols['script'])          sheet.getRange(newRow, cols['script']).setValue(script_text);
+    if (cols['link sample'])     sheet.getRange(newRow, cols['link sample']).setValue('');
+    if (cols['note'])            sheet.getRange(newRow, cols['note']).setValue(note);
+    if (cols['status'])          sheet.getRange(newRow, cols['status']).setValue('');
+    if (cols['uploaded'])        sheet.getRange(newRow, cols['uploaded']).setValue('');
+    if (cols['caption'])         sheet.getRange(newRow, cols['caption']).setValue(caption);
+    if (cols['script'])          sheet.getRange(newRow, cols['script']).setWrap(true);
 
     // Match row height to content (auto-resize the Script column row)
     sheet.setRowHeight(newRow, 21); // let it expand naturally with wrapping
