@@ -546,8 +546,10 @@ tbody tr:hover { background: #fafffe; }
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="filters">
           <select class="filter-select" id="briefs-status-filter" onchange="loadBriefs()">
-            <option value="">All Statuses</option>
+            <option value="">Active (Draft / Needs review / Approved)</option>
+            <option value="all">All Statuses</option>
             <option>Draft</option><option>Needs review</option><option>Approved</option>
+            <option>Script in review</option>
             <option>Filming</option><option>Editing</option><option>Scheduled</option>
             <option>Published</option><option>Measured</option>
           </select>
@@ -2239,12 +2241,19 @@ async function runMaintenance() {
 async function loadBriefs() {
   let q = sb.from('briefs').select('*').order('created_at',{ascending:false}).limit(50);
   const status = document.getElementById('briefs-status-filter')?.value;
-  if (status) q = q.eq('status', status);
+  // Default view: only pre-script briefs. "Script in review" and beyond are hidden unless filtered.
+  if (status === 'all') {
+    // no filter — show everything
+  } else if (status) {
+    q = q.eq('status', status);
+  } else {
+    q = q.in('status', ['Draft','Needs review','Approved']);
+  }
   const { data } = await q;
   const tbody = document.getElementById('briefs-table');
-  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">📋</div><p>No briefs yet</p></div></td></tr>'; return; }
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">📋</div><p>No briefs here. Use the status filter to see briefs in production.</p></div></td></tr>'; return; }
   tbody.innerHTML = data.map(b => `
-    <tr>
+    <tr id="brief-row-${b.id}">
       <td class="truncate">${esc(b.title)}</td>
       <td>${esc(b.featured_product||'—')}</td>
       <td>${esc(b.video_format||'—')}</td>
@@ -2252,12 +2261,12 @@ async function loadBriefs() {
       <td>${b.deadline||'—'}</td>
       <td>
         <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateBriefStatus('${b.id}',this.value)">
-          ${['Draft','Needs review','Approved','Filming','Editing','Scheduled','Published','Measured'].map(opt=>`<option${b.status===opt?' selected':''}>${opt}</option>`).join('')}
+          ${['Draft','Needs review','Approved','Script in review','Filming','Editing','Scheduled','Published','Measured'].map(opt=>`<option${b.status===opt?' selected':''}>${opt}</option>`).join('')}
         </select>
       </td>
       <td>
         <button class="btn btn-secondary btn-sm" onclick="viewBrief('${b.id}')">View</button>
-        <button class="btn btn-sm" style="margin-left:4px" onclick="generateScriptFromBrief('${b.id}')" title="Generate script (prompts for duration)">🎬</button>
+        <button class="btn btn-sm" style="margin-left:4px" onclick="generateScriptFromBrief('${b.id}')" title="Generate script">🎬</button>
       </td>
     </tr>`).join('');
 }
@@ -2277,6 +2286,10 @@ async function generateScriptFromBrief(briefId, autoSecs) {
   const { data: brief, error } = await sb.from('briefs').select('*').eq('id', briefId).single();
   if (error || !brief) { toast('Brief not found', true); return; }
 
+  // Disable the row visually while generating
+  const row = document.getElementById(`brief-row-${briefId}`);
+  if (row) { row.style.opacity = '0.5'; row.style.pointerEvents = 'none'; }
+
   toast(`🎬 Generating ~${target}s script… this can take 10-20 seconds`);
   try {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
@@ -2285,10 +2298,21 @@ async function generateScriptFromBrief(briefId, autoSecs) {
       body: JSON.stringify({ type: 'generate_script', data: { ...brief, target_duration_seconds: target } }),
     });
     const result = await resp.json();
-    if (!result.success) { toast('Error: ' + (result.error || 'generation failed'), true); return; }
+    if (!result.success) {
+      if (row) { row.style.opacity = ''; row.style.pointerEvents = ''; }
+      toast('Error: ' + (result.error || 'generation failed'), true);
+      return;
+    }
     const s = result.analysis;
-    toast(`✅ Script created: "${s.script_title}" — ${s.estimated_duration_seconds}s (${s.voiceover_words} words). Find it in Scripts as Draft.`);
+    // Move brief to "Script in review" so it leaves the default brief view
+    // (brief moves to Filming only after the script is approved)
+    await sb.from('briefs').update({ status: 'Script in review', updated_by: currentUser?.id }).eq('id', briefId);
+    // Remove the row immediately
+    row?.remove();
+    toast(`✅ Script ready: "${s.script_title}" — ${s.estimated_duration_seconds}s. Find it in Scripts → Needs Review.`);
+    loadScripts();
   } catch (e) {
+    if (row) { row.style.opacity = ''; row.style.pointerEvents = ''; }
     toast('Error: ' + e.message, true);
   }
 }
@@ -2447,11 +2471,12 @@ async function updateSignalStatus(id, status) {
 
 async function updateBriefStatus(id, status) {
   await sb.from('briefs').update({ status, updated_by: currentUser?.id }).eq('id', id);
-  toast('Brief status updated');
   loadCommandCenter();
   if (status === 'Approved') {
-    toast('✨ Brief approved — generating script automatically…');
-    generateScriptFromBrief(id, 20);
+    // generateScriptFromBrief will prompt for duration, then generate + move brief to Filming
+    generateScriptFromBrief(id);
+  } else {
+    toast('Brief status updated');
   }
 }
 
@@ -2803,17 +2828,21 @@ async function loadActivityLog() {
 
   const typeEmoji = { opportunity: '⭐', brief: '📋', script: '📝' };
   const actionColor = (action) => {
+    if (/AI generated|AI revised/i.test(action)) return '#7c3aed';
     if (/approve/i.test(action)) return '#27ae60';
     if (/reject/i.test(action)) return '#e74c3c';
     if (/watch/i.test(action)) return '#f39c12';
     return '#555';
   };
   tbody.innerHTML = data.map(row => {
-    const who = row.performed_by_profile?.display_name || row.performed_by_profile?.email || '—';
+    const isAI = !row.performed_by;
+    const who = isAI
+      ? '<span style="color:#7c3aed;font-weight:600">🤖 AI</span>'
+      : esc(row.performed_by_profile?.display_name || row.performed_by_profile?.email || '—');
     const when = row.performed_at ? new Date(row.performed_at).toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
     return `<tr>
       <td style="font-size:12px;color:#888;white-space:nowrap">${when}</td>
-      <td style="font-size:12px">${esc(who)}</td>
+      <td style="font-size:12px">${who}</td>
       <td style="font-size:12px">${typeEmoji[row.entity_type]||''} ${row.entity_type}</td>
       <td class="truncate" style="font-size:12px">${esc(row.entity_title||'—')}</td>
       <td style="font-weight:600;color:${actionColor(row.action)};font-size:12px">${esc(row.action)}</td>
