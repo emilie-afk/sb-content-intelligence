@@ -303,7 +303,7 @@ exports.handler = async (event) => {
         platform:                   gen.platform || data.platform || "TikTok",
         script_title:               gen.script_title || data.title || "Untitled script",
         script_version:             "v1",
-        script_type:                gen.script_type || "TikTok / Reel short script",
+        script_type:                ALLOWED_SCRIPT_TYPES.includes(gen.script_type) ? gen.script_type : "TikTok / Reel short script",
         opening_hook:               gen.opening_hook || null,
         full_voiceover_script:      gen.full_voiceover_script || null,
         on_screen_text:             gen.on_screen_text || null,
@@ -356,7 +356,7 @@ exports.handler = async (event) => {
         platform:                   gen.platform || orig.platform || "TikTok",
         script_title:               gen.script_title || orig.script_title || "Untitled script",
         script_version:             nextVersion,
-        script_type:                gen.script_type || orig.script_type || "TikTok / Reel short script",
+        script_type:                ALLOWED_SCRIPT_TYPES.includes(gen.script_type) ? gen.script_type : (ALLOWED_SCRIPT_TYPES.includes(orig.script_type) ? orig.script_type : "TikTok / Reel short script"),
         opening_hook:               gen.opening_hook || null,
         full_voiceover_script:      gen.full_voiceover_script || null,
         on_screen_text:             gen.on_screen_text || null,
@@ -1368,6 +1368,16 @@ function lessonsBlock(lessons) {
   return `\nPAST REVIEWER FEEDBACK — previous scripts failed brand review for these exact reasons. Do NOT repeat them:\n${lines}\n`;
 }
 
+// Must match the CHECK constraint on script_outputs.script_type
+const ALLOWED_SCRIPT_TYPES = [
+  "TikTok / Reel short script",
+  "YouTube Shorts script",
+  "Facebook Reel script",
+  "Longer educational script",
+  "Caption-only variant",
+  "UGC-style script",
+];
+
 // Hard requirements the brand check always verifies — bake them in up front so
 // v1 passes review instead of needing a revision round.
 const SCRIPT_PREFLIGHT_CHECKLIST = `
@@ -1508,8 +1518,8 @@ Structure: hook -> problem/payoff -> 2-3 concrete tips or steps -> CTA.
 Return ONLY valid JSON:
 {
   "script_title": "short internal title",
-  "platform": "${orig.platform || "TikTok"}",
-  "script_type": "${orig.script_type || "TikTok / Reel short script"}",
+  "platform": "TikTok | Instagram | YouTube | Facebook",
+  "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | Caption-only variant | UGC-style script",
   "opening_hook": "first line of the video, under 10 words",
   "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
   "on_screen_text": "text overlays, one per line",
