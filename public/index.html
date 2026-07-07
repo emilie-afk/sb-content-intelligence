@@ -3414,28 +3414,28 @@ function renderDiscoverySections(all) {
     {
       id:'questions', icon:'❓', title:'Repeated Audience Questions',
       desc:'People are asking the same thing across sources',
-      filter: c => (c.question_count||0)>=1 && !['Mention only'].includes(c.status),
+      filter: c => (c.question_count||0)>=1 && !['Mention only','Content review ready'].includes(c.status),
       sort: (a,b) => (b.question_count||0)-(a.question_count||0),
       empty:'No clusters with audience questions yet.',
     },
     {
       id:'manual', icon:'✍️', title:'Manual Signals Worth Reviewing',
       desc:'Intentional submissions from the intake sheet or dashboard',
-      filter: c => (c.manual_signal_count||0)>=1 && !['Mention only'].includes(c.status),
+      filter: c => (c.manual_signal_count||0)>=1 && !['Mention only','Content review ready'].includes(c.status),
       sort: (a,b) => (b.manual_signal_count||0)-(a.manual_signal_count||0),
       empty:'No manual signals yet. Signals submitted via intake sheet or dashboard appear here.',
     },
     {
       id:'owned', icon:'💬', title:'Owned Comment Follow-ups',
       desc:"Audience asking follow-up questions on SB's own content",
-      filter: c => (c.owned_comment_signal_count||0)>=1,
+      filter: c => (c.owned_comment_signal_count||0)>=1 && c.status !== 'Content review ready',
       sort: (a,b) => (b.owned_comment_signal_count||0)-(a.owned_comment_signal_count||0),
       empty:"No owned comment signals yet.",
     },
     {
       id:'claims', icon:'🔬', title:'New Tips or Claims to Verify',
       desc:'Care advice or plant claims that need fact-checking before scripting',
-      filter: c => ['New tip or claim','New contradiction'].includes(c.novelty_status) && c.status!=='Mention only',
+      filter: c => ['New tip or claim','New contradiction'].includes(c.novelty_status) && !['Mention only','Content review ready'].includes(c.status),
       sort: (a,b) => new Date(b.last_seen_at)-new Date(a.last_seen_at),
       empty:'No unverified claims detected.',
     },
@@ -4108,10 +4108,12 @@ async function crDecision(id, status, direction) {
     if (candidate?.cluster_id) {
       const { error: clErr } = await sb.from('discovery_clusters').update({
         status: 'Pattern detected',
-        reviewer_status: 'Unreviewed',
       }).eq('id', candidate.cluster_id);
       if (clErr) { toast('❌ Could not update cluster: ' + clErr.message, true); return; }
       toast('🔬 Sent back to Discovery for more research');
+      // Switch filter to show only remaining actionable items
+      const f = document.getElementById('cr-status-filter');
+      if (f) f.value = 'Ready for review';
     } else {
       toast('⚠️ Candidate updated but no linked cluster found');
     }
