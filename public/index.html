@@ -2685,6 +2685,7 @@ function _scriptRow(s, showDelete) {
     </td>
     <td style="white-space:nowrap;display:flex;gap:4px">
       <button class="btn btn-secondary btn-sm" onclick="viewScript('${s.id}')">View</button>
+      <button id="sheet-btn-${s.id}" class="btn btn-secondary btn-sm" onclick="writeScriptToSheet('${s.id}')" title="Write to Script Spreadsheet">📊</button>
       ${showDelete ? `<button class="btn btn-danger btn-sm" onclick="deleteScript('${s.id}')">🗑</button>` : ''}
     </td>
   </tr>`;
@@ -2733,13 +2734,35 @@ async function deleteScript(id) {
   toast('🗑 Script deleted');
 }
 
+async function writeScriptToSheet(id, { silent = false, approved_at = null } = {}) {
+  const btn = document.getElementById(`sheet-btn-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  try {
+    const res = await fetch('/.netlify/functions/write-to-sheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({ script_id: id, approved_at: approved_at || new Date().toISOString() }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Failed');
+    if (!silent) toast(`✅ Added to ${data.month} sheet (row ${data.row})`);
+    if (btn) { btn.textContent = '✅'; btn.disabled = false; }
+  } catch (err) {
+    if (!silent) toast('❌ Sheet write failed: ' + err.message, true);
+    if (btn) { btn.textContent = '📊'; btn.disabled = false; }
+  }
+}
+
 async function updateScriptStatus(id, status) {
+  const approvedAt = status === 'Approved' ? new Date().toISOString() : undefined;
   const update = { review_status: status, updated_by: currentUser?.id };
-  if (status === 'Approved') { update.approved_by = currentUser?.id; update.approved_at = new Date().toISOString(); }
+  if (status === 'Approved') { update.approved_by = currentUser?.id; update.approved_at = approvedAt; }
   const { error } = await sb.from('script_outputs').update(update).eq('id', id);
   if (error) { toast('Error: ' + error.message, true); return; }
   toast('Script status updated');
-
+  if (status === 'Approved') {
+    writeScriptToSheet(id, { silent: false, approved_at: approvedAt });
+  }
 }
 
 async function viewScript(id) {
