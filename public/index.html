@@ -4108,7 +4108,7 @@ async function crDecision(id, status, direction) {
     if (candidate?.cluster_id) {
       const { error: clErr } = await sb.from('discovery_clusters').update({
         status: 'Pattern detected',
-        reviewer_status: 'Needs research — sent back',
+        reviewer_status: 'Unreviewed',
       }).eq('id', candidate.cluster_id);
       if (clErr) { toast('❌ Could not update cluster: ' + clErr.message, true); return; }
       toast('🔬 Sent back to Discovery for more research');
