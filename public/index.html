@@ -2593,32 +2593,67 @@ async function saveSource() {
 }
 
 // ── SCRIPTS ───────────────────────────────────────────────────────────
+function _scriptRow(s, showDelete) {
+  const statusOpts = ['Draft','Needs review','Needs revision',...(['admin','owner'].includes(userRole)?['Approved']:[]),'Used in production','Archived'];
+  return `<tr id="script-row-${s.id}">
+    <td class="truncate">${esc(s.script_title)}</td>
+    <td>${esc(s.platform||'—')}</td>
+    <td style="font-size:12px">${esc(s.script_type||'—')}</td>
+    <td><span class="badge badge-new">${esc(s.script_version||'v1')}</span></td>
+    <td class="truncate" style="font-style:italic;color:#555">${esc(s.opening_hook||'—')}</td>
+    <td>${s.estimated_duration_seconds ? s.estimated_duration_seconds + 's' : '—'}</td>
+    <td>
+      <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateScriptStatus('${s.id}',this.value)">
+        ${statusOpts.map(opt=>`<option${s.review_status===opt?' selected':''}>${opt}</option>`).join('')}
+      </select>
+    </td>
+    <td style="white-space:nowrap;display:flex;gap:4px">
+      <button class="btn btn-secondary btn-sm" onclick="viewScript('${s.id}')">View</button>
+      ${showDelete ? `<button class="btn btn-danger btn-sm" onclick="deleteScript('${s.id}')">🗑</button>` : ''}
+    </td>
+  </tr>`;
+}
+
 async function loadScripts() {
-  let q = sb.from('script_outputs').select('*').order('created_at', {ascending:false}).limit(50);
-  const status   = document.getElementById('scripts-status-filter')?.value;
   const platform = document.getElementById('scripts-platform-filter')?.value;
-  if (status)   q = q.eq('review_status', status);
-  if (platform) q = q.eq('platform', platform);
+  const statusFilter = document.getElementById('scripts-status-filter')?.value;
+
+  // Needs Review section — always shows only "Needs review" status
+  let rq = sb.from('script_outputs').select('*').eq('review_status','Needs review').order('created_at',{ascending:false}).limit(50);
+  if (platform) rq = rq.eq('platform', platform);
+  const { data: reviewData } = await rq;
+  const reviewTbody = document.getElementById('scripts-review-table');
+  const reviewCount = document.getElementById('scripts-review-count');
+  if (!reviewData?.length) {
+    reviewTbody.innerHTML = '<tr><td colspan="8" style="padding:12px;color:#888;font-size:13px">No scripts need review right now.</td></tr>';
+    if (reviewCount) reviewCount.textContent = '';
+  } else {
+    reviewTbody.innerHTML = reviewData.map(s => _scriptRow(s, false)).join('');
+    if (reviewCount) reviewCount.textContent = reviewData.length;
+  }
+
+  // All Scripts section — excludes "Needs review", applies status filter
+  let q = sb.from('script_outputs').select('*').neq('review_status','Needs review').order('created_at',{ascending:false}).limit(100);
+  if (platform)     q = q.eq('platform', platform);
+  if (statusFilter) q = q.eq('review_status', statusFilter);
   const { data } = await q;
   const tbody = document.getElementById('scripts-table');
-  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📝</div><p>No scripts yet. Approve a brief and generate a script.</p></div></td></tr>'; return; }
-  tbody.innerHTML = data.map(s => `
-    <tr>
-      <td class="truncate">${esc(s.script_title)}</td>
-      <td>${esc(s.platform||'—')}</td>
-      <td style="font-size:12px">${esc(s.script_type||'—')}</td>
-      <td><span class="badge badge-new">${esc(s.script_version||'v1')}</span></td>
-      <td class="truncate" style="font-style:italic;color:#555">${esc(s.opening_hook||'—')}</td>
-      <td>${s.estimated_duration_seconds ? s.estimated_duration_seconds + 's' : '—'}</td>
-      <td>
-        <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateScriptStatus('${s.id}',this.value)">
-          ${['Draft','Needs review','Needs revision',...(['admin','owner'].includes(userRole)?['Approved']:[]),'Used in production','Archived'].map(opt=>`<option${s.review_status===opt?' selected':''}>${opt}</option>`).join('')}
-        </select>
-      </td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-secondary btn-sm" onclick="viewScript('${s.id}')">View</button>
-      </td>
-    </tr>`).join('');
+  const allCount = document.getElementById('scripts-all-count');
+  if (!data?.length) {
+    tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📝</div><p>No scripts yet. Approve a brief and generate a script.</p></div></td></tr>';
+    if (allCount) allCount.textContent = '';
+  } else {
+    tbody.innerHTML = data.map(s => _scriptRow(s, true)).join('');
+    if (allCount) allCount.textContent = data.length;
+  }
+}
+
+async function deleteScript(id) {
+  if (!confirm('Delete this script? This cannot be undone.')) return;
+  const { error } = await sb.from('script_outputs').delete().eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); return; }
+  document.getElementById(`script-row-${id}`)?.remove();
+  toast('🗑 Script deleted');
 }
 
 async function updateScriptStatus(id, status) {
