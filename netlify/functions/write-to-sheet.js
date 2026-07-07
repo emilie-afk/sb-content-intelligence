@@ -57,17 +57,21 @@ exports.handler = async (event) => {
 
   // ── Post to Apps Script web app ───────────────────────────────────────────
   try {
+    // Ensure hook is the first line of the voiceover (safety net for older scripts)
+    let scriptText = script.full_voiceover_script || "";
+    if (script.opening_hook && !scriptText.trimStart().startsWith(script.opening_hook)) {
+      scriptText = script.opening_hook + " " + scriptText;
+    }
+
     const res = await fetch(SCRIPT_SHEET_HOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         "x-script-secret": SCRIPT_SHEET_TOKEN,
         title:             script.script_title || "",
-        style:             script.script_type  || "",
-        script_text:       script.full_voiceover_script || "",
+        content:           script.thumbnail_title || script.opening_hook || "",
+        script_text:       scriptText,
         platform:          script.platform || "",
-        // Note column gets thumbnail title + caption for reference
-        note:              [script.thumbnail_title, script.caption].filter(Boolean).join(" | ") || "",
       }),
       redirect: "follow",
     });
