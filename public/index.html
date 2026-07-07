@@ -645,11 +645,6 @@ tbody tr:hover { background: #fafffe; }
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="filters">
-          <select class="filter-select" id="scripts-status-filter" onchange="loadScripts()">
-            <option value="">All Statuses</option>
-            <option>Draft</option><option>Needs review</option><option>Needs revision</option>
-            <option>Approved</option><option>Used in production</option><option>Archived</option>
-          </select>
           <select class="filter-select" id="scripts-platform-filter" onchange="loadScripts()">
             <option value="">All Platforms</option>
             <option>TikTok</option><option>Instagram</option><option>YouTube</option><option>Facebook</option>
@@ -659,13 +654,44 @@ tbody tr:hover { background: #fafffe; }
           <button class="btn btn-primary btn-sm" onclick="openScriptModal()">+ New Script</button>
         </div>
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Status</th><th>Action</th>
-          </tr></thead>
-          <tbody id="scripts-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
-        </table>
+
+      <!-- Needs Review section -->
+      <div style="margin-bottom:28px">
+        <h2 style="font-size:15px;font-weight:700;color:#b45309;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+          ⏳ Needs Review
+          <span id="scripts-review-count" style="font-size:12px;font-weight:500;color:#92400e;background:#fef3c7;padding:2px 8px;border-radius:12px"></span>
+        </h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Status</th><th>Action</th>
+            </tr></thead>
+            <tbody id="scripts-review-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- All other scripts section -->
+      <div>
+        <h2 style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+          📄 All Scripts
+          <span id="scripts-all-count" style="font-size:12px;font-weight:500;color:#555;background:#f3f4f6;padding:2px 8px;border-radius:12px"></span>
+        </h2>
+        <div class="filters" style="margin-bottom:10px">
+          <select class="filter-select" id="scripts-status-filter" onchange="loadScripts()">
+            <option value="">All Statuses</option>
+            <option>Draft</option><option>Needs revision</option>
+            <option>Approved</option><option>Used in production</option><option>Archived</option>
+          </select>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Status</th><th>Action</th>
+            </tr></thead>
+            <tbody id="scripts-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -2629,8 +2655,16 @@ async function viewScript(id) {
       <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Your notes for AI (optional):</label>
       <textarea id="script-human-notes" placeholder="e.g. make the hook punchier, shorten to 15s, add product mention earlier" style="width:100%;padding:8px;font-size:13px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0;resize:vertical;box-sizing:border-box" rows="2"></textarea>
     </div>
-    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
       <button class="btn btn-secondary" onclick="runAIAnalysis('script', window._viewedScript)">🤖 AI Brand Check</button>
+      <select id="revise-hook-pattern" style="font-size:12px;padding:5px 8px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0">
+        <option value="">Hook: Let AI choose</option>
+        <option value="Symptom first">Symptom first</option>
+        <option value="Challenge a belief">Challenge a belief</option>
+        <option value="Stakes / urgency">Stakes / urgency</option>
+        <option value="Bold claim">Bold claim</option>
+        <option value="Mid-action start">Mid-action start</option>
+      </select>
       <button class="btn btn-secondary" onclick="generateRevisedScript()">✨ Regenerate Script</button>
     </div>
   `;
@@ -3064,16 +3098,7 @@ function renderScriptAnalysis(a) {
       </div>`).join('')}</div>` : '<div style="font-size:13px;color:#27ae60;margin-bottom:8px">✅ No brand violations found</div>'}
     ${a.improvements?.length ? `<div style="font-size:13px;margin-bottom:8px"><b>💡 Improvements:</b> ${a.improvements.map(s=>`<div style="margin-left:12px">• ${esc(s)}</div>`).join('')}</div>` : ''}
     ${a.notes ? `<div style="font-size:13px;color:#555">${esc(a.notes)}</div>` : ''}
-    <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-      <label style="font-size:12px;font-weight:600;color:#555;white-space:nowrap">Hook pattern:</label>
-      <select id="revise-hook-pattern" style="font-size:12px;padding:4px 8px;border:1px solid #ccc;border-radius:6px;background:#fff">
-        <option value="">Let AI choose</option>
-        <option value="Symptom first">Symptom first — lead with what they see</option>
-        <option value="Challenge a belief">Challenge a belief — counterintuitive opener</option>
-        <option value="Stakes / urgency">Stakes / urgency — something is at risk now</option>
-        <option value="Bold claim">Bold claim — specific, surprising payoff</option>
-        <option value="Mid-action start">Mid-action start — drop into the middle</option>
-      </select>
+    <div style="margin-top:12px">
       <button id="revise-script-btn" class="btn btn-primary" onclick="generateRevisedScript()">✨ Generate revised script</button>
     </div>
   </div>`;
@@ -3085,7 +3110,6 @@ async function generateRevisedScript() {
   if (!s) { toast('Open a script first', true); return; }
   const humanNotes = document.getElementById('script-human-notes')?.value?.trim() || null;
   const hookPattern = document.getElementById('revise-hook-pattern')?.value || null;
-  if (!a.overall && !humanNotes) { toast('Run AI Brand Check first, or add your own notes', true); return; }
   const btn = document.getElementById('revise-script-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing new version…'; }
   try {
