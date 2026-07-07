@@ -2735,6 +2735,12 @@ async function deleteScript(id) {
 }
 
 async function writeScriptToSheet(id, { silent = false, approved_at = null } = {}) {
+  // Guard: only Approved scripts go to the sheet
+  const { data: check } = await sb.from('script_outputs').select('review_status').eq('id', id).single();
+  if (check && check.review_status !== 'Approved') {
+    toast('⚠️ Only Approved scripts can be sent to the sheet. Change status to Approved first.', true);
+    return;
+  }
   const btn = document.getElementById(`sheet-btn-${id}`);
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
   try {
