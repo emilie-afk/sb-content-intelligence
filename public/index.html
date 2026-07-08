@@ -2061,8 +2061,17 @@ async function blockCompetitorAccount(competitorActivityId, todayItemId) {
     .eq('id', competitorActivityId).single();
   if (caErr || !ca) { toast('Could not load competitor account', true); return; }
 
-  const accountLabel = ca.source_account_name || ca.source_account_handle;
-  if (!accountLabel) { toast('This alert has no account name to block', true); return; }
+  let accountLabel = ca.source_account_name || ca.source_account_handle;
+  if (!accountLabel) {
+    accountLabel = prompt('No account name found. Enter the account name or handle to block:');
+    if (!accountLabel || !accountLabel.trim()) return;
+    accountLabel = accountLabel.trim();
+    // Save it back to the competitor_activity record
+    await sb.from('competitor_activity')
+      .update({ source_account_name: accountLabel, updated_at: new Date().toISOString() })
+      .eq('id', competitorActivityId);
+    ca.source_account_name = accountLabel;
+  }
   if (!confirm(`Block "${accountLabel}"? All current and future posts from this account will be dismissed automatically.`)) return;
 
   // 1. Add to the blocklist in settings (name + handle, lowercase)
