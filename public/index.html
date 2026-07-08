@@ -4384,98 +4384,60 @@ async function crDecision(id, status, direction) {
 
 
 // ── BULK CLUSTER ──────────────────────────────────────────────────────
+// Calls batch-cluster repeatedly (one batch per call) until no New signals
+// remain. Each batch-cluster call dispatches to background functions and
+// returns in <10s — no Netlify timeout issues.
 async function clusterAllSignals() {
   const btn = document.getElementById('cluster-all-btn');
   btn.disabled = true;
-  btn.textContent = '🔍 Loading signals…';
+  btn.textContent = '🔍 Starting…';
 
-  // Fetch signals using the same filters currently applied in the inbox
-  const source   = document.getElementById('inbox-source-filter')?.value;
-  const platform = document.getElementById('inbox-platform-filter')?.value;
-  const priority = document.getElementById('inbox-priority-filter')?.value;
-  const status   = document.getElementById('inbox-status-filter')?.value;
+  let totalDispatched = 0;
+  let totalErrors     = 0;
+  let remaining       = 1; // seed > 0 to enter loop
+  let rounds          = 0;
+  const MAX_ROUNDS    = 50; // safety cap
 
-  let sq = sb
-    .from('signals')
-    .select('id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission')
-    .order('created_at', { ascending: true })
-    .limit(200);
+  try {
+    while (remaining > 0 && rounds < MAX_ROUNDS) {
+      rounds++;
+      const h = await authHeaders();
+      const resp = await fetch('/.netlify/functions/batch-cluster', {
+        method: 'POST',
+        headers: h,
+      });
 
-  if (source === 'manual')  sq = sq.eq('is_manual_submission', true);
-  if (source === 'scraper') sq = sq.eq('is_manual_submission', false);
-  if (platform) sq = sq.eq('platform', platform);
-  if (priority) sq = sq.eq('priority', priority);
-  if (status === 'unclustered') sq = sq.not('status', 'in', CLUSTERABLE_EXCLUDE);
-  else if (status) sq = sq.eq('status', status);
-  else sq = sq.not('status', 'in', CLUSTERABLE_EXCLUDE); // default: all unclustered
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        toast('❌ Cluster error: ' + (err.error || resp.status), true);
+        break;
+      }
 
-  const { data: allSignals } = await sq;
+      const result  = await resp.json();
+      totalDispatched += result.processed || 0;
+      totalErrors     += result.errors    || 0;
+      remaining        = result.remaining ?? 0;
 
-  // Also skip any that already have a cluster link (double-check)
-  const { data: linked } = await sb.from('signal_cluster_links').select('signal_id');
-  const linkedIds = new Set((linked || []).map(l => l.signal_id));
+      btn.textContent = `🔍 ${totalDispatched} dispatched… (${remaining} left)`;
 
-  // Signals already linked but status still 'New' — fix their status now
-  const stuckLinked = (allSignals || []).filter(s => linkedIds.has(s.id));
-  if (stuckLinked.length) {
-    await sb.from('signals')
-      .update({ status: 'Clustered' })
-      .in('id', stuckLinked.map(s => s.id));
-    toast(`🔧 Fixed ${stuckLinked.length} signals stuck at New — refreshing…`);
-    loadCommandCenter();
-  }
+      if (remaining > 0) {
+        // Give background functions a moment before fetching the next batch
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
 
-  const unclustered = (allSignals || []).filter(s => !linkedIds.has(s.id));
-
-  if (!unclustered.length) {
-    btn.disabled = false;
-    btn.textContent = '🔍 Cluster all';
-    return;
-  }
-
-  toast(`🔍 Clustering ${unclustered.length} signals — this takes a minute…`);
-  btn.textContent = `🔍 0 / ${unclustered.length}`;
-
-  let done = 0;
-  let errors = 0;
-
-  // Process in batches of 5 to avoid overwhelming the function
-  const BATCH = 5;
-  for (let i = 0; i < unclustered.length; i += BATCH) {
-    const batch = unclustered.slice(i, i + BATCH);
-    const h = await authHeaders();
-    await Promise.allSettled(
-      batch.map(sig =>
-        fetch('/.netlify/functions/ai-analyze', {
-          method: 'POST',
-          headers: h,
-          body: JSON.stringify({ type: 'cluster', data: sig }),
-        })
-        .then(r => r.json())
-        .then(r => { if (r.success) done++; else errors++; })
-        .catch(() => errors++)
-      )
-    );
-    btn.textContent = `🔍 ${Math.min(i + BATCH, unclustered.length)} / ${unclustered.length}`;
-    // Small pause between batches
-    await new Promise(r => setTimeout(r, 500));
-  }
-
-  // Fix any signals now in cluster_links but still showing as New
-  const { data: allLinked } = await sb.from('signal_cluster_links').select('signal_id');
-  if (allLinked?.length) {
-    await sb.from('signals')
-      .update({ status: 'Clustered' })
-      .eq('status', 'New')
-      .in('id', allLinked.map(r => r.signal_id));
+    const msg = totalDispatched
+      ? `✅ Dispatched ${totalDispatched} signals for clustering${totalErrors ? ` (${totalErrors} errors)` : ''} — results appear in Discovery shortly`
+      : '✅ Nothing new to cluster';
+    toast(msg);
+  } catch (err) {
+    toast('❌ ' + err.message, true);
   }
 
   btn.disabled = false;
   btn.textContent = '🔍 Cluster all';
-  toast(`✅ Clustered ${done} signals${errors ? ` (${errors} errors)` : ''} — check Discovery Board`);
-  loadInbox();
-  loadDiscovery();
-  loadCommandCenter(); // refresh all nav badges
+  // Reload after a short wait so background results have time to land
+  setTimeout(() => { loadInbox(); loadDiscovery(); loadCommandCenter(); }, 4000);
 }
 
 // ── COMPETITOR ACTIVITY ───────────────────────────────────────────────
