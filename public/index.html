@@ -3744,9 +3744,11 @@ function renderDiscoverySections(all) {
 
   const sv = document.getElementById('discovery-sections-view');
   const collapsed = window._discCollapsed || {};
+  const shownIds = new Set(); // each cluster appears in the first matching section only
 
   sv.innerHTML = SECTIONS.map(sec => {
-    const items = all.filter(sec.filter).sort(sec.sort);
+    const items = all.filter(c => sec.filter(c) && !shownIds.has(c.id)).sort(sec.sort);
+    items.forEach(c => shownIds.add(c.id));
     const limit  = sec.limit || 5;
     const isCollapsed = collapsed[sec.id];
     const shown  = isCollapsed ? [] : items.slice(0, limit);
