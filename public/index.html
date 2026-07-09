@@ -2367,6 +2367,14 @@ async function generateScriptFromBrief(briefId, autoSecs) {
     // Move brief to "Script in review" so it leaves the default brief view
     // (brief moves to Filming only after the script is approved)
     await sb.from('briefs').update({ status: 'Script in review', updated_by: currentUser?.id }).eq('id', briefId);
+    // Move linked cluster off Discovery + Today board
+    if (brief.cluster_id) {
+      await sb.from('discovery_clusters').update({ status: 'Brief created' }).eq('id', brief.cluster_id);
+      await sb.from('today_board_items')
+        .update({ status: 'Resolved', updated_at: new Date().toISOString() })
+        .eq('cluster_id', brief.cluster_id)
+        .not('status', 'in', '("Resolved","Cleanup confirmed","Already covered")');
+    }
     // Remove the row immediately
     row?.remove();
     toast(`✅ Script ready: "${s.script_title}" — ${s.estimated_duration_seconds}s. Find it in Scripts → Needs Review.`);
@@ -3659,6 +3667,10 @@ async function generateBriefFromCluster(clusterId, event) {
 
     // Mark cluster as Brief created so it drops off Discovery/Today board
     await sb.from('discovery_clusters').update({ status: 'Brief created' }).eq('id', clusterId);
+    await sb.from('today_board_items')
+      .update({ status: 'Resolved', updated_at: new Date().toISOString() })
+      .eq('cluster_id', clusterId)
+      .not('status', 'in', '("Resolved","Cleanup confirmed","Already covered")');
 
     toast(`✅ Brief created: "${result.analysis?.title || 'New brief'}". Find it in Briefs as Draft.`);
     if (btn) { btn.disabled = false; btn.textContent = '🪄 Brief'; }
