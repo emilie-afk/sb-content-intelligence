@@ -1513,6 +1513,8 @@ Hook rules (non-negotiable):
 Script structure:
 - Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
 - Structure: hook → problem/payoff → 2-3 concrete tips or steps → CTA.
+- The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
+- The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook's wording. The hook lands the problem; the next line should pivot to the solution or deepen the stakes with new information.
 
 Return ONLY valid JSON:
 {
@@ -1584,6 +1586,8 @@ Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In 
 
 Script: casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
 Structure: hook -> problem/payoff -> 2-3 concrete tips or steps -> CTA.
+The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
+The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook. The hook lands the problem; the next line pivots to the solution or deepens the stakes with new information.
 
 Return ONLY valid JSON:
 {
@@ -1648,6 +1652,8 @@ Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In 
 Script:
 - Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
 - Keep the parts of the original that were NOT flagged — this is a revision, not a rewrite from scratch.
+- The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
+- The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook's wording. The hook lands the problem; the next line should pivot to the solution or deepen the stakes with new information.
 
 Return ONLY valid JSON:
 {
