@@ -2795,6 +2795,7 @@ async function viewScript(id) {
   // HTML (JSON's double quotes terminate the attribute), so the button must
   // reference this variable instead.
   window._viewedScript = s;
+  window._lastScriptAnalysis = null; // clear stale brand-check from any previous script
   const el = document.getElementById('modal-view-content');
   el.innerHTML = `
     <h3 style="margin:0 0 12px">${esc(s.script_title)}</h3>
@@ -2844,7 +2845,7 @@ async function viewScript(id) {
         <option value="Bold claim">Bold claim</option>
         <option value="Mid-action start">Mid-action start</option>
       </select>
-      <button class="btn btn-secondary" onclick="generateRevisedScript()">✨ Regenerate Script</button>
+      <button id="regenerate-script-btn" class="btn btn-secondary" onclick="generateRevisedScript()">✨ Regenerate Script</button>
     </div>
   `;
   document.getElementById('modal-view').style.display = 'flex';
@@ -3293,10 +3294,15 @@ async function generateRevisedScript() {
   if (!s) { toast('Open a script first', true); return; }
   const humanNotes = document.getElementById('script-human-notes')?.value?.trim() || null;
   const hookPattern = document.getElementById('revise-hook-pattern')?.value || null;
-  // No brand check run and no notes = ask for a genuinely fresh take, not a revision of flagged issues
-  const forceFresh = !a.overall;
+  // Fresh take when: no brand check run, OR brand check passed clean (nothing to fix)
+  const hasViolations = (a.brand_violations || []).length > 0;
+  const hasSuggestions = (a.hook_suggestions || []).length > 0 || (a.improvements || []).length > 0;
+  const forceFresh = !a.overall || (!hasViolations && !hasSuggestions && !humanNotes);
+  // Disable both the inline revise button (inside brand check result) and the standalone one
   const btn = document.getElementById('revise-script-btn');
+  const btnStandalone = document.getElementById('regenerate-script-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Writing new version…'; }
+  if (btnStandalone) { btnStandalone.disabled = true; btnStandalone.textContent = '⏳ Generating…'; }
   try {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
@@ -3311,6 +3317,7 @@ async function generateRevisedScript() {
   } catch (err) {
     toast('Error: ' + err.message, true);
     if (btn) { btn.disabled = false; btn.textContent = '✨ Generate revised script'; }
+    if (btnStandalone) { btnStandalone.disabled = false; btnStandalone.textContent = '✨ Regenerate Script'; }
   }
 }
 
