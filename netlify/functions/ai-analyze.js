@@ -1721,19 +1721,27 @@ Score out of 100. brand_violations empty array if none found. A hook is Strong o
 
 // ── CALL CLAUDE ───────────────────────────────────────────────────────────────
 async function callClaude(prompt, maxTokens = 1024) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method:  "POST",
-    headers: {
-      "x-api-key":         CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type":      "application/json",
-    },
-    body: JSON.stringify({
-      model:      CLAUDE_MODEL,
-      max_tokens: maxTokens,
-      messages:   [{ role: "user", content: prompt }],
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3 * 60 * 1000); // 3-min safety net
+  let response;
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method:  "POST",
+      signal:  controller.signal,
+      headers: {
+        "x-api-key":         CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+      },
+      body: JSON.stringify({
+        model:      CLAUDE_MODEL,
+        max_tokens: maxTokens,
+        messages:   [{ role: "user", content: prompt }],
+      }),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const data = await response.json();
   if (data.error) throw new Error(data.error.message);
