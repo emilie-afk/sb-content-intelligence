@@ -2788,13 +2788,48 @@ async function updateScriptStatus(id, status) {
   }
 }
 
+function renderScriptStatusBar(status, id) {
+  const isAdmin = ['admin','owner'].includes(userRole);
+  const statusColor = status === 'Approved' ? '#059669' : status === 'Needs review' ? '#d97706' : '#555';
+  return `
+    <span style="font-size:12px;color:#555;font-weight:600">Status: <span style="color:${statusColor}">${esc(status||'Draft')}</span></span>
+    <span style="flex:1"></span>
+    ${status !== 'Needs review' && status !== 'Approved' ? `<button class="btn btn-secondary btn-sm" onclick="quickScriptStatus('${id}','Needs review')">→ Needs Review</button>` : ''}
+    ${status === 'Needs review' ? `<button class="btn btn-secondary btn-sm" onclick="quickScriptStatus('${id}','Draft')">← Back to Draft</button>` : ''}
+    ${isAdmin && status !== 'Approved' ? `<button class="btn btn-primary btn-sm" onclick="quickScriptStatus('${id}','Approved')">✅ Approve</button>` : ''}
+    ${isAdmin && status === 'Approved' ? `<button class="btn btn-secondary btn-sm" onclick="quickScriptStatus('${id}','Needs review')">↩ Unapprove</button>` : ''}
+  `;
+}
+
 async function quickScriptStatus(id, status) {
   if (status === 'Approved' && !['admin','owner'].includes(userRole)) {
     toast('Only admins and owners can approve scripts', true); return;
   }
   await updateScriptStatus(id, status);
-  // Refresh the modal in place so the status row updates
-  viewScript(id);
+  // Update status bar and cached script object in place — no modal reload needed
+  if (window._viewedScript) window._viewedScript.review_status = status;
+  const bar = document.getElementById('script-status-bar');
+  if (bar) bar.innerHTML = renderScriptStatusBar(status, id);
+  // Refresh the list in the background so it reflects the new status immediately
+  loadScripts();
+}
+
+async function saveScriptReviewNote() {
+  const s = window._viewedScript;
+  if (!s) return;
+  const note = document.getElementById('script-review-note-text')?.value?.trim() ?? '';
+  const btn = document.getElementById('save-review-note-btn');
+  const statusEl = document.getElementById('save-review-note-status');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Saving…'; }
+  const { error } = await sb.from('script_outputs').update({ review_notes: note || null }).eq('id', s.id);
+  if (btn) { btn.disabled = false; btn.textContent = '💾 Save note'; }
+  if (error) {
+    if (statusEl) statusEl.textContent = '❌ Save failed';
+    toast('Could not save note: ' + error.message, true);
+  } else {
+    s.review_notes = note || null; // update cached object
+    if (statusEl) { statusEl.textContent = '✓ Saved'; setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000); }
+  }
 }
 
 async function viewScript(id) {
@@ -2839,31 +2874,44 @@ async function viewScript(id) {
     ${s.full_voiceover_script ? `<div style="margin-bottom:12px"><b>Script:</b><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:#f8f9fa;padding:12px;border-radius:6px">${esc(s.full_voiceover_script)}</pre></div>` : ''}
     ${s.cta ? `<div style="margin-bottom:12px"><b>CTA:</b> ${esc(s.cta)}</div>` : ''}
     ${s.caption ? `<div style="margin-bottom:12px"><b>Caption:</b><br><span style="font-size:13px">${esc(s.caption)}</span></div>` : ''}
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;padding:10px 12px;background:#f8f9fa;border-radius:6px;flex-wrap:wrap">
-      <span style="font-size:12px;color:#555;font-weight:600">Status: <span style="color:#1a5c2a">${esc(s.review_status||'Draft')}</span></span>
-      <span style="flex:1"></span>
-      ${s.review_status !== 'Needs review' && s.review_status !== 'Approved' ? `<button class="btn btn-secondary btn-sm" onclick="quickScriptStatus('${s.id}','Needs review')">→ Needs Review</button>` : ''}
-      ${s.review_status === 'Needs review' ? `<button class="btn btn-secondary btn-sm" onclick="quickScriptStatus('${s.id}','Draft')">← Back to Draft</button>` : ''}
-      ${['admin','owner'].includes(userRole) && s.review_status !== 'Approved' ? `<button class="btn btn-primary btn-sm" onclick="quickScriptStatus('${s.id}','Approved')">✅ Approve</button>` : ''}
-      ${['admin','owner'].includes(userRole) && s.review_status === 'Approved' ? `<button class="btn btn-secondary btn-sm" onclick="quickScriptStatus('${s.id}','Needs review')">↩ Unapprove</button>` : ''}
+    <div style="margin-bottom:16px;border:1px solid #d97706;border-radius:8px;overflow:hidden">
+      <div style="padding:8px 12px;background:#78350f;border-bottom:1px solid #d97706;display:flex;align-items:center;gap:8px">
+        <span style="font-size:13px;font-weight:600;color:#fef3c7">💬 Review note for the team</span>
+        <span style="font-size:11px;color:#fcd34d">Saved to DB — visible to everyone</span>
+      </div>
+      <div style="padding:10px 12px;background:#1c1107">
+        <textarea id="script-review-note-text" placeholder="Leave a note for the Marketing Assistant, e.g. 'Hook is too generic — try a specific symptom. Keep under 20s.'" style="width:100%;padding:8px;font-size:13px;border:1px solid #92400e;border-radius:6px;background:#1e293b;color:#e2e8f0;resize:vertical;box-sizing:border-box;margin-bottom:8px" rows="3">${esc(s.review_notes || '')}</textarea>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button id="save-review-note-btn" class="btn btn-secondary" onclick="saveScriptReviewNote()">💾 Save note</button>
+          <span id="save-review-note-status" style="font-size:12px;color:#94a3b8"></span>
+        </div>
+      </div>
+    </div>
+    <div style="margin-bottom:16px;border:1px solid #374151;border-radius:8px;overflow:hidden">
+      <div style="padding:8px 12px;background:#1e293b;border-bottom:1px solid #374151;display:flex;align-items:center;gap:8px">
+        <span style="font-size:13px;font-weight:600;color:#e2e8f0">📝 Review notes</span>
+        <span style="font-size:11px;color:#94a3b8">AI reads these and revises the script</span>
+      </div>
+      <div style="padding:10px 12px;background:#0f172a">
+        <textarea id="script-human-notes" placeholder="e.g. make the hook punchier, shorten to 15s, add product mention earlier, avoid the word 'drainage'" style="width:100%;padding:8px;font-size:13px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0;resize:vertical;box-sizing:border-box;margin-bottom:8px" rows="3"></textarea>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button id="regenerate-script-btn" class="btn btn-primary" onclick="generateRevisedScript()">✏️ Revise with notes</button>
+          <select id="revise-hook-pattern" style="font-size:12px;padding:5px 8px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0">
+            <option value="">Hook: Let AI choose</option>
+            <option value="Symptom first">Symptom first</option>
+            <option value="Challenge a belief">Challenge a belief</option>
+            <option value="Stakes / urgency">Stakes / urgency</option>
+            <option value="Bold claim">Bold claim</option>
+            <option value="Mid-action start">Mid-action start</option>
+          </select>
+          <button class="btn btn-secondary" onclick="runAIAnalysis('script', window._viewedScript)">🤖 AI Brand Check</button>
+        </div>
+      </div>
+    </div>
+    <div id="script-status-bar" style="display:flex;gap:8px;align-items:center;margin-bottom:16px;padding:10px 12px;background:#f8f9fa;border-radius:6px;flex-wrap:wrap">
+      ${renderScriptStatusBar(s.review_status, s.id)}
     </div>
     <div id="ai-analysis-result" style="margin-top:16px"></div>
-    <div style="margin-top:14px">
-      <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Your notes for AI (optional):</label>
-      <textarea id="script-human-notes" placeholder="e.g. make the hook punchier, shorten to 15s, add product mention earlier" style="width:100%;padding:8px;font-size:13px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0;resize:vertical;box-sizing:border-box" rows="2"></textarea>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
-      <button class="btn btn-secondary" onclick="runAIAnalysis('script', window._viewedScript)">🤖 AI Brand Check</button>
-      <select id="revise-hook-pattern" style="font-size:12px;padding:5px 8px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0">
-        <option value="">Hook: Let AI choose</option>
-        <option value="Symptom first">Symptom first</option>
-        <option value="Challenge a belief">Challenge a belief</option>
-        <option value="Stakes / urgency">Stakes / urgency</option>
-        <option value="Bold claim">Bold claim</option>
-        <option value="Mid-action start">Mid-action start</option>
-      </select>
-      <button id="regenerate-script-btn" class="btn btn-secondary" onclick="generateRevisedScript()">✨ Regenerate Script</button>
-    </div>
   `;
   document.getElementById('modal-view').style.display = 'flex';
 }
