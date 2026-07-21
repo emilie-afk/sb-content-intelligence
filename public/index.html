@@ -585,9 +585,9 @@ tbody tr:hover { background: #fafffe; }
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>Title</th><th>Platform</th><th>Published</th><th>Score</th><th>24h</th><th>72h</th><th>7d</th><th>Learning</th>
+            <th>Title</th><th>Platform</th><th>Published</th><th>Views</th><th>Performance</th><th>7d Status</th><th>Learning</th>
           </tr></thead>
-          <tbody id="published-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+          <tbody id="published-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -2392,15 +2392,14 @@ async function loadPublished() {
   if (platform) q = q.eq('platform', platform);
   const { data } = await q;
   const tbody = document.getElementById('published-table');
-  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📊</div><p>No published videos yet</p></div></td></tr>'; return; }
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">📊</div><p>No published videos yet</p></div></td></tr>'; return; }
   tbody.innerHTML = data.map(v => `
     <tr>
-      <td class="truncate"><a href="${esc(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.video_url||'—')}</a></td>
+      <td class="truncate"><a href="${esc(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.topic||v.video_url||'—')}</a></td>
       <td>${esc(v.platform||'—')}</td>
       <td>${v.publish_datetime ? new Date(v.publish_datetime).toLocaleDateString() : '—'}</td>
-      <td>${v.original_opportunity_score != null ? `<span class="score-pill ${v.original_opportunity_score>=65?'score-high':v.original_opportunity_score>=40?'score-medium':'score-low'}">${v.original_opportunity_score}</span>` : '—'}</td>
-      <td>${snapshotBadge(v.snapshot_24h_status)}</td>
-      <td>${snapshotBadge(v.snapshot_72h_status)}</td>
+      <td style="font-weight:600">${v.views_count != null ? v.views_count.toLocaleString() : '—'}</td>
+      <td>${perfTierBadge(v.performance_tier, v.snapshot_7d_status)}</td>
       <td>${snapshotBadge(v.snapshot_7d_status)}</td>
       <td><span class="badge badge-${(v.learning_status||'pending').toLowerCase().replace(' ','-')}">${v.learning_status||'Pending'}</span></td>
     </tr>`).join('');
@@ -3125,6 +3124,20 @@ function esc(str) {
 function snapshotBadge(status) {
   const cls = { Pending:'badge-pending', Submitted:'badge-submitted', Overdue:'badge-overdue' }[status] || 'badge-pending';
   return `<span class="badge ${cls}">${status||'Pending'}</span>`;
+}
+
+function perfTierBadge(tier, snapshotStatus) {
+  if (!tier) {
+    // Not yet synced from sheet — show snapshot status as placeholder
+    return snapshotStatus === 'Done' ? '<span style="font-size:12px;color:#94a3b8">Awaiting sync</span>' : '<span style="font-size:12px;color:#94a3b8">—</span>';
+  }
+  const cfg = {
+    'Doing something good!': { bg:'#059669', color:'#fff', icon:'🌟' },
+    'Normal':                 { bg:'#2563eb', color:'#fff', icon:'✅' },
+    'Needs huge improvement': { bg:'#d97706', color:'#fff', icon:'⚠️' },
+    'Unacceptable':           { bg:'#dc2626', color:'#fff', icon:'🔴' },
+  }[tier] || { bg:'#6b7280', color:'#fff', icon:'' };
+  return `<span style="display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:${cfg.bg};color:${cfg.color}">${cfg.icon} ${tier}</span>`;
 }
 
 function toast(msg, isError = false) {
