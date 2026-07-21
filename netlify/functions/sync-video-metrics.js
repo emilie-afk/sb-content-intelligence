@@ -21,23 +21,33 @@ const { CORS_HEADERS } = require("./_auth");
 
 const SHEET_NAME = "SB Videos";
 
+// Sheet column layout (18 cols, A–R):
+//   A  Post URL        B  Platform       C  Published On
+//   D  Topic           E  Format
+//   F  Day 1 Views     G  Day 2 Views    H  Day 3 Views
+//   I  Likes           J  Comments       K  Saves
+//   L  Shares          M  Follows        N  Checked On
+//   O  Rating          P  What Worked    Q  Improve
+//   R  Submitted
 const V = {
-  POST_URL:     1,
-  PLATFORM:     2,
-  PUBLISHED_ON: 3,
-  TOPIC:        4,
-  FORMAT:       5,
-  VIEWS:        6,
-  LIKES:        7,
-  COMMENTS:     8,
-  SAVES:        9,
-  SHARES:       10,
-  FOLLOWS:      11,
-  CHECKED_ON:   12,
-  RATING:       13,
-  WHAT_WORKED:  14,
-  IMPROVE:      15,
-  SUBMITTED:    16,
+  POST_URL:     1,  // A
+  PLATFORM:     2,  // B
+  PUBLISHED_ON: 3,  // C
+  TOPIC:        4,  // D
+  FORMAT:       5,  // E
+  DAY1_VIEWS:   6,  // F
+  DAY2_VIEWS:   7,  // G
+  DAY3_VIEWS:   8,  // H
+  LIKES:        9,  // I
+  COMMENTS:     10, // J
+  SAVES:        11, // K
+  SHARES:       12, // L
+  FOLLOWS:      13, // M
+  CHECKED_ON:   14, // N
+  RATING:       15, // O
+  WHAT_WORKED:  16, // P
+  IMPROVE:      17, // Q
+  SUBMITTED:    18, // R
 };
 
 const supabase = createClient(
@@ -84,7 +94,7 @@ exports.handler = async (event) => {
 
     const resp = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
-      range:         `${SHEET_NAME}!A2:P`,  // skip header row
+      range:         `${SHEET_NAME}!A2:R`,  // skip header row, 18 cols
     });
 
     const rows = resp.data.values || [];
@@ -105,7 +115,11 @@ exports.handler = async (event) => {
         publishedOn: (row[V.PUBLISHED_ON - 1] || "").trim(),
         topic:       (row[V.TOPIC        - 1] || "").trim(),
         format:      (row[V.FORMAT       - 1] || "").trim(),
-        views:       (row[V.VIEWS        - 1] || "").trim(),
+        day1Views:   (row[V.DAY1_VIEWS   - 1] || "").trim(),
+        day2Views:   (row[V.DAY2_VIEWS   - 1] || "").trim(),
+        day3Views:   (row[V.DAY3_VIEWS   - 1] || "").trim(),
+        // "views" alias: use the most recent day with data
+        views:       (row[V.DAY3_VIEWS   - 1] || row[V.DAY2_VIEWS - 1] || row[V.DAY1_VIEWS - 1] || "").trim(),
         likes:       (row[V.LIKES        - 1] || "").trim(),
         comments:    (row[V.COMMENTS     - 1] || "").trim(),
         saves:       (row[V.SAVES        - 1] || "").trim(),
@@ -162,6 +176,7 @@ exports.handler = async (event) => {
           performance_summary: buildSummary(r),
           learning_status:    "Ready",
           snapshot_7d_status: "Done",
+          ...parseMetrics(r),
         };
         const { data: ins } = await supabase
           .from("published_videos")
@@ -185,6 +200,7 @@ exports.handler = async (event) => {
         snapshot_7d_status:   "Done",
         snapshot_24h_status:  video.snapshot_24h_status === "Pending" ? "Done" : video.snapshot_24h_status,
         snapshot_72h_status:  video.snapshot_72h_status === "Pending" ? "Done" : video.snapshot_72h_status,
+        ...parseMetrics(r),
       };
 
       // Parse comments for follow-up questions if they look like questions
@@ -225,7 +241,7 @@ exports.handler = async (event) => {
       for (const u of sheetUpdates) {
         await sheets.spreadsheets.values.update({
           spreadsheetId:   sheetId,
-          range:           `${SHEET_NAME}!P${u.rowIndex}`,
+          range:           `${SHEET_NAME}!R${u.rowIndex}`,
           valueInputOption:"USER_ENTERED",
           resource:        { values: [[u.label]] },
         });
@@ -252,6 +268,29 @@ exports.handler = async (event) => {
     };
   }
 };
+
+// ── Parse numeric metrics + compute performance tier ─────────────────────────
+function parseMetrics(r) {
+  const toInt = (s) => { const n = parseInt((s || "").replace(/,/g, ""), 10); return isNaN(n) ? null : n; };
+  const views = toInt(r.views);
+  return {
+    views_count:    views,
+    likes_count:    toInt(r.likes),
+    comments_count: toInt(r.comments),
+    saves_count:    toInt(r.saves),
+    shares_count:   toInt(r.shares),
+    follows_count:  toInt(r.follows),
+    performance_tier: performanceTier(views),
+  };
+}
+
+function performanceTier(views) {
+  if (views === null || views === undefined) return null;
+  if (views >= 10000) return "Doing something good!";
+  if (views >= 1000)  return "Normal";
+  if (views >= 200)   return "Needs huge improvement";
+  return "Unacceptable";
+}
 
 // ── Build a rich performance_summary string the AI can read ──────────────────
 function buildSummary(r) {

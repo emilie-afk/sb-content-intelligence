@@ -19,11 +19,15 @@ const supabase = createClient(
 
 const SHEET_NAME = 'SB Videos';
 
-// Column positions matching video-tracker-script.gs V object
+// Column positions — 18-column layout:
+//   A  Post URL   B  Platform   C  Published On   D  Topic   E  Format
+//   F  Day1Views  G  Day2Views  H  Day3Views
+//   I  Likes  J  Comments  K  Saves  L  Shares  M  Follows  N  Checked On
+//   O  Rating  P  What Worked  Q  Improve  R  Submitted
 const V = {
   POST_URL: 1, PLATFORM: 2, PUBLISHED_ON: 3, TOPIC: 4, FORMAT: 5,
-  // F–O left blank (metrics + review filled later by team)
-  SUBMITTED: 16,
+  // F–Q left blank (metrics filled by daily scraper, review by team)
+  SUBMITTED: 18,
 };
 
 exports.handler = async (event) => {
@@ -65,13 +69,13 @@ exports.handler = async (event) => {
         });
         const sheets = google.sheets({ version: 'v4', auth });
 
-        const row = new Array(16).fill('');
+        const row = new Array(18).fill('');
         row[V.POST_URL     - 1] = postUrl    || '';
         row[V.PLATFORM     - 1] = platform   || '';
         row[V.PUBLISHED_ON - 1] = publishedOn || new Date().toISOString().slice(0, 10);
         row[V.TOPIC        - 1] = topic      || '';
         row[V.FORMAT       - 1] = format     || '';
-        row[V.SUBMITTED    - 1] = '— add metrics in 5–7 days';
+        row[V.SUBMITTED    - 1] = '— metrics auto-synced daily';
 
         await sheets.spreadsheets.values.append({
           spreadsheetId:   sheetId,
