@@ -2399,7 +2399,7 @@ async function loadPublished() {
       <td class="truncate"><a href="${esc(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.topic||v.video_url||'—')}</a></td>
       <td>${esc(v.platform||'—')}</td>
       <td>${v.publish_datetime ? new Date(v.publish_datetime).toLocaleDateString() : '—'}</td>
-      <td style="font-weight:600">${v.views_count != null ? v.views_count.toLocaleString() : '—'}</td>
+      <td style="font-weight:600">${v.views_count != null ? v.views_count.toLocaleString() + (v.views_day ? '<span style="font-size:11px;font-weight:400;color:#94a3b8;margin-left:4px">D'+v.views_day+'</span>' : '') : '—'}</td>
       <td>${perfTierBadge(v.performance_tier, v.snapshot_7d_status)}</td>
       <td>${snapshotBadge(v.snapshot_7d_status)}</td>
       <td><span class="badge badge-${(v.learning_status||'pending').toLowerCase().replace(' ','-')}">${v.learning_status||'Pending'}</span></td>
