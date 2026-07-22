@@ -92,11 +92,51 @@ exports.handler = async (event) => {
       errors.push('GOOGLE_VIDEO_TRACKER_ID or GOOGLE_SERVICE_ACCOUNT_JSON not set');
     }
 
-    // ── 2. Auto-link script to published_videos ───────────────────────────
-    // Walk opportunity → brief → script_outputs to find the script used,
-    // then write script_output_id onto the published_videos row we just created.
-    let linkedScriptId = null;
-    if (opportunityId) {
+    // ── 2. Create published_videos row in Supabase ───────────────────────
+    // This is the source of truth for the Published Results page.
+    // Metrics (views/likes etc.) are filled in later by the daily sync.
+    let publishedVideoId = null;
+    try {
+      // Look up brief_id from opportunity (for script linking below)
+      let briefId = null;
+      if (opportunityId) {
+        const { data: opp } = await supabase
+          .from('opportunities')
+          .select('brief_id')
+          .eq('id', opportunityId)
+          .single();
+        briefId = opp?.brief_id || null;
+      }
+
+      const { data: pubVideo, error: pubErr } = await supabase
+        .from('published_videos')
+        .insert({
+          video_url:        postUrl,
+          platform:         platform  || null,
+          topic:            topic     || null,
+          publish_datetime: publishedOn
+            ? new Date(publishedOn + 'T00:00:00').toISOString()
+            : new Date().toISOString(),
+          cluster_id:       clusterId || null,
+          brief_id:         briefId   || null,
+        })
+        .select('id')
+        .single();
+
+      if (pubErr) {
+        console.warn('published_videos insert failed:', pubErr.message);
+        errors.push('DB insert: ' + pubErr.message);
+      } else {
+        publishedVideoId = pubVideo?.id || null;
+      }
+    } catch (insertErr) {
+      console.warn('published_videos insert error:', insertErr.message);
+      errors.push('DB insert: ' + insertErr.message);
+    }
+
+    // ── 3. Auto-link script to published_videos ───────────────────────────
+    // Walk opportunity → brief → script_outputs to find the script used.
+    if (publishedVideoId && opportunityId) {
       try {
         const { data: opp } = await supabase
           .from('opportunities')
@@ -105,7 +145,6 @@ exports.handler = async (event) => {
           .single();
 
         if (opp?.brief_id) {
-          // Prefer the most recently approved/used script for this brief
           const { data: scripts } = await supabase
             .from('script_outputs')
             .select('id')
@@ -115,27 +154,23 @@ exports.handler = async (event) => {
             .limit(1);
 
           if (scripts?.[0]) {
-            linkedScriptId = scripts[0].id;
+            const linkedScriptId = scripts[0].id;
 
-            // Tag the script as used in production
             await supabase.from('script_outputs').update({
               review_status: 'Used in production',
             }).eq('id', linkedScriptId);
 
-            // Write script_output_id onto the published_videos row
-            // (match by post_url since we just appended the row above)
             await supabase.from('published_videos').update({
               script_output_id: linkedScriptId,
-            }).eq('video_url', postUrl);
+            }).eq('id', publishedVideoId);
           }
         }
       } catch (linkErr) {
         console.warn('Script link failed (non-fatal):', linkErr.message);
-        errors.push('Script link: ' + linkErr.message);
       }
     }
 
-    // ── 3. Mark opportunity as Published + close cluster in Supabase ──────
+    // ── 5. Mark opportunity as Published + close cluster ─────────────────
     if (opportunityId || clusterId) {
       try {
         if (opportunityId) {
@@ -145,8 +180,6 @@ exports.handler = async (event) => {
           }).eq('id', opportunityId);
         }
 
-        // Close the source cluster — drops it off Discovery and Today board,
-        // and signals the AI learning loop that this topic has been covered.
         if (clusterId) {
           await supabase.from('discovery_clusters').update({
             status:          'Published',
