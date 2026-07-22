@@ -179,11 +179,13 @@ exports.handler = async (event) => {
           snapshot_7d_status: "Submitted",
           ...parseMetrics(r),
         };
-        const { data: ins } = await supabase
+        const { data: ins, error: insErr } = await supabase
           .from("published_videos")
           .insert(insertRow)
           .select("id")
           .single();
+
+        if (insErr) console.error("INSERT FAILED:", insErr.message, JSON.stringify(insertRow));
 
         if (ins) {
           sheetUpdates.push({ rowIndex: r.rowIndex, label: "✅ synced (new)" });
