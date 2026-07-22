@@ -203,7 +203,7 @@ exports.handler = async (event) => {
       const updates = {
         performance_summary:  buildSummary(rWithRating),
         learning_status:      "Ready",
-        snapshot_7d_status:   "Done",
+        snapshot_7d_status:   "Submitted",
         snapshot_24h_status:  video.snapshot_24h_status === "Pending" ? "Submitted" : video.snapshot_24h_status,
         snapshot_72h_status:  video.snapshot_72h_status === "Pending" ? "Submitted" : video.snapshot_72h_status,
         ...parseMetrics(r),
