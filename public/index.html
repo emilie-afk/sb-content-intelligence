@@ -586,9 +586,9 @@ tbody tr:hover { background: #fafffe; }
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>Title</th><th>Platform</th><th>Published</th><th>Views</th><th>Performance</th><th>7d Status</th><th>Learning</th>
+            <th>Title</th><th>Platform</th><th>Published</th><th>Views</th><th>Performance</th><th>7d Status</th><th>Learning</th><th>Script</th>
           </tr></thead>
-          <tbody id="published-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+          <tbody id="published-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -2388,13 +2388,20 @@ async function generateScriptFromBrief(briefId, autoSecs) {
 
 // ── PUBLISHED ─────────────────────────────────────────────────────────
 async function loadPublished() {
-  let q = sb.from('published_videos').select('*').order('publish_datetime',{ascending:false}).limit(50);
+  let q = sb.from('published_videos')
+    .select('*, script_outputs(id, script_title, opening_hook)')
+    .order('publish_datetime',{ascending:false}).limit(50);
   const platform = document.getElementById('published-platform-filter')?.value;
   if (platform) q = q.eq('platform', platform);
   const { data } = await q;
   const tbody = document.getElementById('published-table');
-  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">📊</div><p>No published videos yet</p></div></td></tr>'; return; }
-  tbody.innerHTML = data.map(v => `
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📊</div><p>No published videos yet</p></div></td></tr>'; return; }
+  tbody.innerHTML = data.map(v => {
+    const script = v.script_outputs;
+    const scriptCell = script
+      ? `<span title="${esc(script.opening_hook||script.script_title||'')}" style="font-size:12px;color:#4f46e5;cursor:default">📝 ${esc((script.script_title||'Script').substring(0,30))}${(script.script_title||'').length>30?'…':''}</span>`
+      : '<span style="font-size:12px;color:#94a3b8">—</span>';
+    return `
     <tr>
       <td class="truncate"><a href="${esc(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.topic||v.video_url||'—')}</a></td>
       <td>${esc(v.platform||'—')}</td>
@@ -2403,7 +2410,9 @@ async function loadPublished() {
       <td>${perfTierBadge(v.performance_tier, v.snapshot_7d_status)}</td>
       <td>${snapshotBadge(v.snapshot_7d_status)}</td>
       <td><span class="badge badge-${(v.learning_status||'pending').toLowerCase().replace(' ','-')}">${v.learning_status||'Pending'}</span></td>
-    </tr>`).join('');
+      <td>${scriptCell}</td>
+    </tr>`;
+  }).join('');
 }
 
 async function syncVideoMetrics() {
