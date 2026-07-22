@@ -132,9 +132,8 @@ exports.handler = async (event) => {
         submitted:   (row[V.SUBMITTED    - 1] || "").trim(),
       }))
       .filter(r =>
-        r.postUrl &&          // must have URL to match
-        r.views &&            // must have metrics
-        r.rating &&           // must have rating
+        r.postUrl &&   // must have URL to match
+        r.views &&     // must have at least one day's views (rating not required — scraper fills views automatically)
         !r.submitted.startsWith("✅ synced") // not already synced to Supabase
       );
 
@@ -149,7 +148,7 @@ exports.handler = async (event) => {
     // ── 3. Fetch all published_videos so we can match by URL ─────────────
     const { data: published } = await supabase
       .from("published_videos")
-      .select("id, video_url, cluster_id, topic, plant_or_product");
+      .select("id, video_url, cluster_id, topic, plant_or_product, script_output_id");
 
     const urlMap = new Map((published || []).map(v => [
       (v.video_url || "").trim().replace(/\/$/, ""),
@@ -168,12 +167,14 @@ exports.handler = async (event) => {
       if (!video) {
         // Row in sheet has no matching published_videos record —
         // insert a new one so it's tracked going forward
+        const effectiveRatingIns = r.rating || performanceTier(toInt(r.views));
+        const rWithRatingIns = { ...r, rating: effectiveRatingIns };
         const insertRow = {
           video_url:          r.postUrl,
           platform:           r.platform || null,
           publish_datetime:   r.publishedOn || null,
           topic:              r.topic || null,
-          performance_summary: buildSummary(r),
+          performance_summary: buildSummary(rWithRatingIns),
           learning_status:    "Ready",
           snapshot_7d_status: "Done",
           ...parseMetrics(r),
@@ -194,8 +195,11 @@ exports.handler = async (event) => {
       }
 
       // Update the existing record
+      // Use auto-calculated tier from views if no manual rating is set
+      const effectiveRating = r.rating || performanceTier(toInt(r.views));
+      const rWithRating = { ...r, rating: effectiveRating };
       const updates = {
-        performance_summary:  buildSummary(r),
+        performance_summary:  buildSummary(rWithRating),
         learning_status:      "Ready",
         snapshot_7d_status:   "Done",
         snapshot_24h_status:  video.snapshot_24h_status === "Pending" ? "Done" : video.snapshot_24h_status,
@@ -228,6 +232,17 @@ exports.handler = async (event) => {
             new_signals_since_review: 1,
           }).eq("id", video.cluster_id);
         }
+      }
+
+      // ── Feed performance back to the originating script ─────────────────
+      if (video.script_output_id) {
+        const scriptPerf = buildScriptPerformanceNote(rWithRating);
+        await supabase.from("script_outputs").update({
+          performance_tier: effectiveRating,
+          performance_note: scriptPerf,
+          measured_at:      new Date().toISOString(),
+          review_status:    "Measured",
+        }).eq("id", video.script_output_id);
       }
 
       sheetUpdates.push({ rowIndex: r.rowIndex, label: "✅ synced" });
@@ -269,9 +284,11 @@ exports.handler = async (event) => {
   }
 };
 
+// ── Shared helpers ────────────────────────────────────────────────────────────
+function toInt(s) { const n = parseInt((s || "").replace(/,/g, ""), 10); return isNaN(n) ? null : n; }
+
 // ── Parse numeric metrics + compute performance tier ─────────────────────────
 function parseMetrics(r) {
-  const toInt = (s) => { const n = parseInt((s || "").replace(/,/g, ""), 10); return isNaN(n) ? null : n; };
   const views = toInt(r.views);
   return {
     views_count:    views,
@@ -290,6 +307,23 @@ function performanceTier(views) {
   if (views >= 1000)  return "Normal";
   if (views >= 200)   return "Needs huge improvement";
   return "Unacceptable";
+}
+
+// ── Build a short performance note written back to the script ────────────────
+function buildScriptPerformanceNote(r) {
+  const parts = [
+    `Result: ${r.rating || "unrated"} — ${r.views ? r.views + " views" : "no view data"}`,
+    [
+      r.likes    ? `${r.likes} likes`    : null,
+      r.saves    ? `${r.saves} saves`    : null,
+      r.comments ? `${r.comments} comments` : null,
+      r.shares   ? `${r.shares} shares`  : null,
+      r.follows  ? `${r.follows} follows` : null,
+    ].filter(Boolean).join(", ") || null,
+    r.whatWorked ? `What worked: ${r.whatWorked}` : null,
+    r.improve    ? `Improve: ${r.improve}` : null,
+  ].filter(Boolean).join(" | ");
+  return parts;
 }
 
 // ── Build a rich performance_summary string the AI can read ──────────────────

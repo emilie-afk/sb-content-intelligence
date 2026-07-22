@@ -313,7 +313,19 @@ exports.handler = async (event) => {
       const target = Math.min(600, Math.max(5, Number(data.target_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
       const learningMemory = await fetchLearningMemory(supabase, data.featured_product || data.title);
-      prompt = buildScriptGenPrompt(data, rules || [], target, lessons, learningMemory);
+
+      // Fetch hooks used in the last 30 days so the prompt can avoid repeating them
+      const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const { data: recentScripts } = await supabase
+        .from("script_outputs")
+        .select("opening_hook")
+        .gte("created_at", thirtyDaysAgo.toISOString())
+        .not("opening_hook", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(30);
+      const recentHooks = (recentScripts || []).map(s => s.opening_hook).filter(Boolean);
+
+      prompt = buildScriptGenPrompt(data, rules || [], target, lessons, learningMemory, recentHooks);
       const gen = await callClaude(prompt, 2048);
 
       // Ensure the voiceover starts with the hook (safety net if AI forgot)
@@ -391,7 +403,19 @@ exports.handler = async (event) => {
 
       const target = Math.min(600, Math.max(5, Number(orig.estimated_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
-      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null, data.hook_pattern || null, data.force_fresh || false);
+
+      // Fetch hooks used in the last 30 days to avoid repeating patterns
+      const thirtyDaysAgo2 = new Date(); thirtyDaysAgo2.setDate(thirtyDaysAgo2.getDate() - 30);
+      const { data: recentScripts2 } = await supabase
+        .from("script_outputs")
+        .select("opening_hook")
+        .gte("created_at", thirtyDaysAgo2.toISOString())
+        .not("opening_hook", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(30);
+      const recentHooks2 = (recentScripts2 || []).map(s => s.opening_hook).filter(Boolean);
+
+      prompt = buildScriptRevisionPrompt(orig, feedback, rules || [], target, lessons, data.human_notes || null, data.hook_pattern || null, data.force_fresh || false, recentHooks2);
       const gen = await callClaude(prompt, 2048);
 
       // Safety net: ensure hook is literally the first line of the voiceover
@@ -1457,11 +1481,19 @@ PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing
 5. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
 6. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".`;
 
-function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory) {
+function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, recentHooks = []) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
   const wordBudget = Math.round(targetSecs * 2.5); // ~150 wpm speaking pace
+
+  // Build hook avoidance block — exact lines + structural patterns extracted from them
+  const hookAvoidanceBlock = recentHooks.length
+    ? `HOOKS USED IN THE LAST 30 DAYS — do NOT reuse these phrasings or their underlying patterns:
+${recentHooks.map(h => `- "${h}"`).join("\n")}
+
+Avoid repeating the same sentence structure even with different words. For example, if "Your cactus base is squishy" was used, do not start with "Your [plant] [body part] is [adjective]". Pick a structurally different opening.`
+    : "";
 
   return `You are writing a short-form video script for Succulents Box, a succulent plant subscription company.
 
@@ -1477,7 +1509,7 @@ CTA: ${b.cta || "not specified"}
 
 TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
 
-${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
+${hookAvoidanceBlock ? hookAvoidanceBlock + "\n" : ""}${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
 ${SCRIPT_PREFLIGHT_CHECKLIST}
@@ -1536,7 +1568,7 @@ Return ONLY valid JSON:
 
 
 // ── SCRIPT REVISION PROMPT ────────────────────────────────────────────────────
-function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, humanNotes, hookPattern, forceFresh) {
+function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, humanNotes, hookPattern, forceFresh, recentHooks = []) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1548,11 +1580,18 @@ function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, h
   const hookIdeas     = (feedback.hook_suggestions || []).map(h => `- "${h}"`).join("\n");
   const improvements  = (feedback.improvements || []).map(i => `- ${i}`).join("\n");
 
+  const hookAvoidanceBlock = recentHooks.length
+    ? `HOOKS USED IN THE LAST 30 DAYS — do NOT reuse these phrasings or their underlying patterns:
+${recentHooks.map(h => `- "${h}"`).join("\n")}
+
+Avoid repeating the same sentence structure even with different words.`
+    : "";
+
   // Fresh rewrite mode: no brand check was run, user just wants a genuinely new take
   if (forceFresh) {
     return `You are writing a fresh new version of a short-form video script for Succulents Box, a succulent plant subscription company.
 The previous version is shown below as reference only — do NOT copy it. Write a meaningfully different script on the same topic.
-
+${hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : ""}
 PREVIOUS SCRIPT (${orig.script_version || "v1"}) — for reference, do NOT reuse its hook or opening structure:
 Topic/title: ${orig.script_title || ""}
 Platform: ${orig.platform || ""}
@@ -1609,7 +1648,7 @@ Return ONLY valid JSON:
 
   return `You are revising a short-form video script for Succulents Box, a succulent plant subscription company.
 A brand reviewer flagged issues in the current version. Write an improved version that fixes EVERY flagged issue while keeping what already works.
-
+${hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : ""}
 CURRENT SCRIPT (${orig.script_version || "v1"}):
 Title: ${orig.script_title || ""}
 Platform: ${orig.platform || ""}

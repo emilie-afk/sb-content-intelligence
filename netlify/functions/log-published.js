@@ -92,7 +92,50 @@ exports.handler = async (event) => {
       errors.push('GOOGLE_VIDEO_TRACKER_ID or GOOGLE_SERVICE_ACCOUNT_JSON not set');
     }
 
-    // ── 2. Mark opportunity as Published + close cluster in Supabase ──────
+    // ── 2. Auto-link script to published_videos ───────────────────────────
+    // Walk opportunity → brief → script_outputs to find the script used,
+    // then write script_output_id onto the published_videos row we just created.
+    let linkedScriptId = null;
+    if (opportunityId) {
+      try {
+        const { data: opp } = await supabase
+          .from('opportunities')
+          .select('brief_id')
+          .eq('id', opportunityId)
+          .single();
+
+        if (opp?.brief_id) {
+          // Prefer the most recently approved/used script for this brief
+          const { data: scripts } = await supabase
+            .from('script_outputs')
+            .select('id')
+            .eq('brief_id', opp.brief_id)
+            .in('review_status', ['Approved', 'Used in production', 'Draft'])
+            .order('updated_at', { ascending: false })
+            .limit(1);
+
+          if (scripts?.[0]) {
+            linkedScriptId = scripts[0].id;
+
+            // Tag the script as used in production
+            await supabase.from('script_outputs').update({
+              review_status: 'Used in production',
+            }).eq('id', linkedScriptId);
+
+            // Write script_output_id onto the published_videos row
+            // (match by post_url since we just appended the row above)
+            await supabase.from('published_videos').update({
+              script_output_id: linkedScriptId,
+            }).eq('video_url', postUrl);
+          }
+        }
+      } catch (linkErr) {
+        console.warn('Script link failed (non-fatal):', linkErr.message);
+        errors.push('Script link: ' + linkErr.message);
+      }
+    }
+
+    // ── 3. Mark opportunity as Published + close cluster in Supabase ──────
     if (opportunityId || clusterId) {
       try {
         if (opportunityId) {
