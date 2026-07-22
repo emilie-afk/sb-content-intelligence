@@ -609,7 +609,10 @@ tbody tr:hover { background: #fafffe; }
             <option value="Archived">Archived</option>
           </select>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="openLearningModal()">+ Add Memory</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary btn-sm" id="generate-learning-btn" onclick="generateLearning()">⚡ Generate from Videos</button>
+          <button class="btn btn-primary btn-sm" onclick="openLearningModal()">+ Add Memory</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
@@ -2436,6 +2439,30 @@ async function syncVideoMetrics() {
 }
 
 // ── LEARNING ──────────────────────────────────────────────────────────
+async function generateLearning() {
+  const btn = document.getElementById('generate-learning-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
+  try {
+    const resp = await callFn('generate-learning', {});
+    const d = await resp.json();
+    if (d.generated > 0) {
+      toast(`✅ Generated ${d.generated} draft memor${d.generated === 1 ? 'y' : 'ies'} — review them below`);
+      // Switch filter to show Needs review so new rows appear immediately
+      const filter = document.getElementById('learning-status-filter');
+      if (filter) filter.value = 'Needs review next time';
+      loadLearning();
+    } else if (d.message) {
+      toast(d.message);
+    } else {
+      toast('No new videos ready for learning generation');
+    }
+  } catch(e) {
+    toast('Error: ' + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Generate from Videos'; }
+  }
+}
+
 async function loadLearning() {
   let q = sb.from('learning_memory').select('*').order('date_added',{ascending:false}).limit(50);
   const status = document.getElementById('learning-status-filter')?.value;
