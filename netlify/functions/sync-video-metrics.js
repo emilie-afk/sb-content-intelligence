@@ -289,25 +289,41 @@ exports.handler = async (event) => {
 // ── Shared helpers ────────────────────────────────────────────────────────────
 function toInt(s) { const n = parseInt((s || "").replace(/,/g, ""), 10); return isNaN(n) ? null : n; }
 
+// ── Determine which day's views are being used ───────────────────────────────
+function viewsDay(r) {
+  if (r.day3Views) return 3;
+  if (r.day2Views) return 2;
+  return 1;
+}
+
 // ── Parse numeric metrics + compute performance tier ─────────────────────────
 function parseMetrics(r) {
   const views = toInt(r.views);
+  const day   = viewsDay(r);
   return {
-    views_count:    views,
-    likes_count:    toInt(r.likes),
-    comments_count: toInt(r.comments),
-    saves_count:    toInt(r.saves),
-    shares_count:   toInt(r.shares),
-    follows_count:  toInt(r.follows),
-    performance_tier: performanceTier(views),
+    views_count:      views,
+    views_day:        day,
+    likes_count:      toInt(r.likes),
+    comments_count:   toInt(r.comments),
+    saves_count:      toInt(r.saves),
+    shares_count:     toInt(r.shares),
+    follows_count:    toInt(r.follows),
+    performance_tier: performanceTier(views, day),
   };
 }
 
-function performanceTier(views) {
+function performanceTier(views, day) {
   if (views === null || views === undefined) return null;
   if (views >= 10000) return "Doing something good!";
-  if (views >= 1000)  return "Normal";
-  if (views >= 200)   return "Needs huge improvement";
+  if (day === 1) {
+    // Day 1 thresholds
+    if (views >= 500)  return "Normal";
+    if (views >= 201)  return "Needs huge improvement";
+    return "Unacceptable";
+  }
+  // Day 2 and Day 3+ thresholds
+  if (views >= 1000) return "Normal";
+  if (views >= 200)  return "Needs huge improvement";
   return "Unacceptable";
 }
 
