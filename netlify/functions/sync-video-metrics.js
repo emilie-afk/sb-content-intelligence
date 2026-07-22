@@ -176,7 +176,7 @@ exports.handler = async (event) => {
           topic:              r.topic || null,
           performance_summary: buildSummary(rWithRatingIns),
           learning_status:    "Ready",
-          snapshot_7d_status: "Done",
+          snapshot_7d_status: "Submitted",
           ...parseMetrics(r),
         };
         const { data: ins } = await supabase
@@ -202,8 +202,8 @@ exports.handler = async (event) => {
         performance_summary:  buildSummary(rWithRating),
         learning_status:      "Ready",
         snapshot_7d_status:   "Done",
-        snapshot_24h_status:  video.snapshot_24h_status === "Pending" ? "Done" : video.snapshot_24h_status,
-        snapshot_72h_status:  video.snapshot_72h_status === "Pending" ? "Done" : video.snapshot_72h_status,
+        snapshot_24h_status:  video.snapshot_24h_status === "Pending" ? "Submitted" : video.snapshot_24h_status,
+        snapshot_72h_status:  video.snapshot_72h_status === "Pending" ? "Submitted" : video.snapshot_72h_status,
         ...parseMetrics(r),
       };
 
