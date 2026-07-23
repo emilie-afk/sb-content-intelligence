@@ -617,9 +617,9 @@ tbody tr:hover { background: #fafffe; }
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>Applies To</th><th>Topic</th><th>What Happened</th><th>Recommendation</th><th>Confidence</th><th>Status</th><th>Action</th>
+            <th>Applies To</th><th>Topic</th><th>What Happened</th><th>Recommendation</th><th>Script Used</th><th>Confidence</th><th>Status</th><th>Action</th>
           </tr></thead>
-          <tbody id="learning-table"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+          <tbody id="learning-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -2472,13 +2472,14 @@ async function loadLearning() {
   if (status) q = q.eq('status', status);
   const { data } = await q;
   const tbody = document.getElementById('learning-table');
-  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="icon">🧠</div><p>No learning memories yet</p></div></td></tr>'; return; }
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">🧠</div><p>No learning memories yet</p></div></td></tr>'; return; }
   tbody.innerHTML = data.map(m => `
     <tr>
       <td><span class="badge badge-new">${esc(m.applies_to||'—')}</span></td>
       <td class="truncate" title="${esc(m.topic||'')}">${esc(m.topic||'—')}</td>
       <td class="truncate" title="${esc(m.what_happened||'')}">${esc(m.what_happened||'—')}</td>
-      <td style="white-space:normal;font-size:13px;line-height:1.4;min-width:220px">${esc(m.recommendation_next_time||'—')}</td>
+      <td style="white-space:normal;font-size:13px;line-height:1.4;min-width:200px">${esc(m.recommendation_next_time||'—')}</td>
+      <td style="font-size:12px;color:#4f46e5">${m.source ? `📝 ${esc(m.source)}` : '<span style="color:#94a3b8">—</span>'}</td>
       <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
       <td>
         <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)">
