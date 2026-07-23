@@ -2395,7 +2395,7 @@ async function loadPublished() {
     .select('*, script_outputs(id, script_title, opening_hook)')
     .order('publish_datetime',{ascending:false}).limit(50);
   const platform = document.getElementById('published-platform-filter')?.value;
-  if (platform) q = q.eq('platform', platform);
+  if (platform) q = q.ilike('platform', platform);
   const { data } = await q;
   const tbody = document.getElementById('published-table');
   if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📊</div><p>No published videos yet</p></div></td></tr>'; return; }
@@ -2476,9 +2476,9 @@ async function loadLearning() {
   tbody.innerHTML = data.map(m => `
     <tr>
       <td><span class="badge badge-new">${esc(m.applies_to||'—')}</span></td>
-      <td class="truncate">${esc(m.topic||'—')}</td>
-      <td class="truncate">${esc(m.what_happened||'—')}</td>
-      <td class="truncate">${esc(m.recommendation_next_time||'—')}</td>
+      <td class="truncate" title="${esc(m.topic||'')}">${esc(m.topic||'—')}</td>
+      <td class="truncate" title="${esc(m.what_happened||'')}">${esc(m.what_happened||'—')}</td>
+      <td style="white-space:normal;font-size:13px;line-height:1.4;min-width:220px">${esc(m.recommendation_next_time||'—')}</td>
       <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
       <td>
         <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)">
