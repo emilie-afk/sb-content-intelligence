@@ -287,7 +287,7 @@ async function buildMemory(video, batchStats, topicPlatformMap) {
     cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle, rank, batchStats, crossPlatform,
   });
 
-  const confidence = day === 3 ? "High" : day === 2 ? "Medium" : "Low";
+  const confidence = computeConfidence(video);
 
   const evidenceParts = [
     `Batch context: avg ${batchStats?.avgViews?.toLocaleString() || "?"} views, ${batchStats?.avgSaveRate || "?"}% save rate, ${batchStats?.avgLikeRate || "?"}% like rate across ${batchStats?.count || "?"} videos.`,
@@ -408,26 +408,51 @@ async function generateRecommendation({ cleanTopic, hook, views, day, video, wha
   const saveRate = views > 0 ? ((saves / views) * 100).toFixed(2) : "0";
   const likeRate = views > 0 ? (((video.likes_count || 0) / views) * 100).toFixed(2) : "0";
 
-  const compLabel     = rank?.compLabel || "batch";
+  const viewTier  = getViewTier(views || 0);
+  const compLabel = rank?.compLabel || "batch";
+
   const relativeViews = rank?.viewsVsAvg != null
     ? `${rank.viewsVsAvg > 0 ? "+" : ""}${rank.viewsVsAvg}% vs ${compLabel} avg (${rank.compAvgViews?.toLocaleString()} views)`
     : "comparison unavailable";
-  const relativeSave  = rank?.saveRateVsAvg != null && parseFloat(rank.compAvgSave) > 0
-    ? `${rank.saveRateVsAvg > 0 ? "+" : ""}${rank.saveRateVsAvg}% vs ${compLabel} avg (${rank.compAvgSave}%)`
-    : `${compLabel} avg save rate: ${rank?.compAvgSave || batchStats.avgSaveRate}%`;
-  const relativeLike  = rank?.likeRateVsAvg != null && parseFloat(batchStats.avgLikeRate) > 0
-    ? `${rank.likeRateVsAvg > 0 ? "+" : ""}${rank.likeRateVsAvg}% vs ${compLabel} avg (${batchStats.avgLikeRate}%)`
-    : `${compLabel} avg like rate: ${batchStats.avgLikeRate}%`;
+
+  // Build metrics section differently by view tier
+  let metricsLines;
+  if (viewTier === "low") {
+    // Ratios are unreliable — show absolute numbers only
+    metricsLines = `- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
+- ⚠️ Low view count (${views?.toLocaleString()}): ratios are unreliable at this scale. Focus on absolute engagement only.
+- Absolute engagement: ${saves} saves | ${video.likes_count || 0} likes | ${comments} comments | ${shares} shares | ${follows} follows gained`;
+  } else if (viewTier === "medium") {
+    // Show ratios as directional, not conclusive
+    const relativeSave = rank?.saveRateVsAvg != null && parseFloat(rank.compAvgSave) > 0
+      ? `${rank.saveRateVsAvg > 0 ? "+" : ""}${rank.saveRateVsAvg}% vs ${compLabel} avg (${rank.compAvgSave}%)`
+      : `${compLabel} avg: ${rank?.compAvgSave || batchStats.avgSaveRate}%`;
+    metricsLines = `- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
+- Save rate: ${saveRate}% — ${relativeSave} (directional — moderate view count)
+- Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}`;
+  } else {
+    // Normal view count — ratios are meaningful
+    const relativeSave = rank?.saveRateVsAvg != null && parseFloat(rank.compAvgSave) > 0
+      ? `${rank.saveRateVsAvg > 0 ? "+" : ""}${rank.saveRateVsAvg}% vs ${compLabel} avg (${rank.compAvgSave}%)`
+      : `${compLabel} avg: ${rank?.compAvgSave || batchStats.avgSaveRate}%`;
+    metricsLines = `- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
+- Save rate: ${saveRate}% — ${relativeSave}
+- Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}`;
+  }
+
+  // Rules vary by view tier
+  const tierRule = viewTier === "low"
+    ? "- View count is too low for ratios to be reliable. Do NOT reference like rate or save rate percentages. Only mention whether saves, follows, or comments happened at all — and be honest that conclusions are limited at this view count."
+    : viewTier === "medium"
+    ? "- View count is moderate — treat save rate as directional, not conclusive. Mention if engagement happened, but don't overstate ratio differences."
+    : "- Ratios are reliable at this view count. Save rate and follows are the strongest signals.";
 
   const prompt = `You are analyzing one video from a batch of ${batchStats?.count || "?"} published short-form videos for Succulent Box, a plant subscription brand. Compare this video's numbers against the batch — that is the only benchmark you have.
 
 THIS VIDEO:
 - Topic: ${cleanTopic || "unknown"}
 - Platform: ${video.platform || "unknown"}
-- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
-- Save rate: ${saveRate}% — ${relativeSave}
-- Like rate: ${likeRate}% — ${relativeLike}
-- Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}
+${metricsLines}
 ${hook ? `- Hook: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : ""}
 ${scriptTitle ? `- Script: "${scriptTitle}"` : ""}
 ${whatWorked ? `- What worked (team note): ${whatWorked}` : ""}
@@ -438,6 +463,7 @@ RULES:
 - Only use the data above. No platform speculation, no external benchmarks.
 - If team notes exist, lead with those — they're direct observation.
 - Compare this video to the batch, not to an imagined ideal.
+${tierRule}
 - If cross-platform data is provided, note which platform got more traction for this content and what that suggests.
 - Saves signal lasting value; follows signal new audience; comments signal resonance. Reference whichever ones are notable.
 - 2-3 sentences max. No headers, no bullet points. Be specific.`;
@@ -464,6 +490,53 @@ RULES:
     console.error("Claude call failed:", err.message);
     return `Analysis unavailable: ${err.message}`;
   }
+}
+
+// ── Weighted confidence scoring ───────────────────────────────────────────────
+// Ratios on low-view videos are statistically unreliable.
+// Confidence reflects data maturity AND whether the view base is large enough
+// to trust engagement ratios.
+function computeConfidence(video) {
+  const views    = video.views_count    || 0;
+  const day      = video.views_day      || 1;
+  const saves    = video.saves_count    || 0;
+  const follows  = video.follows_count  || 0;
+  const comments = video.comments_count || 0;
+
+  let score = 0;
+
+  // Data maturity (0–2)
+  if (day === 3)      score += 2;
+  else if (day === 2) score += 1;
+
+  // View volume — determines whether ratios mean anything
+  if (views >= 2000)      score += 2;
+  else if (views >= 500)  score += 1;
+  else if (views < 200)   score -= 1; // ratios are noise this thin
+
+  // Absolute engagement — only reward engagement where view base supports it
+  if (views >= 500) {
+    if (saves >= 1) score += 1;
+    if (saves >= 3) score += 1; // extra: multiple saves = deliberate saves signal
+    if (follows >= 2) score += 1;
+    if (comments >= 3) score += 1;
+  } else if (views >= 200) {
+    // directional zone — only strong absolute signals count
+    if (saves >= 3)   score += 1;
+    if (follows >= 2) score += 1;
+  }
+  // < 200 views: no engagement bonus — ratios are too unreliable
+
+  if (score >= 4) return "High";
+  if (score >= 2) return "Medium";
+  return "Low";
+}
+
+// ── View tier for prompt context ──────────────────────────────────────────────
+function getViewTier(views) {
+  if (views < 200)  return "low";
+  if (views < 1000) return "medium";
+  return "normal";
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
