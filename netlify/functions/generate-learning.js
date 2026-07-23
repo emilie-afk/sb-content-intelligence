@@ -141,7 +141,8 @@ function buildMemory(video) {
     video.follows_count  ? `${video.follows_count} follows gained` : null,
   ].filter(Boolean);
   const engStr = engParts.length ? ` — ${engParts.join(", ")}` : "";
-  const whatHappened = `${tierLabel(tier)}: ${viewStr}${engStr}.`;
+  const platformLabel = video.platform ? ` on ${video.platform}` : "";
+  const whatHappened = `${tierLabel(tier)}${platformLabel}: ${viewStr}${engStr}.`;
 
   // Build recommendation — no quoting of full caption
   const recommendation = buildRecommendation(tier, cleanTopic, hook);
