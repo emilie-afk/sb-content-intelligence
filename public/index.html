@@ -2443,7 +2443,10 @@ async function generateLearning() {
   const btn = document.getElementById('generate-learning-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
   try {
-    const resp = await callFn('generate-learning', {});
+    const resp = await fetch('/.netlify/functions/generate-learning', {
+      method: 'POST',
+      headers: await authHeaders(),
+    });
     const d = await resp.json();
     if (d.generated > 0) {
       toast(`✅ Generated ${d.generated} draft memor${d.generated === 1 ? 'y' : 'ies'} — review them below`);
