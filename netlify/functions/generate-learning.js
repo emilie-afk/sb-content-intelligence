@@ -5,11 +5,11 @@
  * a draft learning_memory row for each one, then marks the video
  * learning_status = 'Processed'.
  *
- * Memories are created with status = 'Needs review next time' so the
- * team can approve or edit before they influence AI briefs.
+ * Analysis is relative to the full batch of published videos —
+ * no absolute benchmarks, no platform speculation.
+ * Also generates one batch-level pattern summary per run.
  *
  * POST (no body required)
- * Can be called from dashboard or GitHub Actions.
  */
 
 const { createClient } = require("@supabase/supabase-js");
@@ -31,7 +31,6 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
 
-  // Allow internal secret (GitHub Actions) or authenticated admin/owner
   const internalSecret = event.headers["x-internal-secret"];
   if (internalSecret !== process.env.INTERNAL_SECRET) {
     const { requireUserRole } = require("./_auth");
@@ -40,41 +39,43 @@ exports.handler = async (event) => {
   }
 
   try {
-    // ── 1. Fetch all videos ready for learning generation ─────────────────
-    const { data: videos, error: fetchErr } = await supabase
+    // ── 1. Fetch the full batch (all videos with metrics) for comparison ──
+    const { data: allVideos } = await supabase
+      .from("published_videos")
+      .select("id, platform, views_count, views_day, likes_count, saves_count, comments_count, shares_count, follows_count, performance_tier, topic")
+      .not("views_count", "is", null)
+      .not("performance_tier", "is", null);
+
+    const batch = (allVideos || []).filter(v => v.views_count > 0);
+    const batchStats   = computeBatchStats(batch);
+    const topicPlatformMap = buildTopicPlatformMap(batch);
+
+    // ── 2. Fetch only videos ready for learning ───────────────────────────
+    const { data: readyVideos, error: fetchErr } = await supabase
       .from("published_videos")
       .select(`
         id, topic, platform, publish_datetime, views_count, views_day,
         likes_count, comments_count, saves_count, shares_count, follows_count,
         performance_tier, performance_summary,
-        script_outputs ( id, opening_hook, performance_note )
+        script_outputs ( id, script_title, opening_hook )
       `)
       .eq("learning_status", "Ready")
       .not("performance_tier", "is", null);
 
     if (fetchErr) {
-      console.error("Fetch error:", fetchErr.message);
-      return {
-        statusCode: 500,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: fetchErr.message }),
-      };
+      return { statusCode: 500, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: fetchErr.message }) };
     }
 
-    if (!videos || videos.length === 0) {
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ generated: 0, message: "No videos ready for learning" }),
-      };
+    if (!readyVideos || readyVideos.length === 0) {
+      return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generated: 0, message: "No videos ready for learning" }) };
     }
 
-    // ── 2. Generate a draft learning_memory for each video ────────────────
+    // ── 3. Generate individual memory for each ready video ────────────────
     let generated = 0;
-    let errors = 0;
+    let errors    = 0;
 
-    for (const video of videos) {
-      const memory = await buildMemory(video);
+    for (const video of readyVideos) {
+      const memory = await buildMemory(video, batchStats, topicPlatformMap);
 
       const { error: insertErr } = await supabase
         .from("learning_memory")
@@ -86,7 +87,6 @@ exports.handler = async (event) => {
         continue;
       }
 
-      // Mark video as processed so we don't re-generate
       await supabase
         .from("published_videos")
         .update({ learning_status: "Processed" })
@@ -95,75 +95,204 @@ exports.handler = async (event) => {
       generated++;
     }
 
+    // ── 4. Generate one batch-level pattern summary ───────────────────────
+    if (generated > 0 && batch.length >= 3) {
+      const batchMemory = await buildBatchSummary(batch, batchStats);
+      if (batchMemory) {
+        await supabase.from("learning_memory").insert(batchMemory);
+      }
+    }
+
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        generated,
-        errors,
-        skipped: videos.length - generated - errors,
-        total_ready: videos.length,
-      }),
+      body: JSON.stringify({ generated, errors, total_ready: readyVideos.length, batch_size: batch.length }),
     };
 
   } catch (err) {
     console.error("generate-learning error:", err);
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: err.message }),
-    };
+    return { statusCode: 500, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: err.message }) };
   }
 };
 
-// ── Build a learning_memory row from a published_videos record ────────────────
-async function buildMemory(video) {
-  const tier   = video.performance_tier || "unknown";
-  const views  = video.views_count;
-  const day    = video.views_day;
+// ── Compute batch-wide averages and percentiles ───────────────────────────────
+function computeBatchStats(batch) {
+  if (!batch.length) return null;
+
+  const withViews = batch.filter(v => v.views_count > 0);
+  if (!withViews.length) return null;
+
+  const avg = (arr, fn) => arr.reduce((s, v) => s + (fn(v) || 0), 0) / arr.length;
+
+  const avgViews    = avg(withViews, v => v.views_count);
+  const avgSaveRate = avg(withViews, v => (v.saves_count || 0) / v.views_count);
+  const avgLikeRate = avg(withViews, v => (v.likes_count || 0) / v.views_count);
+  const avgFollows  = avg(withViews, v => v.follows_count || 0);
+  const avgComments = avg(withViews, v => v.comments_count || 0);
+
+  // Platform breakdown
+  const platforms = {};
+  for (const v of withViews) {
+    const p = (v.platform || "unknown").toLowerCase();
+    if (!platforms[p]) platforms[p] = { views: [], saveRates: [] };
+    platforms[p].views.push(v.views_count);
+    platforms[p].saveRates.push((v.saves_count || 0) / v.views_count);
+  }
+  const platformSummary = {};
+  for (const [p, data] of Object.entries(platforms)) {
+    platformSummary[p] = {
+      count:       data.views.length,
+      avgViews:    Math.round(data.views.reduce((a, b) => a + b, 0) / data.views.length),
+      avgSaveRate: (data.saveRates.reduce((a, b) => a + b, 0) / data.saveRates.length * 100).toFixed(2),
+    };
+  }
+
+  // Tier distribution
+  const tierCounts = {};
+  for (const v of withViews) {
+    const t = v.performance_tier || "unknown";
+    tierCounts[t] = (tierCounts[t] || 0) + 1;
+  }
+
+  return {
+    count:      withViews.length,
+    avgViews:   Math.round(avgViews),
+    avgSaveRate: (avgSaveRate * 100).toFixed(2),
+    avgLikeRate: (avgLikeRate * 100).toFixed(2),
+    avgFollows:  avgFollows.toFixed(1),
+    avgComments: avgComments.toFixed(1),
+    platforms:   platformSummary,
+    tierCounts,
+  };
+}
+
+// ── Rank a single video against same-platform videos only ────────────────────
+function rankVideo(video, batchStats) {
+  if (!batchStats) return null;
+  const views    = video.views_count || 0;
+  const saveRate = views > 0 ? (video.saves_count || 0) / views : 0;
+  const likeRate = views > 0 ? (video.likes_count || 0) / views : 0;
+
+  // Use same-platform stats if available, fall back to full batch
+  const platform   = (video.platform || "").toLowerCase();
+  const platStats  = batchStats.platforms[platform];
+  const compViews  = platStats ? platStats.avgViews : batchStats.avgViews;
+  const compSave   = platStats ? parseFloat(platStats.avgSaveRate) / 100 : parseFloat(batchStats.avgSaveRate) / 100;
+  const compLike   = parseFloat(batchStats.avgLikeRate) / 100;
+  const compLabel  = platStats ? `other ${platform} videos` : "full batch";
+
+  return {
+    viewsVsAvg:    compViews > 0 ? ((views / compViews - 1) * 100).toFixed(0) : null,
+    saveRateVsAvg: compSave  > 0 ? ((saveRate / compSave  - 1) * 100).toFixed(0) : null,
+    likeRateVsAvg: compLike  > 0 ? ((likeRate / compLike  - 1) * 100).toFixed(0) : null,
+    saveRate:      (saveRate * 100).toFixed(2),
+    likeRate:      (likeRate * 100).toFixed(2),
+    compAvgViews:  compViews,
+    compAvgSave:   (compSave * 100).toFixed(2),
+    compLabel,
+    platformCount: platStats?.count || null,
+  };
+}
+
+// ── Build topic → platform performance map from full batch ────────────────────
+function buildTopicPlatformMap(batch) {
+  const map = {}; // topicKey → { platform → { views, saveRate, likeRate } }
+  for (const v of batch) {
+    if (!v.topic || !v.platform || !v.views_count) continue;
+    const key = v.topic.replace(/#\w+/g, "").replace(/\s+/g, " ").trim().substring(0, 60).toLowerCase();
+    const p   = v.platform.toLowerCase();
+    if (!map[key]) map[key] = {};
+    if (!map[key][p]) map[key][p] = [];
+    map[key][p].push({
+      views:    v.views_count,
+      saveRate: v.views_count > 0 ? (v.saves_count || 0) / v.views_count : 0,
+      likeRate: v.views_count > 0 ? (v.likes_count || 0) / v.views_count : 0,
+    });
+  }
+  // Average per platform per topic
+  const result = {};
+  for (const [key, platforms] of Object.entries(map)) {
+    result[key] = {};
+    for (const [p, entries] of Object.entries(platforms)) {
+      result[key][p] = {
+        avgViews:    Math.round(entries.reduce((s, e) => s + e.views, 0) / entries.length),
+        avgSaveRate: (entries.reduce((s, e) => s + e.saveRate, 0) / entries.length * 100).toFixed(2),
+        avgLikeRate: (entries.reduce((s, e) => s + e.likeRate, 0) / entries.length * 100).toFixed(2),
+        count:       entries.length,
+      };
+    }
+  }
+  return result;
+}
+
+// ── Find cross-platform data for this video's topic ───────────────────────────
+function getCrossPlatformData(video, topicPlatformMap) {
+  if (!video.topic) return null;
+  const key = video.topic.replace(/#\w+/g, "").replace(/\s+/g, " ").trim().substring(0, 60).toLowerCase();
+  const platforms = topicPlatformMap[key];
+  if (!platforms || Object.keys(platforms).length < 2) return null; // only interesting if on multiple platforms
+
+  const thisPlatform = (video.platform || "").toLowerCase();
+  const others = Object.entries(platforms).filter(([p]) => p !== thisPlatform);
+  if (!others.length) return null;
+
+  return others.map(([p, stats]) =>
+    `${p}: ${stats.avgViews.toLocaleString()} views, ${stats.avgSaveRate}% save rate`
+  ).join(" | ");
+}
+
+// ── Build a learning_memory row for one video ─────────────────────────────────
+async function buildMemory(video, batchStats, topicPlatformMap) {
+  const tier     = video.performance_tier || "unknown";
+  const views    = video.views_count;
+  const day      = video.views_day;
   const rawTopic = video.topic || null;
-  const script = Array.isArray(video.script_outputs)
+  const script   = Array.isArray(video.script_outputs)
     ? video.script_outputs[0]
     : video.script_outputs;
   const hook        = script?.opening_hook || null;
   const scriptTitle = script?.id ? (script.script_title || "Linked script") : null;
+  const cleanTopic  = rawTopic ? cleanTopicText(rawTopic) : null;
+  const rank        = rankVideo(video, batchStats);
 
-  // Clean topic — strip hashtags, take first sentence, max 80 chars
-  const cleanTopic = rawTopic ? cleanTopicText(rawTopic) : null;
-
-  // Determine applies_to
   const appliesTo = hook ? "Hook" : cleanTopic ? "Topic" : "Format";
 
-  // Build what_happened — stats only, no quoted caption
-  const viewStr  = views != null ? `${views.toLocaleString()} views (Day ${day || "?"})` : "unknown views";
-  const engParts = [
-    video.likes_count    ? `${video.likes_count} likes`    : null,
-    video.saves_count    ? `${video.saves_count} saves`    : null,
-    video.comments_count ? `${video.comments_count} comments` : null,
-    video.shares_count   ? `${video.shares_count} shares`  : null,
-    video.follows_count  ? `${video.follows_count} follows gained` : null,
-  ].filter(Boolean);
-  const engStr = engParts.length ? ` — ${engParts.join(", ")}` : "";
+  // What happened — numbers + relative position
+  const saves    = video.saves_count    || 0;
+  const likes    = video.likes_count    || 0;
+  const comments = video.comments_count || 0;
+  const shares   = video.shares_count   || 0;
+  const follows  = video.follows_count  || 0;
+
+  const viewStr  = views != null ? `${views.toLocaleString()} views (Day ${day || "?"})` : "unknown";
+  const engStr   = [
+    saves    ? `${saves} saves`    : null,
+    likes    ? `${likes} likes`    : null,
+    comments ? `${comments} comments` : null,
+    shares   ? `${shares} shares`  : null,
+    follows  ? `${follows} follows` : null,
+  ].filter(Boolean).join(", ");
+
+  const rankStr  = rank?.viewsVsAvg != null
+    ? ` (${rank.viewsVsAvg > 0 ? "+" : ""}${rank.viewsVsAvg}% vs ${rank.compLabel} avg ${rank.compAvgViews?.toLocaleString()} views)`
+    : "";
+
   const platformLabel = video.platform ? ` on ${video.platform}` : "";
-  const whatHappened = `${tierLabel(tier)}${platformLabel}: ${viewStr}${engStr}.`;
+  const whatHappened  = `${tierLabel(tier)}${platformLabel}: ${viewStr}${rankStr}${engStr ? " — " + engStr : ""}.`;
 
-  // Parse "What worked" / "Improve" notes from the human-filled sheet columns
   const { whatWorked, improve } = parsePerformanceSummary(video.performance_summary);
+  const crossPlatform = getCrossPlatformData(video, topicPlatformMap);
 
-  // Generate recommendation via Claude using actual video data
   const recommendation = await generateRecommendation({
-    tier, cleanTopic, hook, views, day, video, whatWorked, improve,
-    scriptTitle,
+    cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle, rank, batchStats, crossPlatform,
   });
 
-  // Confidence based on which day's data we have
   const confidence = day === 3 ? "High" : day === 2 ? "Medium" : "Low";
 
-  // evidence_summary: full performance summary + script info
   const evidenceParts = [
+    `Batch context: avg ${batchStats?.avgViews?.toLocaleString() || "?"} views, ${batchStats?.avgSaveRate || "?"}% save rate, ${batchStats?.avgLikeRate || "?"}% like rate across ${batchStats?.count || "?"} videos.`,
     video.performance_summary || null,
-    scriptTitle ? `Script used: "${scriptTitle}"` : null,
-    hook ? `Opening hook: "${hook.substring(0, 200)}${hook.length > 200 ? "…" : ""}"` : null,
+    scriptTitle ? `Script: "${scriptTitle}"` : null,
   ].filter(Boolean);
 
   return {
@@ -171,9 +300,9 @@ async function buildMemory(video) {
     topic:                    cleanTopic,
     hook:                     hook ? hook.substring(0, 500) : null,
     format:                   video.platform || null,
-    source:                   scriptTitle,   // visible in dashboard as script attribution
+    source:                   scriptTitle,
     what_happened:            whatHappened,
-    evidence_summary:         evidenceParts.join("\n\n") || null,
+    evidence_summary:         evidenceParts.join("\n\n"),
     recommendation_next_time: recommendation,
     confidence,
     status:                   "Needs review next time",
@@ -182,14 +311,166 @@ async function buildMemory(video) {
   };
 }
 
-// Strip hashtags and take first clean sentence, max 80 chars
+// ── Generate one batch-level pattern summary ──────────────────────────────────
+async function buildBatchSummary(batch, batchStats) {
+  if (!CLAUDE_API_KEY || !batchStats) return null;
+
+  // Build platform comparison string
+  const platformLines = Object.entries(batchStats.platforms)
+    .map(([p, d]) => `  ${p}: ${d.count} videos, avg ${d.avgViews.toLocaleString()} views, ${d.avgSaveRate}% save rate`)
+    .join("\n");
+
+  // Find top and bottom performers by save rate and views
+  const sorted = [...batch].filter(v => v.views_count > 0);
+  const byViews    = [...sorted].sort((a, b) => b.views_count - a.views_count);
+  const bySaveRate = [...sorted].sort((a, b) => {
+    const sa = (a.saves_count || 0) / a.views_count;
+    const sb = (b.saves_count || 0) / b.views_count;
+    return sb - sa;
+  });
+
+  const topByViews = byViews.slice(0, 3).map(v =>
+    `"${cleanTopicText(v.topic || "")}" (${v.platform || "?"}, ${v.views_count.toLocaleString()} views)`
+  ).join("; ");
+  const topBySave  = bySaveRate.slice(0, 3).filter(v => (v.saves_count || 0) > 0).map(v =>
+    `"${cleanTopicText(v.topic || "")}" (${v.platform || "?"}, ${(((v.saves_count || 0) / v.views_count) * 100).toFixed(1)}% save rate)`
+  ).join("; ");
+
+  const tierLines = Object.entries(batchStats.tierCounts)
+    .map(([t, n]) => `  ${t}: ${n} video${n > 1 ? "s" : ""}`)
+    .join("\n");
+
+  const prompt = `You are summarizing patterns across a batch of published short-form videos for Succulent Box, a plant subscription brand. Use only the data provided — no platform speculation, no external benchmarks.
+
+BATCH DATA (${batchStats.count} videos total):
+- Avg views: ${batchStats.avgViews.toLocaleString()}
+- Avg save rate: ${batchStats.avgSaveRate}%
+- Avg like rate: ${batchStats.avgLikeRate}%
+- Avg follows per video: ${batchStats.avgFollows}
+- Avg comments per video: ${batchStats.avgComments}
+
+Performance tier breakdown:
+${tierLines}
+
+Platform breakdown:
+${platformLines}
+
+Top by views: ${topByViews || "none"}
+Top by save rate: ${topBySave || "none — zero saves across batch"}
+
+Write 3-4 sentences identifying the clearest patterns in THIS batch. Compare platforms if there's a difference worth noting. Call out what's getting saves vs. just views — those are different types of value. End with one specific thing to try in the next batch based on what the data shows. No bullet points, no headers, no speculation about platform changes.`;
+
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key":         CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+      },
+      body: JSON.stringify({
+        model:      CLAUDE_MODEL,
+        max_tokens: 400,
+        messages:   [{ role: "user", content: prompt }],
+      }),
+    });
+
+    const data = await resp.json();
+    if (data.error) { console.error("Batch summary Claude error:", data.error.message); return null; }
+
+    const summary = data.content?.[0]?.text?.trim();
+    if (!summary) return null;
+
+    return {
+      applies_to:               "Content pillar",
+      topic:                    `Batch summary — ${new Date().toISOString().slice(0, 10)}`,
+      what_happened:            `Batch of ${batchStats.count} videos: avg ${batchStats.avgViews.toLocaleString()} views, ${batchStats.avgSaveRate}% save rate. Tier breakdown: ${Object.entries(batchStats.tierCounts).map(([t,n]) => `${n} ${t}`).join(", ")}.`,
+      evidence_summary:         `Platform breakdown:\n${platformLines}`,
+      recommendation_next_time: summary,
+      confidence:               "High",
+      status:                   "Needs review next time",
+      date_added:               new Date().toISOString().slice(0, 10),
+    };
+  } catch (err) {
+    console.error("Batch summary failed:", err.message);
+    return null;
+  }
+}
+
+// ── Call Claude for individual video analysis ─────────────────────────────────
+async function generateRecommendation({ cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle, rank, batchStats, crossPlatform }) {
+  if (!CLAUDE_API_KEY) return "CLAUDE_API_KEY not set.";
+
+  const saves    = video.saves_count    || 0;
+  const comments = video.comments_count || 0;
+  const shares   = video.shares_count   || 0;
+  const follows  = video.follows_count  || 0;
+  const saveRate = views > 0 ? ((saves / views) * 100).toFixed(2) : "0";
+  const likeRate = views > 0 ? (((video.likes_count || 0) / views) * 100).toFixed(2) : "0";
+
+  const compLabel     = rank?.compLabel || "batch";
+  const relativeViews = rank?.viewsVsAvg != null
+    ? `${rank.viewsVsAvg > 0 ? "+" : ""}${rank.viewsVsAvg}% vs ${compLabel} avg (${rank.compAvgViews?.toLocaleString()} views)`
+    : "comparison unavailable";
+  const relativeSave  = rank?.saveRateVsAvg != null && parseFloat(rank.compAvgSave) > 0
+    ? `${rank.saveRateVsAvg > 0 ? "+" : ""}${rank.saveRateVsAvg}% vs ${compLabel} avg (${rank.compAvgSave}%)`
+    : `${compLabel} avg save rate: ${rank?.compAvgSave || batchStats.avgSaveRate}%`;
+  const relativeLike  = rank?.likeRateVsAvg != null && parseFloat(batchStats.avgLikeRate) > 0
+    ? `${rank.likeRateVsAvg > 0 ? "+" : ""}${rank.likeRateVsAvg}% vs ${compLabel} avg (${batchStats.avgLikeRate}%)`
+    : `${compLabel} avg like rate: ${batchStats.avgLikeRate}%`;
+
+  const prompt = `You are analyzing one video from a batch of ${batchStats?.count || "?"} published short-form videos for Succulent Box, a plant subscription brand. Compare this video's numbers against the batch — that is the only benchmark you have.
+
+THIS VIDEO:
+- Topic: ${cleanTopic || "unknown"}
+- Platform: ${video.platform || "unknown"}
+- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
+- Save rate: ${saveRate}% — ${relativeSave}
+- Like rate: ${likeRate}% — ${relativeLike}
+- Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}
+${hook ? `- Hook: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : ""}
+${scriptTitle ? `- Script: "${scriptTitle}"` : ""}
+${whatWorked ? `- What worked (team note): ${whatWorked}` : ""}
+${improve ? `- Improve (team note): ${improve}` : ""}
+${crossPlatform ? `- Same content on other platforms: ${crossPlatform}` : ""}
+
+RULES:
+- Only use the data above. No platform speculation, no external benchmarks.
+- If team notes exist, lead with those — they're direct observation.
+- Compare this video to the batch, not to an imagined ideal.
+- If cross-platform data is provided, note which platform got more traction for this content and what that suggests.
+- Saves signal lasting value; follows signal new audience; comments signal resonance. Reference whichever ones are notable.
+- 2-3 sentences max. No headers, no bullet points. Be specific.`;
+
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key":         CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+      },
+      body: JSON.stringify({
+        model:      CLAUDE_MODEL,
+        max_tokens: 250,
+        messages:   [{ role: "user", content: prompt }],
+      }),
+    });
+
+    const data = await resp.json();
+    if (data.error) { console.error("Claude API error:", data.error.message); return `Analysis unavailable: ${data.error.message}`; }
+    return data.content?.[0]?.text?.trim() || "No analysis returned.";
+  } catch (err) {
+    console.error("Claude call failed:", err.message);
+    return `Analysis unavailable: ${err.message}`;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function cleanTopicText(raw) {
-  // Remove hashtags and trim
   let clean = raw.replace(/#\w+/g, "").replace(/\s+/g, " ").trim();
-  // Take up to first period, question mark, or exclamation
   const match = clean.match(/^[^.!?]+[.!?]?/);
   clean = match ? match[0].trim() : clean;
-  // Truncate
   if (clean.length > 80) clean = clean.substring(0, 77) + "…";
   return clean || null;
 }
@@ -204,7 +485,6 @@ function tierLabel(tier) {
   return labels[tier] || tier;
 }
 
-// ── Parse human-filled "What worked" and "Improve" notes from performance_summary ──
 function parsePerformanceSummary(summary) {
   if (!summary) return { whatWorked: null, improve: null };
   const w = summary.match(/What worked:\s*(.+?)(?:\n|$)/i);
@@ -213,63 +493,4 @@ function parsePerformanceSummary(summary) {
     whatWorked: w ? w[1].trim() : null,
     improve:    i ? i[1].trim() : null,
   };
-}
-
-// ── Call Claude to generate an actual analysis ────────────────────────────────
-async function generateRecommendation({ tier, cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle }) {
-  if (!CLAUDE_API_KEY) {
-    return "CLAUDE_API_KEY not set — cannot generate analysis.";
-  }
-
-  const saves    = video.saves_count    || 0;
-  const likes    = video.likes_count    || 0;
-  const comments = video.comments_count || 0;
-  const shares   = video.shares_count   || 0;
-  const follows  = video.follows_count  || 0;
-
-  const prompt = `You are analyzing the performance of a short-form social media video for Succulent Box, a plant subscription brand.
-
-VIDEO DATA:
-- Topic: ${cleanTopic || "unknown"}
-- Platform: ${video.platform || "unknown"}
-- Performance tier: ${tier}
-- Views: ${views != null ? views.toLocaleString() : "unknown"} (measured on Day ${day || "?"})
-- Likes: ${likes} | Saves: ${saves} | Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}
-${hook ? `- Opening hook used: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : ""}
-${scriptTitle ? `- Script used: "${scriptTitle}"` : ""}
-${whatWorked ? `- Team note — what worked: ${whatWorked}` : ""}
-${improve ? `- Team note — what to improve: ${improve}` : ""}
-
-Write 2-3 sentences of specific, actionable analysis for the content team. Focus on:
-1. What the engagement numbers actually tell us (e.g. save rate, like-to-view ratio, follows)
-2. What specifically to do differently or repeat next time
-3. If team notes are provided, synthesize them with the numbers
-
-Be direct and specific. Do NOT use generic phrases like "consider testing" or "look at what worked". Reference the actual numbers. Write as if advising a content creator who posted this video yesterday.`;
-
-  try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key":         CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-      },
-      body: JSON.stringify({
-        model:      CLAUDE_MODEL,
-        max_tokens: 300,
-        messages:   [{ role: "user", content: prompt }],
-      }),
-    });
-
-    const data = await resp.json();
-    if (data.error) {
-      console.error("Claude API error:", data.error.message);
-      return `Analysis unavailable: ${data.error.message}`;
-    }
-    return data.content?.[0]?.text?.trim() || "No analysis returned.";
-  } catch (err) {
-    console.error("Claude call failed:", err.message);
-    return `Analysis unavailable: ${err.message}`;
-  }
 }
