@@ -118,16 +118,20 @@ function buildMemory(video) {
   const tier   = video.performance_tier || "unknown";
   const views  = video.views_count;
   const day    = video.views_day;
-  const topic  = video.topic || null;
+  const rawTopic = video.topic || null;
   const script = Array.isArray(video.script_outputs)
     ? video.script_outputs[0]
     : video.script_outputs;
-  const hook   = script?.opening_hook || null;
+  const hook        = script?.opening_hook || null;
+  const scriptTitle = script?.id ? (script.script_title || "Linked script") : null;
+
+  // Clean topic — strip hashtags, take first sentence, max 80 chars
+  const cleanTopic = rawTopic ? cleanTopicText(rawTopic) : null;
 
   // Determine applies_to
-  const appliesTo = hook ? "Hook" : topic ? "Topic" : "Format";
+  const appliesTo = hook ? "Hook" : cleanTopic ? "Topic" : "Format";
 
-  // Build what_happened — plain-English performance sentence
+  // Build what_happened — stats only, no quoted caption
   const viewStr  = views != null ? `${views.toLocaleString()} views (Day ${day || "?"})` : "unknown views";
   const engParts = [
     video.likes_count    ? `${video.likes_count} likes`    : null,
@@ -136,32 +140,48 @@ function buildMemory(video) {
     video.shares_count   ? `${video.shares_count} shares`  : null,
     video.follows_count  ? `${video.follows_count} follows gained` : null,
   ].filter(Boolean);
-  const engStr = engParts.length ? ` | ${engParts.join(", ")}` : "";
+  const engStr = engParts.length ? ` — ${engParts.join(", ")}` : "";
+  const whatHappened = `${tierLabel(tier)}: ${viewStr}${engStr}.`;
 
-  const whatHappened = [
-    `${tierLabel(tier)} — ${viewStr}${engStr}.`,
-    hook ? `Hook used: "${hook.substring(0, 120)}${hook.length > 120 ? "…" : ""}"` : null,
-  ].filter(Boolean).join(" ");
-
-  // Build recommendation_next_time based on tier
-  const recommendation = buildRecommendation(tier, topic, hook, script?.performance_note);
+  // Build recommendation — no quoting of full caption
+  const recommendation = buildRecommendation(tier, cleanTopic, hook);
 
   // Confidence based on which day's data we have
   const confidence = day === 3 ? "High" : day === 2 ? "Medium" : "Low";
 
+  // evidence_summary: full performance summary + script info
+  const evidenceParts = [
+    video.performance_summary || null,
+    scriptTitle ? `Script used: "${scriptTitle}"` : null,
+    hook ? `Opening hook: "${hook.substring(0, 200)}${hook.length > 200 ? "…" : ""}"` : null,
+  ].filter(Boolean);
+
   return {
     applies_to:               appliesTo,
-    topic:                    topic,
+    topic:                    cleanTopic,
     hook:                     hook ? hook.substring(0, 500) : null,
     format:                   video.platform || null,
+    source:                   scriptTitle,   // visible in dashboard as script attribution
     what_happened:            whatHappened,
-    evidence_summary:         video.performance_summary || null,
+    evidence_summary:         evidenceParts.join("\n\n") || null,
     recommendation_next_time: recommendation,
     confidence,
     status:                   "Needs review next time",
     published_video_id:       video.id,
     date_added:               new Date().toISOString().slice(0, 10),
   };
+}
+
+// Strip hashtags and take first clean sentence, max 80 chars
+function cleanTopicText(raw) {
+  // Remove hashtags and trim
+  let clean = raw.replace(/#\w+/g, "").replace(/\s+/g, " ").trim();
+  // Take up to first period, question mark, or exclamation
+  const match = clean.match(/^[^.!?]+[.!?]?/);
+  clean = match ? match[0].trim() : clean;
+  // Truncate
+  if (clean.length > 80) clean = clean.substring(0, 77) + "…";
+  return clean || null;
 }
 
 function tierLabel(tier) {
@@ -174,33 +194,36 @@ function tierLabel(tier) {
   return labels[tier] || tier;
 }
 
-function buildRecommendation(tier, topic, hook, performanceNote) {
+function buildRecommendation(tier, cleanTopic, hook) {
+  const topicLabel = cleanTopic ? `"${cleanTopic}"` : "This topic";
+  const hookSnip   = hook ? `"${hook.replace(/#\w+/g, "").trim().substring(0, 60)}…"` : null;
+
   if (tier === "Doing something good!") {
     return [
-      topic ? `Repeat content about "${topic}" — this topic performs strongly.` : "This topic performs strongly — repeat it.",
-      hook  ? `The hook "${hook.substring(0, 80)}…" drove high views — use a similar pattern.` : null,
+      `${topicLabel} performs strongly — repeat and build on it.`,
+      hookSnip ? `The hook ${hookSnip} worked well — use a similar pattern next time.` : null,
     ].filter(Boolean).join(" ");
   }
 
   if (tier === "Unacceptable") {
     return [
-      topic ? `Avoid or significantly rework content about "${topic}" until the format is tested.` : "This content format needs a full rethink.",
-      hook  ? `The hook "${hook.substring(0, 80)}…" did not pull viewers — try a stronger curiosity or problem-first opener.` : null,
-      "Consider testing a different angle, hook style, or publish time.",
+      `${topicLabel} got very low views. Rethink the angle or format before posting again.`,
+      hookSnip ? `The hook ${hookSnip} did not pull viewers in — try a bold curiosity or problem-first opener.` : "Try a bolder, problem-first hook.",
+      "Also test a different publish time or platform.",
     ].filter(Boolean).join(" ");
   }
 
   if (tier === "Needs huge improvement") {
     return [
-      topic ? `"${topic}" content needs a stronger hook or clearer value proposition.` : "Content needs a stronger hook or clearer value.",
-      hook  ? `The hook "${hook.substring(0, 80)}…" underdelivered — test a bolder opening.` : null,
-      "Review what worked in higher-performing videos on this topic and borrow elements.",
+      `${topicLabel} underperformed. The hook or value proposition needs to be stronger.`,
+      hookSnip ? `Current hook ${hookSnip} — try opening with a surprising fact or a direct question instead.` : "Try opening with a surprising fact or direct question.",
+      "Look at what worked on top-performing videos in this topic and borrow elements.",
     ].filter(Boolean).join(" ");
   }
 
   // Normal
   return [
-    topic ? `"${topic}" performs at expected levels. Look for ways to push it into top-performer territory.` : "Performance is normal. Look for angles to boost engagement.",
-    "Test variations in hook style, video length, or CTA placement.",
+    `${topicLabel} hit expected view counts. Push for top-performer territory next time.`,
+    "Test a stronger hook, shorter format, or earlier product mention.",
   ].join(" ");
 }
