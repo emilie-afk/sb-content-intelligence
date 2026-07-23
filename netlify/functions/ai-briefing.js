@@ -128,12 +128,13 @@ exports.handler = async (event) => {
       supabase.from("sb_products")
         .select("handle, title, common_name, scientific_name, genus")
         .eq("is_active", true),
-      // Learning memory: active lessons from past content reviews
+      // Learning memory: all non-archived lessons from past content reviews
+      // Includes 'Needs review next time' so team can see learning before formal approval
       supabase.from("learning_memory")
-        .select("applies_to, topic, what_happened, recommendation_next_time, confidence")
-        .in("status", ["Active", "Approved rule"])
+        .select("applies_to, topic, what_happened, recommendation_next_time, confidence, status")
+        .neq("status", "Archived")
         .order("date_added", { ascending: false })
-        .limit(20),
+        .limit(30),
     ]);
 
     const activeClusters   = clusters          || [];
@@ -319,6 +320,14 @@ exports.handler = async (event) => {
       .map(c => {
         const catalogLabel = c._isWatchlist ? "⭐ Watchlist plant" :
                              c._inCatalog  ? "In SB catalog"      : "⚠️ Not in catalog";
+
+        // Find past learning memories relevant to this cluster's topic/plant
+        const relatedLearning = matchLearningToCluster(c.title, c.plant_or_product, learningMemory);
+        const learningHints = relatedLearning.map(m => {
+          const statusTag = m.status === "Needs review next time" ? " (draft)" : "";
+          return `📚 Past${statusTag}: ${m.recommendation_next_time}`;
+        });
+
         return {
           theme:         c.title,
           cluster_ids:   [c.id],
@@ -341,6 +350,7 @@ exports.handler = async (event) => {
             c.covered_before_boolean ? "⚠️ Covered before" : null,
             c.novelty_status && !["None","Unclear"].includes(c.novelty_status) ? c.novelty_status : null,
             catalogLabel,
+            ...learningHints,
           ].filter(Boolean).join(" · "),
         };
       });
@@ -703,6 +713,22 @@ exports.handler = async (event) => {
 };
 
 
+// ── Match learning memories to a cluster by topic/plant text ─────────────────
+// Returns the most relevant memories (up to 2) for a given cluster.
+function matchLearningToCluster(clusterTitle, plantOrProduct, learningMemory) {
+  if (!learningMemory?.length) return [];
+  const needle = `${clusterTitle || ""} ${plantOrProduct || ""}`.toLowerCase();
+  return learningMemory
+    .filter(m => {
+      if (!m.topic) return false;
+      const hay = m.topic.toLowerCase();
+      // Match if topic words appear in cluster title/plant, or vice versa
+      const topicWords = hay.split(/\s+/).filter(w => w.length > 3);
+      return topicWords.some(w => needle.includes(w));
+    })
+    .slice(0, 2);
+}
+
 // ── SUMMARY PROMPT (plain text only — no JSON) ────────────────────────────────
 function buildSummaryPrompt(ctx) {
   const { totalClusters, newSignalCount, changedCount, topTopics,
@@ -714,7 +740,7 @@ function buildSummaryPrompt(ctx) {
     : "";
 
   const learningSection = learningBlock
-    ? `\nReviewer lessons from past content (apply these when describing what's actionable):\n${learningBlock}`
+    ? `\nLessons from past published videos (use these to shape what you recommend — if we tried a topic/angle and it underperformed, say so; if something drove saves or follows, flag it as worth repeating):\n${learningBlock}`
     : "";
 
   return `Write 2-3 sentences summarizing this social listening briefing for Succulents Box (succulent plant subscriptions). Highlight what's most actionable based on the data and any lessons below.

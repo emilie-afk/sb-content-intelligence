@@ -305,7 +305,7 @@ async function buildMemory(video, batchStats, topicPlatformMap) {
     evidence_summary:         evidenceParts.join("\n\n"),
     recommendation_next_time: recommendation,
     confidence,
-    status:                   "Needs review next time",
+    status:                   "Active",
     published_video_id:       video.id,
     date_added:               new Date().toISOString().slice(0, 10),
   };
@@ -388,7 +388,7 @@ Write 3-4 sentences identifying the clearest patterns in THIS batch. Compare pla
       evidence_summary:         `Platform breakdown:\n${platformLines}`,
       recommendation_next_time: summary,
       confidence:               "High",
-      status:                   "Needs review next time",
+      status:                   "Active",
       date_added:               new Date().toISOString().slice(0, 10),
     };
   } catch (err) {
