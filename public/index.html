@@ -602,10 +602,10 @@ tbody tr:hover { background: #fafffe; }
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="filters">
           <select class="filter-select" id="learning-status-filter" onchange="loadLearning()">
-            <option value="Needs review next time">Needs Review</option>
-            <option value="">All</option>
             <option value="Active">Active</option>
+            <option value="">All</option>
             <option value="Approved rule">Approved Rules</option>
+            <option value="Archived">Archived</option>
             <option value="Archived">Archived</option>
           </select>
         </div>
@@ -2452,7 +2452,7 @@ async function generateLearning() {
       toast(`✅ Generated ${d.generated} draft memor${d.generated === 1 ? 'y' : 'ies'} — review them below`);
       // Switch filter to show Needs review so new rows appear immediately
       const filter = document.getElementById('learning-status-filter');
-      if (filter) filter.value = 'Needs review next time';
+      if (filter) filter.value = 'Active';
       loadLearning();
     } else if (d.message) {
       toast(d.message);
