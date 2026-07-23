@@ -188,6 +188,23 @@ exports.handler = async (event) => {
         if (insErr) console.error("INSERT FAILED:", insErr.message, JSON.stringify(insertRow));
 
         if (ins) {
+          // Auto-link script by matching topic to opening_hook
+          if (r.topic && ins.id) {
+            const searchKey = r.topic.replace(/#\w+/g, "").trim().substring(0, 60);
+            if (searchKey.length > 10) {
+              const { data: matched } = await supabase
+                .from("script_outputs")
+                .select("id")
+                .ilike("opening_hook", `%${searchKey}%`)
+                .limit(1)
+                .maybeSingle();
+              if (matched?.id) {
+                await supabase.from("published_videos")
+                  .update({ script_output_id: matched.id })
+                  .eq("id", ins.id);
+              }
+            }
+          }
           sheetUpdates.push({ rowIndex: r.rowIndex, label: "✅ synced (new)" });
           synced++;
         } else {
@@ -233,6 +250,27 @@ exports.handler = async (event) => {
             reviewer_status:  "Follow-up demand detected",
             new_signals_since_review: 1,
           }).eq("id", video.cluster_id);
+        }
+      }
+
+      // ── Auto-link script by matching topic text to opening_hook ─────────
+      // The topic column contains the opening caption which came from the script
+      if (!video.script_output_id && r.topic) {
+        // Extract first ~60 chars of topic, strip hashtags, use as search key
+        const searchKey = r.topic.replace(/#\w+/g, "").trim().substring(0, 60);
+        if (searchKey.length > 10) {
+          const { data: matched } = await supabase
+            .from("script_outputs")
+            .select("id, script_title")
+            .ilike("opening_hook", `%${searchKey}%`)
+            .limit(1)
+            .maybeSingle();
+          if (matched?.id) {
+            await supabase.from("published_videos")
+              .update({ script_output_id: matched.id })
+              .eq("id", video.id);
+            video.script_output_id = matched.id;
+          }
         }
       }
 

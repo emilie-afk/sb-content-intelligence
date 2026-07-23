@@ -20,6 +20,9 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
+
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: CORS_HEADERS, body: "" };
@@ -71,7 +74,7 @@ exports.handler = async (event) => {
     let errors = 0;
 
     for (const video of videos) {
-      const memory = buildMemory(video);
+      const memory = await buildMemory(video);
 
       const { error: insertErr } = await supabase
         .from("learning_memory")
@@ -114,7 +117,7 @@ exports.handler = async (event) => {
 };
 
 // ── Build a learning_memory row from a published_videos record ────────────────
-function buildMemory(video) {
+async function buildMemory(video) {
   const tier   = video.performance_tier || "unknown";
   const views  = video.views_count;
   const day    = video.views_day;
@@ -144,8 +147,14 @@ function buildMemory(video) {
   const platformLabel = video.platform ? ` on ${video.platform}` : "";
   const whatHappened = `${tierLabel(tier)}${platformLabel}: ${viewStr}${engStr}.`;
 
-  // Build recommendation — no quoting of full caption
-  const recommendation = buildRecommendation(tier, cleanTopic, hook);
+  // Parse "What worked" / "Improve" notes from the human-filled sheet columns
+  const { whatWorked, improve } = parsePerformanceSummary(video.performance_summary);
+
+  // Generate recommendation via Claude using actual video data
+  const recommendation = await generateRecommendation({
+    tier, cleanTopic, hook, views, day, video, whatWorked, improve,
+    scriptTitle,
+  });
 
   // Confidence based on which day's data we have
   const confidence = day === 3 ? "High" : day === 2 ? "Medium" : "Low";
@@ -195,36 +204,72 @@ function tierLabel(tier) {
   return labels[tier] || tier;
 }
 
-function buildRecommendation(tier, cleanTopic, hook) {
-  const topicLabel = cleanTopic ? `"${cleanTopic}"` : "This topic";
-  const hookSnip   = hook ? `"${hook.replace(/#\w+/g, "").trim().substring(0, 60)}…"` : null;
+// ── Parse human-filled "What worked" and "Improve" notes from performance_summary ──
+function parsePerformanceSummary(summary) {
+  if (!summary) return { whatWorked: null, improve: null };
+  const w = summary.match(/What worked:\s*(.+?)(?:\n|$)/i);
+  const i = summary.match(/What to improve:\s*(.+?)(?:\n|$)/i);
+  return {
+    whatWorked: w ? w[1].trim() : null,
+    improve:    i ? i[1].trim() : null,
+  };
+}
 
-  if (tier === "Doing something good!") {
-    return [
-      `${topicLabel} performs strongly — repeat and build on it.`,
-      hookSnip ? `The hook ${hookSnip} worked well — use a similar pattern next time.` : null,
-    ].filter(Boolean).join(" ");
+// ── Call Claude to generate an actual analysis ────────────────────────────────
+async function generateRecommendation({ tier, cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle }) {
+  if (!CLAUDE_API_KEY) {
+    return "CLAUDE_API_KEY not set — cannot generate analysis.";
   }
 
-  if (tier === "Unacceptable") {
-    return [
-      `${topicLabel} got very low views. Rethink the angle or format before posting again.`,
-      hookSnip ? `The hook ${hookSnip} did not pull viewers in — try a bold curiosity or problem-first opener.` : "Try a bolder, problem-first hook.",
-      "Also test a different publish time or platform.",
-    ].filter(Boolean).join(" ");
-  }
+  const saves    = video.saves_count    || 0;
+  const likes    = video.likes_count    || 0;
+  const comments = video.comments_count || 0;
+  const shares   = video.shares_count   || 0;
+  const follows  = video.follows_count  || 0;
 
-  if (tier === "Needs huge improvement") {
-    return [
-      `${topicLabel} underperformed. The hook or value proposition needs to be stronger.`,
-      hookSnip ? `Current hook ${hookSnip} — try opening with a surprising fact or a direct question instead.` : "Try opening with a surprising fact or direct question.",
-      "Look at what worked on top-performing videos in this topic and borrow elements.",
-    ].filter(Boolean).join(" ");
-  }
+  const prompt = `You are analyzing the performance of a short-form social media video for Succulent Box, a plant subscription brand.
 
-  // Normal
-  return [
-    `${topicLabel} hit expected view counts. Push for top-performer territory next time.`,
-    "Test a stronger hook, shorter format, or earlier product mention.",
-  ].join(" ");
+VIDEO DATA:
+- Topic: ${cleanTopic || "unknown"}
+- Platform: ${video.platform || "unknown"}
+- Performance tier: ${tier}
+- Views: ${views != null ? views.toLocaleString() : "unknown"} (measured on Day ${day || "?"})
+- Likes: ${likes} | Saves: ${saves} | Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}
+${hook ? `- Opening hook used: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : ""}
+${scriptTitle ? `- Script used: "${scriptTitle}"` : ""}
+${whatWorked ? `- Team note — what worked: ${whatWorked}` : ""}
+${improve ? `- Team note — what to improve: ${improve}` : ""}
+
+Write 2-3 sentences of specific, actionable analysis for the content team. Focus on:
+1. What the engagement numbers actually tell us (e.g. save rate, like-to-view ratio, follows)
+2. What specifically to do differently or repeat next time
+3. If team notes are provided, synthesize them with the numbers
+
+Be direct and specific. Do NOT use generic phrases like "consider testing" or "look at what worked". Reference the actual numbers. Write as if advising a content creator who posted this video yesterday.`;
+
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key":         CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+      },
+      body: JSON.stringify({
+        model:      CLAUDE_MODEL,
+        max_tokens: 300,
+        messages:   [{ role: "user", content: prompt }],
+      }),
+    });
+
+    const data = await resp.json();
+    if (data.error) {
+      console.error("Claude API error:", data.error.message);
+      return `Analysis unavailable: ${data.error.message}`;
+    }
+    return data.content?.[0]?.text?.trim() || "No analysis returned.";
+  } catch (err) {
+    console.error("Claude call failed:", err.message);
+    return `Analysis unavailable: ${err.message}`;
+  }
 }
