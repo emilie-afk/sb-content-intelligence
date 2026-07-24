@@ -1475,7 +1475,7 @@ async function loadCommandCenter() {
     sb.from('published_videos').select('id', {count:'exact'}).or('snapshot_24h_status.eq.Pending,snapshot_72h_status.eq.Pending,snapshot_7d_status.eq.Pending'),
     sb.from('content_review_candidates').select('id', {count:'exact'}).in('status',['Ready for review','Recommended follow-up']),
     sb.from('briefs').select('id', {count:'exact'}).in('status',['Draft','Needs review']),
-    sb.from('scripts').select('id', {count:'exact'}).in('status',['Draft','Needs review','Needs revision']),
+    sb.from('script_outputs').select('id', {count:'exact'}).in('review_status',['Draft','Needs review','Needs revision']),
   ]);
   document.getElementById('stat-high').textContent      = high.count ?? 0;
   document.getElementById('stat-inbox').textContent     = inbox.count ?? 0;
@@ -1518,7 +1518,7 @@ async function loadCommandCenter() {
     </tr>`).join('');
 
   // Scripts needing review
-  const { data: scrs } = await sb.from('scripts').select('*').in('status',['Draft','Needs review','Needs revision']).order('created_at',{ascending:false}).limit(5);
+  const { data: scrs } = await sb.from('script_outputs').select('*').in('review_status',['Draft','Needs review','Needs revision']).order('created_at',{ascending:false}).limit(5);
   const sTbody = document.getElementById('cmd-scripts');
   if (!scrs?.length) { sTbody.innerHTML = '<tr><td colspan="5"><div class="empty"><p>No scripts needing review</p></div></td></tr>'; }
   else sTbody.innerHTML = scrs.map(s => `
