@@ -70,29 +70,44 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generated: 0, message: "No videos ready for learning" }) };
     }
 
-    // ── 3. Generate individual memory for each ready video ────────────────
+    // ── 3. Generate memories in parallel batches (avoid Netlify 10s timeout) ─
     let generated = 0;
     let errors    = 0;
 
-    for (const video of readyVideos) {
-      const memory = await buildMemory(video, batchStats, topicPlatformMap);
+    const BATCH_SIZE = 4; // 4 parallel Claude calls at a time
+    for (let i = 0; i < readyVideos.length; i += BATCH_SIZE) {
+      const batch = readyVideos.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(video => buildMemory(video, batchStats, topicPlatformMap))
+      );
 
-      const { error: insertErr } = await supabase
-        .from("learning_memory")
-        .insert(memory);
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        const video  = batch[j];
 
-      if (insertErr) {
-        console.error("learning_memory insert failed:", insertErr.message, "video:", video.id);
-        errors++;
-        continue;
+        if (result.status === "rejected") {
+          console.error("buildMemory failed for video:", video.id, result.reason);
+          errors++;
+          continue;
+        }
+
+        const { error: insertErr } = await supabase
+          .from("learning_memory")
+          .insert(result.value);
+
+        if (insertErr) {
+          console.error("learning_memory insert failed:", insertErr.message, "video:", video.id);
+          errors++;
+          continue;
+        }
+
+        await supabase
+          .from("published_videos")
+          .update({ learning_status: "Processed" })
+          .eq("id", video.id);
+
+        generated++;
       }
-
-      await supabase
-        .from("published_videos")
-        .update({ learning_status: "Processed" })
-        .eq("id", video.id);
-
-      generated++;
     }
 
     // ── 4. Generate one batch-level pattern summary ───────────────────────
