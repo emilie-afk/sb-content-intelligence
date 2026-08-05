@@ -1411,8 +1411,6 @@ Visual hook: ${orig.visual_hook || "not specified"}
 Video format: ${orig.video_format || "not specified"}
 Video flow: ${orig.video_flow || "not specified"}
 Caption: ${orig.caption || "not specified"}
-CTA: ${orig.cta || "not specified"}
-
 REVIEWER FEEDBACK (verdict: ${feedback.overall || "Needs work"}):
 ${gaps ? `Gaps to fix:\n${gaps}` : "No gaps listed."}
 ${angles ? `\nSuggested angles not yet covered:\n${angles}` : ""}
@@ -1475,11 +1473,11 @@ const ALLOWED_SCRIPT_TYPES = [
 const SCRIPT_PREFLIGHT_CHECKLIST = `
 PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing:
 1. Hook is the first line: the "full_voiceover_script" MUST open with the exact text from "opening_hook". The hook is not a separate intro card — it IS the first spoken sentence.
-2. CTA: every script MUST end with a clear call to action matched to viewer intent (e.g. "Save this before you water." / "Comment which one yours looks like.").
-3. Caption: the "caption" field MUST be filled in — it doubles as the cover/text overlay.
-4. Visual opening: the shot list MUST specify what is on screen in the first 2 seconds, and it must show the plant/symptom/comparison immediately.
-5. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
-6. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".`;
+2. Caption: the "caption" field MUST be filled in — it doubles as the cover/text overlay.
+3. Visual opening: the shot list MUST specify what is on screen in the first 2 seconds, and it must show the plant/symptom/comparison immediately.
+4. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
+5. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".
+6. No CTA: do NOT end with a call to action. The script ends when the content ends — no "save this", "follow for more", "comment below".`;
 
 function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, recentHooks = []) {
   const rulesText = rules.map(r =>
@@ -1505,8 +1503,6 @@ Hook idea from brief: ${b.opening_hook || "none — write your own"}
 Visual hook: ${b.visual_hook || "not specified"}
 Video format: ${b.video_format || "TikTok / Reel short script"}
 Video flow: ${b.video_flow || "not specified"}
-CTA: ${b.cta || "not specified"}
-
 TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
 
 ${hookAvoidanceBlock ? hookAvoidanceBlock + "\n" : ""}${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
@@ -1544,7 +1540,7 @@ Hook rules (non-negotiable):
 
 Script structure:
 - Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
-- Structure: hook → problem/payoff → 2-3 concrete tips or steps → CTA.
+- Structure: hook → problem/payoff → 2-3 concrete tips or steps. End there — no CTA.
 - The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
 - The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook's wording. The hook lands the problem; the next line should pivot to the solution or deepen the stakes with new information.
 
@@ -1560,7 +1556,6 @@ Return ONLY valid JSON:
   "shot_list": "Shot 1: … one per line",
   "broll_notes": "b-roll / close-up suggestions",
   "product_mention": "how/when the product is mentioned, or null",
-  "cta": "closing call to action",
   "caption": "post caption, 1-2 sentences",
   "hashtags": "#space #separated #hashtags"
 }`;
@@ -1597,8 +1592,6 @@ Topic/title: ${orig.script_title || ""}
 Platform: ${orig.platform || ""}
 Previous hook (must be replaced): "${orig.opening_hook || ""}"
 Previous voiceover: ${orig.full_voiceover_script || ""}
-CTA: ${orig.cta || ""}
-
 ${humanNotes ? `EDITOR DIRECTION (prioritize these above all else):\n${humanNotes}\n` : ""}
 TARGET DURATION: ${targetSecs} seconds — voiceover must be about ${wordBudget} words (±15%).
 
@@ -1624,7 +1617,7 @@ Apply ONE of these proven TikTok hook patterns:
 Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In this video", must name a problem or make a bold claim, no em dashes.
 
 Script: casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
-Structure: hook -> problem/payoff -> 2-3 concrete tips or steps -> CTA.
+Structure: hook → problem/payoff → 2-3 concrete tips or steps. End there — no CTA.
 The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
 The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook. The hook lands the problem; the next line pivots to the solution or deepens the stakes with new information.
 

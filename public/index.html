@@ -597,7 +597,7 @@ tbody tr:hover { background: #fafffe; }
     <div id="view-learning" class="view">
       <div class="view-header">
         <h1>Learning Memory</h1>
-        <p>Lessons from past content — review and approve before they apply</p>
+        <p>Lessons from past content — feeds into AI briefings automatically</p>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="filters">
@@ -606,7 +606,6 @@ tbody tr:hover { background: #fafffe; }
             <option value="">All</option>
             <option value="Approved rule">Approved Rules</option>
             <option value="Archived">Archived</option>
-            <option value="Archived">Archived</option>
           </select>
         </div>
         <div style="display:flex;gap:8px">
@@ -614,6 +613,8 @@ tbody tr:hover { background: #fafffe; }
           <button class="btn btn-primary btn-sm" onclick="openLearningModal()">+ Add Memory</button>
         </div>
       </div>
+
+      <!-- Individual video lessons -->
       <div class="table-wrap">
         <table>
           <thead><tr>
@@ -621,6 +622,12 @@ tbody tr:hover { background: #fafffe; }
           </tr></thead>
           <tbody id="learning-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
         </table>
+      </div>
+
+      <!-- Batch summaries — separate section -->
+      <div id="batch-summaries-section" style="margin-top:32px;display:none">
+        <h3 style="font-size:15px;font-weight:600;color:#374151;margin-bottom:12px">📊 Batch Summaries</h3>
+        <div id="batch-summaries-list"></div>
       </div>
     </div>
 
@@ -2403,7 +2410,7 @@ async function loadPublished() {
     const script = v.script_outputs;
     const scriptCell = script
       ? `<span title="${esc(script.opening_hook||script.script_title||'')}" style="font-size:12px;color:#4f46e5;cursor:default">📝 ${esc((script.script_title||'Script').substring(0,30))}${(script.script_title||'').length>30?'…':''}</span>`
-      : '<span style="font-size:12px;color:#94a3b8">—</span>';
+      : `<button class="btn btn-secondary btn-sm" style="font-size:11px;padding:2px 8px" onclick="openLinkScriptModal('${v.id}')">Link script</button>`;
     return `
     <tr>
       <td class="truncate"><a href="${esc(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.topic||v.video_url||'—')}</a></td>
@@ -2416,6 +2423,48 @@ async function loadPublished() {
       <td>${scriptCell}</td>
     </tr>`;
   }).join('');
+}
+
+async function openLinkScriptModal(videoId) {
+  // Fetch recent approved scripts to pick from
+  const { data: scripts } = await sb.from('script_outputs')
+    .select('id, script_title, opening_hook, created_at')
+    .order('created_at', { ascending: false })
+    .limit(30);
+  if (!scripts?.length) { toast('No scripts found in the system', true); return; }
+
+  const options = scripts.map(s =>
+    `<option value="${s.id}">${esc((s.script_title||'Untitled').substring(0,60))} — "${esc((s.opening_hook||'').substring(0,50))}"</option>`
+  ).join('');
+
+  const pick = await new Promise(resolve => {
+    const div = document.createElement('div');
+    div.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+    div.innerHTML = `
+      <div style="background:#fff;border-radius:12px;padding:24px;width:520px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+        <h3 style="margin:0 0 8px;font-size:16px">Link script to this video</h3>
+        <p style="font-size:13px;color:#6b7280;margin:0 0 16px">This tells the system which script produced this video, so performance feeds back and learning memories track the source.</p>
+        <select id="_link-script-select" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;margin-bottom:16px">
+          ${options}
+        </select>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button onclick="this.closest('div[style*=fixed]').remove()" class="btn btn-secondary">Cancel</button>
+          <button onclick="
+            const sel = document.getElementById('_link-script-select');
+            this.closest('div[style*=fixed]').remove();
+            window._linkScriptResolve(sel.value);
+          " class="btn btn-primary">Link Script</button>
+        </div>
+      </div>`;
+    document.body.appendChild(div);
+    window._linkScriptResolve = resolve;
+  });
+
+  if (!pick) return;
+  const { error } = await sb.from('published_videos').update({ script_output_id: pick }).eq('id', videoId);
+  if (error) { toast('❌ ' + error.message, true); return; }
+  toast('✅ Script linked — regenerate learning to include it');
+  loadPublished();
 }
 
 async function syncVideoMetrics() {
@@ -2467,27 +2516,60 @@ async function generateLearning() {
 }
 
 async function loadLearning() {
-  let q = sb.from('learning_memory').select('*').order('date_added',{ascending:false}).limit(50);
+  let q = sb.from('learning_memory').select('*').order('date_added',{ascending:false}).limit(100);
   const status = document.getElementById('learning-status-filter')?.value;
   if (status) q = q.eq('status', status);
   const { data } = await q;
+
+  // Split: individual video lessons vs batch summaries
+  const individual = (data || []).filter(m => m.applies_to !== 'Content pillar');
+  const batches    = (data || []).filter(m => m.applies_to === 'Content pillar');
+
+  // ── Individual memories table ────────────────────────────────────────
   const tbody = document.getElementById('learning-table');
-  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">🧠</div><p>No learning memories yet</p></div></td></tr>'; return; }
-  tbody.innerHTML = data.map(m => `
-    <tr>
-      <td><span class="badge badge-new">${esc(m.applies_to||'—')}</span></td>
-      <td class="truncate" title="${esc(m.topic||'')}">${esc(m.topic||'—')}</td>
-      <td class="truncate" title="${esc(m.what_happened||'')}">${esc(m.what_happened||'—')}</td>
-      <td style="white-space:normal;font-size:13px;line-height:1.4;min-width:200px">${esc(m.recommendation_next_time||'—')}</td>
-      <td style="font-size:12px;color:#4f46e5">${m.source ? `📝 ${esc(m.source)}` : '<span style="color:#94a3b8">—</span>'}</td>
-      <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
-      <td>
-        <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)">
-          ${['Active','Needs review next time','Approved rule','Archived'].map(opt=>`<option${m.status===opt?' selected':''}>${opt}</option>`).join('')}
-        </select>
-      </td>
-      <td><button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button></td>
-    </tr>`).join('');
+  if (!individual.length) {
+    tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">🧠</div><p>No learning memories yet</p></div></td></tr>';
+  } else {
+    tbody.innerHTML = individual.map(m => `
+      <tr>
+        <td><span class="badge badge-new">${esc(m.applies_to||'—')}</span></td>
+        <td class="truncate" title="${esc(m.topic||'')}">${esc(m.topic||'—')}</td>
+        <td class="truncate" title="${esc(m.what_happened||'')}">${esc(m.what_happened||'—')}</td>
+        <td style="white-space:normal;font-size:13px;line-height:1.4;min-width:200px">${esc(m.recommendation_next_time||'—')}</td>
+        <td style="font-size:12px;color:#4f46e5">${m.source ? `📝 ${esc(m.source)}` : '<span style="color:#94a3b8">—</span>'}</td>
+        <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
+        <td>
+          <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)">
+            ${['Active','Approved rule','Archived'].map(opt=>`<option${m.status===opt?' selected':''}>${opt}</option>`).join('')}
+          </select>
+        </td>
+        <td><button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button></td>
+      </tr>`).join('');
+  }
+
+  // ── Batch summaries section ──────────────────────────────────────────
+  const batchSection = document.getElementById('batch-summaries-section');
+  const batchList    = document.getElementById('batch-summaries-list');
+  if (!batches.length) {
+    batchSection.style.display = 'none';
+  } else {
+    batchSection.style.display = 'block';
+    batchList.innerHTML = batches.map(m => `
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <span style="font-size:13px;font-weight:600;color:#374151">${esc(m.topic||'Batch summary')}</span>
+            <span style="font-size:12px;color:#94a3b8;margin-left:8px">${m.date_added||''}</span>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            ${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : ''}
+            <button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button>
+          </div>
+        </div>
+        <p style="font-size:12px;color:#6b7280;margin:0 0 8px">${esc(m.what_happened||'')}</p>
+        <p style="font-size:13px;color:#1e293b;margin:0;line-height:1.5">${esc(m.recommendation_next_time||'')}</p>
+      </div>`).join('');
+  }
 }
 
 // ── SOURCES ───────────────────────────────────────────────────────────
