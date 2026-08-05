@@ -1593,6 +1593,9 @@ Avoid repeating the same sentence structure even with different words.`
   if (forceFresh) {
     return `You are writing a fresh new version of a short-form video script for Succulents Box, a succulent plant subscription company.
 The previous version is shown below as reference only — do NOT copy it. Write a meaningfully different script on the same topic.
+
+TOPIC LOCK — this is non-negotiable:
+The plant, symptom, and subject must be exactly "${orig.script_title || "the same topic as the original"}". Do not switch to a different plant, a different problem, or a different angle. Only the hook, wording, and structure may change.
 ${hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : ""}
 PREVIOUS SCRIPT (${orig.script_version || "v1"}) — for reference, do NOT reuse its hook or opening structure:
 Topic/title: ${orig.script_title || ""}
@@ -1648,6 +1651,9 @@ Return ONLY valid JSON:
 
   return `You are revising a short-form video script for Succulents Box, a succulent plant subscription company.
 A brand reviewer flagged issues in the current version. Write an improved version that fixes EVERY flagged issue while keeping what already works.
+
+TOPIC LOCK — this is non-negotiable:
+The plant, symptom, and subject must remain exactly "${orig.script_title || "the same topic as the original"}". Do not switch to a different plant, problem, or angle. Only the hook, wording, and structure may change.
 ${hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : ""}
 CURRENT SCRIPT (${orig.script_version || "v1"}):
 Title: ${orig.script_title || ""}
