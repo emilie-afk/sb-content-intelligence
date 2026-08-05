@@ -2950,6 +2950,16 @@ async function updateScriptStatus(id, status) {
   toast('Script status updated');
   if (status === 'Approved') {
     writeScriptToSheet(id, { silent: false, approved_at: approvedAt });
+    // Auto-archive other versions of the same brief
+    const { data: approved } = await sb.from('script_outputs').select('brief_id').eq('id', id).single();
+    if (approved?.brief_id) {
+      await sb.from('script_outputs')
+        .update({ review_status: 'Archived' })
+        .eq('brief_id', approved.brief_id)
+        .neq('id', id)
+        .neq('review_status', 'Used in production'); // don't touch already-linked ones
+    }
+    loadScripts();
   }
 }
 
@@ -2970,13 +2980,13 @@ async function quickScriptStatus(id, status) {
   if (status === 'Approved' && !['admin','owner'].includes(userRole)) {
     toast('Only admins and owners can approve scripts', true); return;
   }
-  await updateScriptStatus(id, status);
+  await updateScriptStatus(id, status); // handles archiving siblings if Approved
   // Update status bar and cached script object in place — no modal reload needed
   if (window._viewedScript) window._viewedScript.review_status = status;
   const bar = document.getElementById('script-status-bar');
   if (bar) bar.innerHTML = renderScriptStatusBar(status, id);
-  // Refresh the list in the background so it reflects the new status immediately
-  loadScripts();
+  // loadScripts() already called inside updateScriptStatus when Approved; call here for other statuses
+  if (status !== 'Approved') loadScripts();
 }
 
 async function saveScriptReviewNote() {
