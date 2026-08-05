@@ -472,6 +472,8 @@ async function generateRecommendation({ cleanTopic, hook, views, day, video, wha
 
 The topic is almost never the problem — the hook wording, script length, and approach usually are. Your job is to tell the AI writer HOW to write differently, not what topic to avoid.
 
+IMPORTANT: Write a rule that applies to a CATEGORY OF CONTENT — not just this one video. Abstract away from the specific plant name. The rule should be usable when writing about any similar topic, not just Monstera or Money Tree. For example, instead of "avoid personification hooks for Money Tree care", write "avoid personification hooks for plant care advice" — because that lesson applies broadly.
+
 THIS VIDEO'S DATA:
 - Topic: ${cleanTopic || "unknown"}
 - Platform: ${video.platform || "unknown"}
