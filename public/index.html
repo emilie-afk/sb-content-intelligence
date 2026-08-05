@@ -2586,23 +2586,33 @@ async function loadLearning() {
       const approveBtn = isAdmin && !isApproved
         ? `<button class="btn btn-sm" style="background:#dcfce7;color:#15803d;border:1px solid #86efac;white-space:nowrap" onclick="approveLearningRule('${m.id}')">✅ Approve for AI</button>`
         : isApproved ? '<span style="font-size:11px;color:#059669;font-weight:600">🤖 Live in AI</span>' : '';
-      return `<tr>
+      const hasEvidence = !!(m.evidence_summary);
+      const evidenceRow = hasEvidence ? `<tr id="evidence-${m.id}" style="display:none;background:#f8fafc">
+        <td colspan="8" style="padding:10px 16px;font-size:12px;color:#475569;border-top:none">
+          <strong style="color:#334155">Why this rule was generated:</strong><br>
+          <pre style="white-space:pre-wrap;font-family:inherit;margin:6px 0 0;line-height:1.5">${esc(m.evidence_summary)}</pre>
+        </td>
+      </tr>` : '';
+      return `<tr style="cursor:pointer" onclick="toggleEvidence('${m.id}')" title="${hasEvidence ? 'Click to see source data' : ''}">
         <td><span class="badge badge-new">${esc(m.applies_to||'—')}</span></td>
         <td class="truncate" title="${esc(m.topic||'')}">${esc(m.topic||'—')}</td>
         <td class="truncate" title="${esc(m.what_happened||'')}">${esc(m.what_happened||'—')}</td>
-        <td style="white-space:normal;font-size:13px;line-height:1.4;min-width:200px">${esc(m.recommendation_next_time||'—')}</td>
+        <td style="white-space:normal;font-size:13px;line-height:1.4;min-width:200px">
+          ${esc(m.recommendation_next_time||'—')}
+          ${hasEvidence ? '<span style="font-size:10px;color:#94a3b8;margin-left:4px">▾ why?</span>' : ''}
+        </td>
         <td style="font-size:12px;color:#4f46e5">${m.source ? `📝 ${esc(m.source)}` : '<span style="color:#94a3b8">—</span>'}</td>
         <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
-        <td>
+        <td onclick="event.stopPropagation()">
           <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)"${isAdmin ? '' : ' disabled'}>
             ${['Active','Approved rule','Archived'].map(opt=>`<option${m.status===opt?' selected':''}>${opt}</option>`).join('')}
           </select>
         </td>
-        <td style="white-space:nowrap;display:flex;gap:4px;align-items:center">
+        <td style="white-space:nowrap;display:flex;gap:4px;align-items:center" onclick="event.stopPropagation()">
           ${approveBtn}
           <button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button>
         </td>
-      </tr>`;
+      </tr>${evidenceRow}`;
     }).join('');
   }
 
@@ -2736,6 +2746,12 @@ async function updateLearningStatus(id, status) {
     const panel = document.getElementById('ai-preview-panel');
     if (panel && panel.style.display !== 'none') refreshAiPreview();
   }
+}
+
+function toggleEvidence(id) {
+  const row = document.getElementById(`evidence-${id}`);
+  if (!row) return;
+  row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
 }
 
 async function approveLearningRule(id) {

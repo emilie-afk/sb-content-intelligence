@@ -483,21 +483,27 @@ ${whatWorked ? `- What worked (team note): ${whatWorked}` : ""}
 ${improve ? `- Improve (team note): ${improve}` : ""}
 ${crossPlatform ? `- Same content on other platforms: ${crossPlatform}` : ""}
 
+CRITICAL RULE — views vs. engagement are different signals, treat them differently:
+- HIGH VIEWS + low saves/follows = the hook drives reach but not retention. Do NOT say "avoid" — say "use this hook style when reach is the goal, but pair it with a stronger CTA or save prompt if you need engagement."
+- LOW VIEWS + any engagement = content resonates with those who see it but doesn't travel. Note the engagement strength, suggest a stronger hook to widen reach.
+- LOW VIEWS + zero engagement = genuinely weak — this is the only case where "avoid" or "do not" is appropriate.
+- HIGH VIEWS + high saves/follows = repeat this. Tell the AI to use this approach again.
+
 RULES FOR YOUR RESPONSE:
-- Write ONE directive sentence. Start with "Avoid", "Prefer", "Use", "Keep", "Do not", or "When writing about [topic]".
-- Focus on HOW to write: hook style, script length, format, structure — not whether to write about the topic at all.
-- If script length data exists and the video underperformed, consider whether the script was too long or too short.
-- If hook data exists and the video underperformed, address the hook approach specifically.
-- Back the directive with the key number (e.g. "−48% views, zero saves").
+- Write ONE directive sentence. Start with "Use", "Prefer", "Keep", "Avoid", "Do not", or "When writing about [topic]".
+- Match the directive to the actual outcome: high-view results have value even with low saves — acknowledge the reach, direct how to build on it.
+- Focus on HOW to write: hook style, script length, format — not whether to write about the topic.
+- Back the directive with the key numbers (views vs. avg, plus engagement).
 - If team notes exist, use those as the primary signal.
 ${tierRule}
 - No hedging ("consider", "might", "could"). No analysis paragraphs. One directive sentence only.
 
 Examples of the format to follow:
-✅ "Keep cactus watering videos under 10s — a single quick tip — the 35s version got −16% views and zero engagement."
-✅ "When writing about String of Pearls, open with the visible symptom, not a question — hook 'Your String of Pearls looks like…' got only 544 views (−48% vs avg)."
-✅ "Prefer problem/fix structure for orchid care on TikTok — that format got saves and follows vs. zero on the lifestyle approach."
-✅ "Do not use a soft question hook for underwatering topics — lead with the symptom directly, it's more urgent and specific."`;
+✅ HIGH VIEWS, LOW SAVES: "Use curiosity-gap hooks ('should make this sound') for reach — +125% views — but pair with a save prompt in the caption since it generated zero saves or follows."
+✅ LOW VIEWS, UNDERPERFORMED: "Avoid personification hooks ('if your plant could talk') for care advice — −30% views and zero engagement; lead with the specific symptom instead."
+✅ HIGH VIEWS + SAVES: "Repeat the problem/fix hook format for root rot topics — it drove +40% views and 3 saves on TikTok."
+✅ SHORT VIDEO WIN: "Keep cactus watering scripts under 10s — the 35s version got −16% views and zero engagement vs. the short tip format."
+✅ HOOK TWEAK NEEDED: "When writing about String of Pearls, open with the visible symptom — hook 'Your String of Pearls looks like…' got only 544 views (−48% vs avg); the topic works, the hook framing didn't."`;
 
 
   try {
