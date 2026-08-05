@@ -190,7 +190,7 @@ exports.handler = async (event) => {
         if (ins) {
           // Auto-link script by keyword matching across title + hook
           if (r.topic && ins.id) {
-            const linkedId = await findMatchingScript(supabase, r.topic);
+            const linkedId = await findMatchingScript(supabase, r.topic, r.publishedOn);
             if (linkedId) {
               await supabase.from("published_videos")
                 .update({ script_output_id: linkedId })
@@ -247,7 +247,7 @@ exports.handler = async (event) => {
 
       // ── Auto-link script by keyword matching across title + hook ────────
       if (!video.script_output_id && r.topic) {
-        const linkedId = await findMatchingScript(supabase, r.topic);
+        const linkedId = await findMatchingScript(supabase, r.topic, r.publishedOn);
         if (linkedId) {
           await supabase.from("published_videos")
             .update({ script_output_id: linkedId })
@@ -365,9 +365,13 @@ function buildScriptPerformanceNote(r) {
 }
 
 // ── Match a published video topic to a script using keyword overlap ───────────
-// Strategy: extract significant words (plant names, nouns) from the topic,
-// then search script_title AND opening_hook for any of them.
-// Score by number of keyword hits and return the best match.
+// Strategy:
+//  1. Extract significant words (plant names, action words, 4+ chars) from topic
+//  2. Search script_title, opening_hook, AND full_voiceover_script for any keyword
+//  3. Date-window: only consider scripts created up to 45 days before publish date
+//     (a script written after the video was published can't be the right one)
+//  4. Score = keyword hits (primary) + recency bonus (tiebreaker: prefer script
+//     created closest before the publish date, max 7-day bonus points)
 const STOP_WORDS = new Set([
   "your","their","this","that","with","from","have","what","when","where",
   "about","into","will","more","some","here","there","they","them","been",
@@ -375,48 +379,92 @@ const STOP_WORDS = new Set([
   "than","only","both","each","most","many","such","much","even","well",
   "back","after","first","never","under","over","same","while","still",
   "finally","actually","really","always","never","every","other","another",
+  "plant","plants","video","videos","reel","reels","short","quick",
 ]);
 
 function extractKeywords(text) {
-  return text
-    .replace(/#\w+/g, "")          // strip hashtags
-    .replace(/[^a-zA-Z\s]/g, " ")  // strip punctuation
-    .split(/\s+/)
-    .map(w => w.toLowerCase())
-    .filter(w => w.length >= 5 && !STOP_WORDS.has(w))
-    .slice(0, 6);
+  return [...new Set(
+    text
+      .replace(/#\w+/g, "")          // strip hashtags
+      .replace(/[^a-zA-Z\s]/g, " ")  // strip punctuation
+      .split(/\s+/)
+      .map(w => w.toLowerCase())
+      .filter(w => w.length >= 4 && !STOP_WORDS.has(w))
+  )].slice(0, 8);
 }
 
-async function findMatchingScript(supabase, topic) {
+async function findMatchingScript(supabase, topic, publishDate) {
   if (!topic) return null;
   const keywords = extractKeywords(topic);
   if (!keywords.length) return null;
 
-  // Build OR filter: any keyword in script_title OR opening_hook
+  // Date window: only look at scripts created up to 45 days before publish date
+  // (if no publish date, use today)
+  const anchor = publishDate ? new Date(publishDate) : new Date();
+  const windowStart = new Date(anchor);
+  windowStart.setDate(windowStart.getDate() - 45);
+  // Allow scripts created up to 3 days AFTER publish (timing edge cases)
+  const windowEnd = new Date(anchor);
+  windowEnd.setDate(windowEnd.getDate() + 3);
+
+  // Build OR filter: any keyword in title, hook, caption, OR voiceover body
   const orClauses = keywords.flatMap(k => [
     `script_title.ilike.%${k}%`,
     `opening_hook.ilike.%${k}%`,
+    `caption.ilike.%${k}%`,
+    `full_voiceover_script.ilike.%${k}%`,
   ]).join(",");
 
   const { data: candidates } = await supabase
     .from("script_outputs")
-    .select("id, script_title, opening_hook")
+    .select("id, script_title, opening_hook, caption, full_voiceover_script, created_at")
     .or(orClauses)
+    .gte("created_at", windowStart.toISOString())
+    .lte("created_at", windowEnd.toISOString())
     .order("created_at", { ascending: false })
-    .limit(10);
+    .limit(15);
 
-  if (!candidates?.length) return null;
+  if (!candidates?.length) {
+    // Fallback: try without date window (catches pre-system scripts)
+    const { data: fallback } = await supabase
+      .from("script_outputs")
+      .select("id, script_title, opening_hook, caption, full_voiceover_script, created_at")
+      .or(orClauses)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    if (!fallback?.length) return null;
+    return scoreAndPick(fallback, keywords, anchor);
+  }
 
-  // Score each candidate by how many keywords it matches
+  return scoreAndPick(candidates, keywords, anchor);
+}
+
+function scoreAndPick(candidates, keywords, publishDate) {
   const scored = candidates.map(s => {
-    const haystack = `${(s.script_title || "").toLowerCase()} ${(s.opening_hook || "").toLowerCase()}`;
-    const hits = keywords.filter(k => haystack.includes(k)).length;
-    return { id: s.id, hits };
+    // Keyword hits across all three fields (deduplicated by keyword)
+    const title   = (s.script_title || "").toLowerCase();
+    const hook    = (s.opening_hook || "").toLowerCase();
+    const caption = (s.caption || "").toLowerCase();
+    const body    = (s.full_voiceover_script || "").toLowerCase();
+    const hits = keywords.filter(k => title.includes(k) || hook.includes(k) || caption.includes(k) || body.includes(k)).length;
+
+    // Recency bonus: scripts created 0–7 days before publish get +0.5
+    // (ensures same-keyword scripts prefer the temporally closest one)
+    const createdAt = new Date(s.created_at);
+    const daysBefore = (publishDate - createdAt) / (1000 * 60 * 60 * 24);
+    const recencyBonus = (daysBefore >= 0 && daysBefore <= 7) ? 0.5 : 0;
+
+    return { id: s.id, score: hits + recencyBonus, hits };
   });
 
-  scored.sort((a, b) => b.hits - a.hits);
-  // Only link if at least 1 keyword matched (always true given OR filter, but safeguard)
-  return scored[0]?.hits >= 1 ? scored[0].id : null;
+  scored.sort((a, b) => b.score - a.score);
+  // Require at least 2 keyword hits to avoid weak single-word matches
+  // (falls back to 1 hit if nothing has 2+)
+  const best = scored[0];
+  if (!best) return null;
+  if (best.hits >= 2) return best.id;
+  if (best.hits === 1) return best.id; // single hit accepted as weak match
+  return null;
 }
 
 // ── Build a rich performance_summary string the AI can read ──────────────────
