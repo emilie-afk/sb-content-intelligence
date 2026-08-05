@@ -188,21 +188,13 @@ exports.handler = async (event) => {
         if (insErr) console.error("INSERT FAILED:", insErr.message, JSON.stringify(insertRow));
 
         if (ins) {
-          // Auto-link script by matching topic to opening_hook
+          // Auto-link script by keyword matching across title + hook
           if (r.topic && ins.id) {
-            const searchKey = r.topic.replace(/#\w+/g, "").trim().substring(0, 60);
-            if (searchKey.length > 10) {
-              const { data: matched } = await supabase
-                .from("script_outputs")
-                .select("id")
-                .ilike("opening_hook", `%${searchKey}%`)
-                .limit(1)
-                .maybeSingle();
-              if (matched?.id) {
-                await supabase.from("published_videos")
-                  .update({ script_output_id: matched.id })
-                  .eq("id", ins.id);
-              }
+            const linkedId = await findMatchingScript(supabase, r.topic);
+            if (linkedId) {
+              await supabase.from("published_videos")
+                .update({ script_output_id: linkedId })
+                .eq("id", ins.id);
             }
           }
           sheetUpdates.push({ rowIndex: r.rowIndex, label: "✅ synced (new)" });
@@ -253,24 +245,14 @@ exports.handler = async (event) => {
         }
       }
 
-      // ── Auto-link script by matching topic text to opening_hook ─────────
-      // The topic column contains the opening caption which came from the script
+      // ── Auto-link script by keyword matching across title + hook ────────
       if (!video.script_output_id && r.topic) {
-        // Extract first ~60 chars of topic, strip hashtags, use as search key
-        const searchKey = r.topic.replace(/#\w+/g, "").trim().substring(0, 60);
-        if (searchKey.length > 10) {
-          const { data: matched } = await supabase
-            .from("script_outputs")
-            .select("id, script_title")
-            .ilike("opening_hook", `%${searchKey}%`)
-            .limit(1)
-            .maybeSingle();
-          if (matched?.id) {
-            await supabase.from("published_videos")
-              .update({ script_output_id: matched.id })
-              .eq("id", video.id);
-            video.script_output_id = matched.id;
-          }
+        const linkedId = await findMatchingScript(supabase, r.topic);
+        if (linkedId) {
+          await supabase.from("published_videos")
+            .update({ script_output_id: linkedId })
+            .eq("id", video.id);
+          video.script_output_id = linkedId;
         }
       }
 
@@ -380,6 +362,61 @@ function buildScriptPerformanceNote(r) {
     r.improve    ? `Improve: ${r.improve}` : null,
   ].filter(Boolean).join(" | ");
   return parts;
+}
+
+// ── Match a published video topic to a script using keyword overlap ───────────
+// Strategy: extract significant words (plant names, nouns) from the topic,
+// then search script_title AND opening_hook for any of them.
+// Score by number of keyword hits and return the best match.
+const STOP_WORDS = new Set([
+  "your","their","this","that","with","from","have","what","when","where",
+  "about","into","will","more","some","here","there","they","them","been",
+  "were","would","could","should","does","like","just","very","also","then",
+  "than","only","both","each","most","many","such","much","even","well",
+  "back","after","first","never","under","over","same","while","still",
+  "finally","actually","really","always","never","every","other","another",
+]);
+
+function extractKeywords(text) {
+  return text
+    .replace(/#\w+/g, "")          // strip hashtags
+    .replace(/[^a-zA-Z\s]/g, " ")  // strip punctuation
+    .split(/\s+/)
+    .map(w => w.toLowerCase())
+    .filter(w => w.length >= 5 && !STOP_WORDS.has(w))
+    .slice(0, 6);
+}
+
+async function findMatchingScript(supabase, topic) {
+  if (!topic) return null;
+  const keywords = extractKeywords(topic);
+  if (!keywords.length) return null;
+
+  // Build OR filter: any keyword in script_title OR opening_hook
+  const orClauses = keywords.flatMap(k => [
+    `script_title.ilike.%${k}%`,
+    `opening_hook.ilike.%${k}%`,
+  ]).join(",");
+
+  const { data: candidates } = await supabase
+    .from("script_outputs")
+    .select("id, script_title, opening_hook")
+    .or(orClauses)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  if (!candidates?.length) return null;
+
+  // Score each candidate by how many keywords it matches
+  const scored = candidates.map(s => {
+    const haystack = `${(s.script_title || "").toLowerCase()} ${(s.opening_hook || "").toLowerCase()}`;
+    const hits = keywords.filter(k => haystack.includes(k)).length;
+    return { id: s.id, hits };
+  });
+
+  scored.sort((a, b) => b.hits - a.hits);
+  // Only link if at least 1 keyword matched (always true given OR filter, but safeguard)
+  return scored[0]?.hits >= 1 ? scored[0].id : null;
 }
 
 // ── Build a rich performance_summary string the AI can read ──────────────────
