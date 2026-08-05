@@ -2950,14 +2950,34 @@ async function updateScriptStatus(id, status) {
   toast('Script status updated');
   if (status === 'Approved') {
     writeScriptToSheet(id, { silent: false, approved_at: approvedAt });
-    // Auto-archive other versions of the same brief
-    const { data: approved } = await sb.from('script_outputs').select('brief_id').eq('id', id).single();
+    // Auto-archive other versions of the same script
+    const { data: approved } = await sb.from('script_outputs')
+      .select('brief_id, script_title')
+      .eq('id', id).single();
     if (approved?.brief_id) {
+      // Prefer brief_id match (exact, reliable)
       await sb.from('script_outputs')
         .update({ review_status: 'Archived' })
         .eq('brief_id', approved.brief_id)
         .neq('id', id)
-        .neq('review_status', 'Used in production'); // don't touch already-linked ones
+        .neq('review_status', 'Used in production');
+    } else if (approved?.script_title) {
+      // Fallback: match on the topic portion (text before the first colon, or first 20 chars)
+      // e.g. "Echeveria Stretching: Fix With Light" → "Echeveria Stretching"
+      const colonIdx = approved.script_title.indexOf(':');
+      const topicKey = colonIdx > 4
+        ? approved.script_title.slice(0, colonIdx).trim()
+        : approved.script_title.slice(0, 20).trim();
+      const { data: siblings } = await sb.from('script_outputs')
+        .select('id')
+        .ilike('script_title', `${topicKey}%`)
+        .neq('id', id)
+        .neq('review_status', 'Used in production');
+      if (siblings?.length) {
+        await sb.from('script_outputs')
+          .update({ review_status: 'Archived' })
+          .in('id', siblings.map(s => s.id));
+      }
     }
     loadScripts();
   }
@@ -3015,6 +3035,11 @@ async function viewScript(id) {
   // reference this variable instead.
   window._viewedScript = s;
   window._lastScriptAnalysis = null; // clear stale brand-check from any previous script
+  // Pre-fill duration input with this script's current duration
+  setTimeout(() => {
+    const dur = document.getElementById('revise-target-duration');
+    if (dur && s.estimated_duration_seconds) dur.value = s.estimated_duration_seconds;
+  }, 50);
   const el = document.getElementById('modal-view-content');
   el.innerHTML = `
     <h3 style="margin:0 0 12px">${esc(s.script_title)}</h3>
@@ -3071,6 +3096,13 @@ async function viewScript(id) {
         <textarea id="script-human-notes" placeholder="e.g. make the hook punchier, shorten to 15s, add product mention earlier, avoid the word 'drainage'" style="width:100%;padding:8px;font-size:13px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0;resize:vertical;box-sizing:border-box;margin-bottom:8px" rows="3"></textarea>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button id="regenerate-script-btn" class="btn btn-primary" onclick="generateRevisedScript()">✏️ Revise with notes</button>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#94a3b8">
+            Duration:
+            <input id="revise-target-duration" type="number" min="5" max="60" step="5"
+              style="width:58px;padding:4px 6px;font-size:12px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0;text-align:center"
+              placeholder="s" title="Target duration in seconds">
+            <span>s</span>
+          </label>
           <select id="revise-hook-pattern" style="font-size:12px;padding:5px 8px;border:1px solid #374151;border-radius:6px;background:#1e293b;color:#e2e8f0">
             <option value="">Hook: Let AI choose</option>
             <option value="Symptom first">Symptom first</option>
@@ -3548,6 +3580,8 @@ async function generateRevisedScript() {
   if (!s) { toast('Open a script first', true); return; }
   const humanNotes = document.getElementById('script-human-notes')?.value?.trim() || null;
   const hookPattern = document.getElementById('revise-hook-pattern')?.value || null;
+  const durationInput = document.getElementById('revise-target-duration');
+  const targetDuration = durationInput?.value ? Number(durationInput.value) : (s.estimated_duration_seconds || null);
   // Fresh take when: no brand check run, OR brand check passed clean (nothing to fix)
   const hasViolations = (a.brand_violations || []).length > 0;
   const hasSuggestions = (a.hook_suggestions || []).length > 0 || (a.improvements || []).length > 0;
@@ -3561,7 +3595,7 @@ async function generateRevisedScript() {
     const resp = await fetch('/.netlify/functions/ai-analyze', {
       method: 'POST',
       headers: await authHeaders(),
-      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a, human_notes: humanNotes, hook_pattern: hookPattern || null, force_fresh: forceFresh } }),
+      body: JSON.stringify({ type: 'revise_script', data: { script: s, feedback: a, human_notes: humanNotes, hook_pattern: hookPattern || null, force_fresh: forceFresh, target_duration_seconds: targetDuration } }),
     });
     const result = await resp.json();
     if (!result.success) throw new Error(result.error || 'Revision failed');

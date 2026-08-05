@@ -310,7 +310,7 @@ exports.handler = async (event) => {
         .eq("active", true)
         .order("severity");
 
-      const target = Math.min(600, Math.max(5, Number(data.target_duration_seconds) || 20));
+      const target = Math.min(60, Math.max(5, Number(data.target_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
       const learningMemory = await fetchLearningMemory(supabase, data.featured_product || data.title);
 
@@ -401,7 +401,8 @@ exports.handler = async (event) => {
         .eq("active", true)
         .order("severity");
 
-      const target = Math.min(600, Math.max(5, Number(orig.estimated_duration_seconds) || 20));
+      // Prefer explicit target from request (user wants a different length); fall back to original
+      const target = Math.min(120, Math.max(5, Number(data.target_duration_seconds || orig.estimated_duration_seconds) || 20));
       const lessons = await fetchScriptLessons(supabase);
 
       // Fetch hooks used in the last 30 days to avoid repeating patterns
@@ -1505,7 +1506,8 @@ Hook idea from brief: ${b.opening_hook || "none — write your own"}
 Visual hook: ${b.visual_hook || "not specified"}
 Video format: ${b.video_format || "TikTok / Reel short script"}
 Video flow: ${b.video_flow || "not specified"}
-TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
+TARGET DURATION: ${targetSecs} seconds — the voiceover must be ${wordBudget} words or fewer. Count your words before returning. Cut sentences if needed — do not go over.
+Length guidance: under 10s for a single quick tip, 10-15s is ideal for most care advice, 20s for anything with a fix step, 60s is the absolute maximum. Default short — only stretch if the topic genuinely needs more steps to be useful.
 
 ${hookAvoidanceBlock ? hookAvoidanceBlock + "\n" : ""}${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
 BRAND RULES (follow all Required rules, never do Forbidden ones):
@@ -1598,7 +1600,7 @@ Platform: ${orig.platform || ""}
 Previous hook (must be replaced): "${orig.opening_hook || ""}"
 Previous voiceover: ${orig.full_voiceover_script || ""}
 ${humanNotes ? `EDITOR DIRECTION (prioritize these above all else):\n${humanNotes}\n` : ""}
-TARGET DURATION: ${targetSecs} seconds — voiceover must be about ${wordBudget} words (±15%).
+TARGET DURATION: ${targetSecs} seconds — the voiceover must be ${wordBudget} words or fewer. Count your words before returning. Cut sentences if needed — do not go over. 60s is the absolute maximum regardless of topic.
 
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
@@ -1664,7 +1666,8 @@ ${improvements ? `\nSuggested improvements:\n${improvements}` : ""}
 ${feedback.notes ? `\nReviewer notes: ${feedback.notes}` : ""}
 ${humanNotes ? `\nHUMAN EDITOR NOTES (incorporate these into the revision):\n${humanNotes}` : ""}
 
-TARGET DURATION: ${targetSecs} seconds — the voiceover must be about ${wordBudget} words (±15%). Do NOT exceed this.
+TARGET DURATION: ${targetSecs} seconds — the voiceover must be ${wordBudget} words or fewer. Count your words before returning. Cut sentences if needed — do not go over.
+Length guidance: under 10s for a single quick tip, 10-15s is ideal for most care advice, 20s for anything with a fix step, 60s is the absolute maximum. Default short — only stretch if the topic genuinely needs more steps to be useful.
 
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
