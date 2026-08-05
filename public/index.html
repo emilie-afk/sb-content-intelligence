@@ -611,7 +611,7 @@ tbody tr:hover { background: #fafffe; }
         <div style="display:flex;gap:8px">
           <button class="btn btn-secondary btn-sm" onclick="toggleAiPreview()">🔍 What the AI sees</button>
           <button class="btn btn-secondary btn-sm" id="generate-learning-btn" onclick="generateLearning()">⚡ Generate from Videos</button>
-          <button class="btn btn-primary btn-sm" onclick="openLearningModal()">+ Add Memory</button>
+          <button class="btn btn-primary btn-sm" onclick="openLearningModal()">+ Add Rule</button>
         </div>
       </div>
 
@@ -1158,25 +1158,29 @@ tbody tr:hover { background: #fafffe; }
   </div>
 </div>
 
-<!-- Add Learning Memory Modal -->
+<!-- Add Learning Rule Modal -->
 <div class="modal-overlay" id="modal-learning">
   <div class="modal">
-    <h2>Add Learning Memory</h2>
+    <h2>Add Rule for AI</h2>
+    <p style="font-size:13px;color:#64748b;margin-bottom:16px">Write one directive the AI will follow when writing scripts. Keep it pattern-level — not specific to one video or plant. It goes live immediately.</p>
+    <div class="form-group">
+      <label>Rule <span style="font-size:11px;color:#94a3b8">(start with: Use / Prefer / Avoid / Keep / Do not / When writing about…)</span></label>
+      <textarea id="learn-rec" rows="3" placeholder='e.g. "Avoid personification hooks for plant care advice — they underperform vs. symptom-led hooks on Instagram."'></textarea>
+    </div>
     <div class="form-row">
-      <div class="form-group"><label>Applies To</label>
-        <select id="learn-applies"><option>Topic</option><option>Plant</option><option>Hook</option><option>Format</option><option>Source</option><option>Product</option><option>Audience question</option><option>Content pillar</option></select>
+      <div class="form-group"><label>Category</label>
+        <select id="learn-applies"><option>Hook</option><option>Format</option><option>Topic</option><option>General</option></select>
       </div>
-      <div class="form-group"><label>Confidence</label>
-        <select id="learn-confidence"><option>High</option><option>Medium</option><option>Low</option></select>
+      <div class="form-group"><label>Topic / context <span style="font-size:11px;color:#94a3b8">(optional)</span></label>
+        <input type="text" id="learn-topic" placeholder="e.g. plant care advice, succulents">
       </div>
     </div>
-    <div class="form-group"><label>Topic</label><input type="text" id="learn-topic"></div>
-    <div class="form-group"><label>What Happened</label><textarea id="learn-happened" rows="3"></textarea></div>
-    <div class="form-group"><label>Evidence Summary</label><textarea id="learn-evidence" rows="2"></textarea></div>
-    <div class="form-group"><label>Recommendation Next Time</label><textarea id="learn-rec" rows="2"></textarea></div>
+    <div class="form-group"><label>Why / evidence <span style="font-size:11px;color:#94a3b8">(optional — shown in "why?" expand)</span></label>
+      <textarea id="learn-evidence" rows="2" placeholder="e.g. Based on 3 videos where personification hooks got −20–30% views vs avg"></textarea>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-learning')">Cancel</button>
-      <button class="btn btn-primary" onclick="saveLearning()">Save Memory</button>
+      <button class="btn btn-primary" onclick="saveLearning()">Save &amp; Activate Rule</button>
     </div>
   </div>
 </div>
@@ -2862,21 +2866,29 @@ async function savePublished() {
 }
 
 async function saveLearning() {
+  const rule = document.getElementById('learn-rec').value?.trim();
+  if (!rule) { toast('Rule text is required', true); return; }
   const row = {
-    applies_to:              document.getElementById('learn-applies').value,
-    topic:                   document.getElementById('learn-topic').value || null,
-    what_happened:           document.getElementById('learn-happened').value || null,
-    evidence_summary:        document.getElementById('learn-evidence').value || null,
-    recommendation_next_time:document.getElementById('learn-rec').value || null,
-    confidence:              document.getElementById('learn-confidence').value,
-    status:                  'Needs review next time',
-    reviewed_by:             currentUser?.id,
+    applies_to:               document.getElementById('learn-applies').value,
+    topic:                    document.getElementById('learn-topic').value?.trim() || null,
+    what_happened:            'Manually added rule',
+    evidence_summary:         document.getElementById('learn-evidence').value?.trim() || null,
+    recommendation_next_time: rule,
+    confidence:               'High',
+    status:                   'Approved rule',
+    date_added:               new Date().toISOString().slice(0, 10),
   };
   const { error } = await sb.from('learning_memory').insert(row);
   if (error) { toast('Error: ' + error.message, true); return; }
-  toast('Memory saved');
+  toast('✅ Rule saved and live in AI');
   closeModal('modal-learning');
+  // Reset fields
+  ['learn-rec','learn-topic','learn-evidence'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const filter = document.getElementById('learning-status-filter');
+  if (filter) filter.value = 'Approved rule';
   loadLearning();
+  const panel = document.getElementById('ai-preview-panel');
+  if (panel && panel.style.display !== 'none') refreshAiPreview();
 }
 
 async function saveSource() {
