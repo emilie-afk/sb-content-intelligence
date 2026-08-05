@@ -677,9 +677,9 @@ tbody tr:hover { background: #fafffe; }
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Status</th><th>Action</th>
+              <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Approved</th><th>Status</th><th>Action</th>
             </tr></thead>
-            <tbody id="scripts-review-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+            <tbody id="scripts-review-table"><tr><td colspan="9" class="loading">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -704,9 +704,9 @@ tbody tr:hover { background: #fafffe; }
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Status</th><th>Action</th>
+              <th>Title</th><th>Platform</th><th>Type</th><th>Version</th><th>Hook</th><th>Duration</th><th>Approved</th><th>Status</th><th>Action</th>
             </tr></thead>
-            <tbody id="scripts-table"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+            <tbody id="scripts-table"><tr><td colspan="9" class="loading">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -2810,6 +2810,11 @@ async function saveSource() {
 // ── SCRIPTS ───────────────────────────────────────────────────────────
 function _scriptRow(s, showDelete) {
   const statusOpts = ['Draft','Needs review','Needs revision',...(['admin','owner'].includes(userRole)?['Approved']:[]),'Used in production','Archived'];
+  const approvedDate = s.approved_at
+    ? new Date(s.approved_at).toLocaleDateString('en-US',{month:'short',day:'numeric'})
+    : null;
+  const isStaleApproved = s.review_status === 'Approved' && s.approved_at &&
+    (Date.now() - new Date(s.approved_at).getTime()) > 7 * 24 * 60 * 60 * 1000;
   return `<tr id="script-row-${s.id}">
     <td class="truncate">${esc(s.script_title)}</td>
     <td>${esc(s.platform||'—')}</td>
@@ -2817,6 +2822,11 @@ function _scriptRow(s, showDelete) {
     <td><span class="badge badge-new">${esc(s.script_version||'v1')}</span></td>
     <td class="truncate" style="font-style:italic;color:#555">${esc(s.opening_hook||'—')}</td>
     <td>${s.estimated_duration_seconds ? s.estimated_duration_seconds + 's' : '—'}</td>
+    <td style="font-size:12px;white-space:nowrap">
+      ${approvedDate
+        ? `<span style="color:#059669;font-weight:600">✅ ${approvedDate}</span>`
+        : '<span style="color:#aaa">—</span>'}
+    </td>
     <td>
       <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateScriptStatus('${s.id}',this.value)">
         ${statusOpts.map(opt=>`<option${s.review_status===opt?' selected':''}>${opt}</option>`).join('')}
@@ -2825,6 +2835,7 @@ function _scriptRow(s, showDelete) {
     <td style="white-space:nowrap;display:flex;gap:4px">
       <button class="btn btn-secondary btn-sm" onclick="viewScript('${s.id}')">View</button>
       <button id="sheet-btn-${s.id}" class="btn btn-secondary btn-sm" onclick="writeScriptToSheet('${s.id}')" title="Write to Script Spreadsheet">📊</button>
+      ${isStaleApproved ? `<button class="btn btn-sm" style="background:#fef3c7;color:#92400e;border:1px solid #f59e0b;cursor:pointer" onclick="linkVideoToScript('${s.id}')" title="Approved ${approvedDate} — no video linked yet. Click to add URL.">🔗 Link video</button>` : ''}
       ${showDelete ? `<button class="btn btn-danger btn-sm" onclick="deleteScript('${s.id}')">🗑</button>` : ''}
     </td>
   </tr>`;
@@ -2849,15 +2860,20 @@ async function loadScripts() {
     if (reviewCount) reviewCount.textContent = reviewData.length;
   }
 
-  // All Scripts section — excludes "Needs review", applies status filter
+  // All Scripts section — excludes "Needs review"; by default hides Used in production + Archived
   let q = sb.from('script_outputs').select('*').neq('review_status','Needs review').order('created_at',{ascending:false}).limit(100);
-  if (platform)     q = q.eq('platform', platform);
-  if (statusFilter) q = q.eq('review_status', statusFilter);
+  if (platform) q = q.eq('platform', platform);
+  if (statusFilter) {
+    q = q.eq('review_status', statusFilter);
+  } else {
+    // Default: only show active scripts — hide ones already linked to a video or archived
+    q = q.neq('review_status','Used in production').neq('review_status','Archived');
+  }
   const { data } = await q;
   const tbody = document.getElementById('scripts-table');
   const allCount = document.getElementById('scripts-all-count');
   if (!data?.length) {
-    tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">📝</div><p>No scripts yet. Approve a brief and generate a script.</p></div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="icon">📝</div><p>No active scripts. Use the status filter to see Used in production or Archived.</p></div></td></tr>';
     if (allCount) allCount.textContent = '';
   } else {
     tbody.innerHTML = data.map(s => _scriptRow(s, true)).join('');
@@ -2871,6 +2887,33 @@ async function deleteScript(id) {
   if (error) { toast('❌ ' + error.message, true); return; }
   document.getElementById(`script-row-${id}`)?.remove();
   toast('🗑 Script deleted');
+}
+
+async function linkVideoToScript(scriptId) {
+  const url = prompt('Paste the published video URL (Instagram, TikTok, etc.):');
+  if (!url?.trim()) return;
+  const cleanUrl = url.trim().replace(/\/$/, '');
+
+  // Try with and without trailing slash
+  const { data: vids } = await sb.from('published_videos')
+    .select('id')
+    .or(`video_url.eq.${cleanUrl},video_url.eq.${cleanUrl}/`)
+    .limit(1);
+
+  if (!vids?.length) {
+    toast('❌ Video not found — log it as Published first, then try again.', true);
+    return;
+  }
+  const videoId = vids[0].id;
+  const [r1, r2] = await Promise.all([
+    sb.from('published_videos').update({ script_output_id: scriptId }).eq('id', videoId),
+    sb.from('script_outputs').update({ review_status: 'Used in production' }).eq('id', scriptId),
+  ]);
+  if (r1.error || r2.error) {
+    toast('❌ Link failed: ' + (r1.error?.message || r2.error?.message), true); return;
+  }
+  toast('✅ Script linked and marked Used in production');
+  loadScripts();
 }
 
 async function writeScriptToSheet(id, { silent = false, approved_at = null } = {}) {
