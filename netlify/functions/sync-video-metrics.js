@@ -158,7 +158,10 @@ exports.handler = async (event) => {
     // ── 4. Sync each row ──────────────────────────────────────────────────
     let synced = 0;
     let notMatched = 0;
+    let noScriptLinked = 0; // August+ videos where no script match was found
     const sheetUpdates = [];
+    // Videos published on or after this date are expected to have scripts
+    const SCRIPTS_START_DATE = new Date("2026-08-01");
 
     for (const r of toSync) {
       const normalUrl = r.postUrl.replace(/\/$/, "");
@@ -188,13 +191,16 @@ exports.handler = async (event) => {
         if (insErr) console.error("INSERT FAILED:", insErr.message, JSON.stringify(insertRow));
 
         if (ins) {
-          // Auto-link script by keyword matching across title + hook
+          // Auto-link script by keyword matching across title, hook, caption, voiceover
           if (r.topic && ins.id) {
             const linkedId = await findMatchingScript(supabase, r.topic, r.publishedOn);
             if (linkedId) {
               await supabase.from("published_videos")
                 .update({ script_output_id: linkedId })
                 .eq("id", ins.id);
+            } else if (r.publishedOn && new Date(r.publishedOn) >= SCRIPTS_START_DATE) {
+              console.warn(`No script found for Aug+ video: "${r.topic}" (${r.publishedOn})`);
+              noScriptLinked++;
             }
           }
           sheetUpdates.push({ rowIndex: r.rowIndex, label: "✅ synced (new)" });
@@ -245,7 +251,7 @@ exports.handler = async (event) => {
         }
       }
 
-      // ── Auto-link script by keyword matching across title + hook ────────
+      // ── Auto-link script by keyword matching across title, hook, caption, voiceover ────
       if (!video.script_output_id && r.topic) {
         const linkedId = await findMatchingScript(supabase, r.topic, r.publishedOn);
         if (linkedId) {
@@ -253,6 +259,9 @@ exports.handler = async (event) => {
             .update({ script_output_id: linkedId })
             .eq("id", video.id);
           video.script_output_id = linkedId;
+        } else if (r.publishedOn && new Date(r.publishedOn) >= SCRIPTS_START_DATE) {
+          console.warn(`No script found for Aug+ video: "${r.topic}" (${r.publishedOn})`);
+          noScriptLinked++;
         }
       }
 
@@ -291,6 +300,7 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         synced,
         not_matched: notMatched,
+        no_script_linked: noScriptLinked || undefined,
         skipped: rows.length - toSync.length,
         total_rows: rows.length,
       }),
