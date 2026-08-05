@@ -1477,7 +1477,9 @@ PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing
 3. Visual opening: the shot list MUST specify what is on screen in the first 2 seconds, and it must show the plant/symptom/comparison immediately.
 4. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
 5. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".
-6. No CTA: do NOT end with a call to action. The script ends when the content ends — no "save this", "follow for more", "comment below".`;
+6. No CTA: do NOT end with a call to action. The script ends when the content ends — no "save this", "follow for more", "comment below".
+7. No em dashes anywhere in the script — not in the hook, not in the body. Use a comma or a new sentence instead.
+8. No AI filler phrases: "here's the thing", "at the end of the day", "the good news is", "let's dive in", "the key takeaway".`;
 
 function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, recentHooks = []) {
   const rulesText = rules.map(r =>
@@ -1539,10 +1541,13 @@ Hook rules (non-negotiable):
 - No em dashes in the hook or anywhere in the script.
 
 Script structure:
-- Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
-- Structure: hook → problem/payoff → 2-3 concrete tips or steps. End there — no CTA.
+- Write the way you'd explain something to a friend, not like a listicle or a how-to article. Sentences connect naturally into each other.
+- Use "you" and "your" throughout. Keep it direct and grounded.
+- No curt one-liners dropped back to back. Each sentence should flow into the next.
+- No em dashes anywhere. No AI-style transitions ("here's the thing", "at the end of the day", "the good news is").
+- Structure: hook → name the problem → explain what's going on → what to do about it. End there — no CTA.
 - The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
-- The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook's wording. The hook lands the problem; the next line should pivot to the solution or deepen the stakes with new information.
+- The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook. The hook lands the problem; the next line should pivot to the cause or solution with new information.
 
 Return ONLY valid JSON:
 {
@@ -1616,8 +1621,8 @@ Apply ONE of these proven TikTok hook patterns:
    Good: "Wait - before you water that, look at the soil first."
 Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In this video", must name a problem or make a bold claim, no em dashes.
 
-Script: casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
-Structure: hook → problem/payoff → 2-3 concrete tips or steps. End there — no CTA.
+Script: write the way you'd explain something to a friend. Sentences flow into each other naturally — no curt one-liners, no em dashes, no AI phrases. Use "you/your" throughout.
+Structure: hook → name the problem → explain what's going on → what to do about it. End there — no CTA.
 The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
 The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook. The hook lands the problem; the next line pivots to the solution or deepens the stakes with new information.
 
