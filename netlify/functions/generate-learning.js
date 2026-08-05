@@ -57,7 +57,7 @@ exports.handler = async (event) => {
         id, topic, platform, publish_datetime, views_count, views_day,
         likes_count, comments_count, saves_count, shares_count, follows_count,
         performance_tier, performance_summary,
-        script_outputs ( id, script_title, opening_hook )
+        script_outputs ( id, script_title, opening_hook, estimated_duration_seconds, full_voiceover_script )
       `)
       .eq("learning_status", "Ready")
       .not("performance_tier", "is", null);
@@ -265,8 +265,12 @@ async function buildMemory(video, batchStats, topicPlatformMap) {
   const script   = Array.isArray(video.script_outputs)
     ? video.script_outputs[0]
     : video.script_outputs;
-  const hook        = script?.opening_hook || null;
-  const scriptTitle = script?.id ? (script.script_title || "Linked script") : null;
+  const hook           = script?.opening_hook || null;
+  const scriptTitle    = script?.id ? (script.script_title || "Linked script") : null;
+  const scriptDuration = script?.estimated_duration_seconds || null;
+  const scriptWordCount = script?.full_voiceover_script
+    ? script.full_voiceover_script.trim().split(/\s+/).length
+    : null;
   const cleanTopic  = rawTopic ? cleanTopicText(rawTopic) : null;
   const rank        = rankVideo(video, batchStats);
 
@@ -299,7 +303,7 @@ async function buildMemory(video, batchStats, topicPlatformMap) {
   const crossPlatform = getCrossPlatformData(video, topicPlatformMap);
 
   const recommendation = await generateRecommendation({
-    cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle, rank, batchStats, crossPlatform,
+    cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle, scriptDuration, scriptWordCount, rank, batchStats, crossPlatform,
   });
 
   const confidence = computeConfidence(video);
@@ -413,7 +417,7 @@ Write 3-4 sentences identifying the clearest patterns in THIS batch. Compare pla
 }
 
 // ── Call Claude for individual video analysis ─────────────────────────────────
-async function generateRecommendation({ cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle, rank, batchStats, crossPlatform }) {
+async function generateRecommendation({ cleanTopic, hook, views, day, video, whatWorked, improve, scriptTitle, scriptDuration, scriptWordCount, rank, batchStats, crossPlatform }) {
   if (!CLAUDE_API_KEY) return "CLAUDE_API_KEY not set.";
 
   const saves    = video.saves_count    || 0;
@@ -462,26 +466,39 @@ async function generateRecommendation({ cleanTopic, hook, views, day, video, wha
     ? "- View count is moderate — treat save rate as directional, not conclusive. Mention if engagement happened, but don't overstate ratio differences."
     : "- Ratios are reliable at this view count. Save rate and follows are the strongest signals.";
 
-  const prompt = `You are analyzing one video from a batch of ${batchStats?.count || "?"} published short-form videos for Succulent Box, a plant subscription brand. Compare this video's numbers against the batch — that is the only benchmark you have.
+  const durationLine = scriptDuration ? `- Script length: ${scriptDuration}s (${scriptWordCount || "?"} words)` : "";
 
-THIS VIDEO:
+  const prompt = `You are writing a one-line directive rule for an AI script writer at Succulent Box, a plant subscription brand. The rule will be injected directly into the AI's writing prompt.
+
+The topic is almost never the problem — the hook wording, script length, and approach usually are. Your job is to tell the AI writer HOW to write differently, not what topic to avoid.
+
+THIS VIDEO'S DATA:
 - Topic: ${cleanTopic || "unknown"}
 - Platform: ${video.platform || "unknown"}
 ${metricsLines}
-${hook ? `- Hook: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : ""}
+${durationLine}
+${hook ? `- Hook used: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : ""}
 ${scriptTitle ? `- Script: "${scriptTitle}"` : ""}
 ${whatWorked ? `- What worked (team note): ${whatWorked}` : ""}
 ${improve ? `- Improve (team note): ${improve}` : ""}
 ${crossPlatform ? `- Same content on other platforms: ${crossPlatform}` : ""}
 
-RULES:
-- Only use the data above. No platform speculation, no external benchmarks.
-- If team notes exist, lead with those — they're direct observation.
-- Compare this video to the batch, not to an imagined ideal.
+RULES FOR YOUR RESPONSE:
+- Write ONE directive sentence. Start with "Avoid", "Prefer", "Use", "Keep", "Do not", or "When writing about [topic]".
+- Focus on HOW to write: hook style, script length, format, structure — not whether to write about the topic at all.
+- If script length data exists and the video underperformed, consider whether the script was too long or too short.
+- If hook data exists and the video underperformed, address the hook approach specifically.
+- Back the directive with the key number (e.g. "−48% views, zero saves").
+- If team notes exist, use those as the primary signal.
 ${tierRule}
-- If cross-platform data is provided, note which platform got more traction for this content and what that suggests.
-- Saves signal lasting value; follows signal new audience; comments signal resonance. Reference whichever ones are notable.
-- 2-3 sentences max. No headers, no bullet points. Be specific.`;
+- No hedging ("consider", "might", "could"). No analysis paragraphs. One directive sentence only.
+
+Examples of the format to follow:
+✅ "Keep cactus watering videos under 10s — a single quick tip — the 35s version got −16% views and zero engagement."
+✅ "When writing about String of Pearls, open with the visible symptom, not a question — hook 'Your String of Pearls looks like…' got only 544 views (−48% vs avg)."
+✅ "Prefer problem/fix structure for orchid care on TikTok — that format got saves and follows vs. zero on the lifestyle approach."
+✅ "Do not use a soft question hook for underwatering topics — lead with the symptom directly, it's more urgent and specific."`;
+
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {

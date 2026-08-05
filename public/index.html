@@ -609,9 +609,23 @@ tbody tr:hover { background: #fafffe; }
           </select>
         </div>
         <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary btn-sm" onclick="toggleAiPreview()">🔍 What the AI sees</button>
           <button class="btn btn-secondary btn-sm" id="generate-learning-btn" onclick="generateLearning()">⚡ Generate from Videos</button>
           <button class="btn btn-primary btn-sm" onclick="openLearningModal()">+ Add Memory</button>
         </div>
+      </div>
+
+      <!-- AI preview panel -->
+      <div id="ai-preview-panel" style="display:none;background:#f8faff;border:1px solid #c7d7f5;border-radius:8px;padding:16px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong style="font-size:13px">📋 Exact text injected into every script the AI writes</strong>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="ai-preview-topic" type="text" placeholder="Filter by topic (optional)" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:12px;width:200px" oninput="refreshAiPreview()">
+            <button class="btn btn-secondary btn-sm" onclick="refreshAiPreview()">Refresh</button>
+          </div>
+        </div>
+        <pre id="ai-preview-text" style="font-size:12px;white-space:pre-wrap;font-family:monospace;background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:12px;margin:0;color:#1e293b;max-height:300px;overflow-y:auto">Loading…</pre>
+        <p style="font-size:11px;color:#64748b;margin:8px 0 0">Only <strong>Approved rule</strong> memories are injected into AI script and brief generation. Active memories are drafts — promote them to "Approved rule" to activate.</p>
       </div>
 
       <!-- Individual video lessons -->
@@ -2488,6 +2502,42 @@ async function syncVideoMetrics() {
 }
 
 // ── LEARNING ──────────────────────────────────────────────────────────
+function toggleAiPreview() {
+  const panel = document.getElementById('ai-preview-panel');
+  if (!panel) return;
+  const isHidden = panel.style.display === 'none';
+  panel.style.display = isHidden ? 'block' : 'none';
+  if (isHidden) refreshAiPreview();
+}
+
+async function refreshAiPreview() {
+  const pre = document.getElementById('ai-preview-text');
+  if (!pre) return;
+  const topicHint = (document.getElementById('ai-preview-topic')?.value || '').trim().toLowerCase();
+
+  const { data: rows } = await sb.from('learning_memory')
+    .select('applies_to, topic, what_happened, recommendation_next_time')
+    .eq('status', 'Approved rule')
+    .order('date_added', { ascending: false })
+    .limit(15);
+
+  if (!rows?.length) { pre.textContent = '(no approved rules yet — set a memory status to "Approved rule" to feed it to the AI)'; return; }
+
+  let sorted = [...rows];
+  if (topicHint) {
+    sorted.sort((a, b) => {
+      const aM = (a.topic || '').toLowerCase().includes(topicHint) || topicHint.includes((a.topic || '').toLowerCase()) ? -1 : 0;
+      const bM = (b.topic || '').toLowerCase().includes(topicHint) || topicHint.includes((b.topic || '').toLowerCase()) ? -1 : 0;
+      return aM - bM;
+    });
+  }
+
+  const lines = sorted.slice(0, 10).map(m =>
+    `[${m.applies_to || 'general'}${m.topic ? ' · ' + m.topic : ''}] ${m.what_happened} → ${m.recommendation_next_time}`
+  );
+  pre.textContent = lines.join('\n');
+}
+
 async function generateLearning() {
   const btn = document.getElementById('generate-learning-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
@@ -2530,8 +2580,13 @@ async function loadLearning() {
   if (!individual.length) {
     tbody.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="icon">🧠</div><p>No learning memories yet</p></div></td></tr>';
   } else {
-    tbody.innerHTML = individual.map(m => `
-      <tr>
+    tbody.innerHTML = individual.map(m => {
+      const isApproved = m.status === 'Approved rule';
+      const isAdmin = ['admin','owner'].includes(userRole);
+      const approveBtn = isAdmin && !isApproved
+        ? `<button class="btn btn-sm" style="background:#dcfce7;color:#15803d;border:1px solid #86efac;white-space:nowrap" onclick="approveLearningRule('${m.id}')">✅ Approve for AI</button>`
+        : isApproved ? '<span style="font-size:11px;color:#059669;font-weight:600">🤖 Live in AI</span>' : '';
+      return `<tr>
         <td><span class="badge badge-new">${esc(m.applies_to||'—')}</span></td>
         <td class="truncate" title="${esc(m.topic||'')}">${esc(m.topic||'—')}</td>
         <td class="truncate" title="${esc(m.what_happened||'')}">${esc(m.what_happened||'—')}</td>
@@ -2539,12 +2594,16 @@ async function loadLearning() {
         <td style="font-size:12px;color:#4f46e5">${m.source ? `📝 ${esc(m.source)}` : '<span style="color:#94a3b8">—</span>'}</td>
         <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
         <td>
-          <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)">
+          <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)"${isAdmin ? '' : ' disabled'}>
             ${['Active','Approved rule','Archived'].map(opt=>`<option${m.status===opt?' selected':''}>${opt}</option>`).join('')}
           </select>
         </td>
-        <td><button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button></td>
-      </tr>`).join('');
+        <td style="white-space:nowrap;display:flex;gap:4px;align-items:center">
+          ${approveBtn}
+          <button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button>
+        </td>
+      </tr>`;
+    }).join('');
   }
 
   // ── Batch summaries section ──────────────────────────────────────────
@@ -2673,6 +2732,20 @@ async function updateBriefStatus(id, status) {
 async function updateLearningStatus(id, status) {
   await sb.from('learning_memory').update({ status }).eq('id', id);
   toast('Memory updated');
+  if (status === 'Approved rule') {
+    const panel = document.getElementById('ai-preview-panel');
+    if (panel && panel.style.display !== 'none') refreshAiPreview();
+  }
+}
+
+async function approveLearningRule(id) {
+  if (!['admin','owner'].includes(userRole)) { toast('Admin only', true); return; }
+  const { error } = await sb.from('learning_memory').update({ status: 'Approved rule' }).eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); return; }
+  toast('✅ Approved — this rule is now live in AI script generation');
+  loadLearning();
+  const panel = document.getElementById('ai-preview-panel');
+  if (panel && panel.style.display !== 'none') refreshAiPreview();
 }
 
 async function deleteLearning(id) {
@@ -2894,24 +2967,45 @@ async function linkVideoToScript(scriptId) {
   if (!url?.trim()) return;
   const cleanUrl = url.trim().replace(/\/$/, '');
 
-  // Try with and without trailing slash
+  // Fetch script info so we can pre-fill topic on the published_videos row
+  const { data: script } = await sb.from('script_outputs')
+    .select('script_title, caption, brief_id')
+    .eq('id', scriptId).single();
+
+  // Try to find an existing published_videos row
   const { data: vids } = await sb.from('published_videos')
     .select('id')
     .or(`video_url.eq.${cleanUrl},video_url.eq.${cleanUrl}/`)
     .limit(1);
 
-  if (!vids?.length) {
-    toast('❌ Video not found — log it as Published first, then try again.', true);
-    return;
+  let videoId;
+  if (vids?.length) {
+    videoId = vids[0].id;
+    // Update the existing row to link this script
+    const { error } = await sb.from('published_videos')
+      .update({ script_output_id: scriptId })
+      .eq('id', videoId);
+    if (error) { toast('❌ Link failed: ' + error.message, true); return; }
+  } else {
+    // Create a new published_videos row from the script data
+    const { data: newVid, error } = await sb.from('published_videos')
+      .insert({
+        video_url: cleanUrl,
+        topic: script?.script_title || null,
+        script_output_id: scriptId,
+        publish_datetime: new Date().toISOString(),
+        snapshot_7d_status: 'Pending',
+      })
+      .select('id').single();
+    if (error) { toast('❌ Could not create video record: ' + error.message, true); return; }
+    videoId = newVid.id;
   }
-  const videoId = vids[0].id;
-  const [r1, r2] = await Promise.all([
-    sb.from('published_videos').update({ script_output_id: scriptId }).eq('id', videoId),
-    sb.from('script_outputs').update({ review_status: 'Used in production' }).eq('id', scriptId),
-  ]);
-  if (r1.error || r2.error) {
-    toast('❌ Link failed: ' + (r1.error?.message || r2.error?.message), true); return;
-  }
+
+  // Mark script as Used in production
+  const { error: sErr } = await sb.from('script_outputs')
+    .update({ review_status: 'Used in production' }).eq('id', scriptId);
+  if (sErr) { toast('❌ ' + sErr.message, true); return; }
+
   toast('✅ Script linked and marked Used in production');
   loadScripts();
 }

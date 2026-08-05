@@ -318,14 +318,33 @@ exports.handler = async (event) => {
       const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       const { data: recentScripts } = await supabase
         .from("script_outputs")
-        .select("opening_hook")
+        .select("opening_hook, script_title, created_at")
         .gte("created_at", thirtyDaysAgo.toISOString())
-        .not("opening_hook", "is", null)
         .order("created_at", { ascending: false })
-        .limit(30);
-      const recentHooks = (recentScripts || []).map(s => s.opening_hook).filter(Boolean);
+        .limit(50);
+      const recentHooks = (recentScripts || []).filter(s => s.opening_hook).map(s => s.opening_hook);
 
-      prompt = buildScriptGenPrompt(data, rules || [], target, lessons, learningMemory, recentHooks);
+      // Topic repetition: find scripts on a similar subject in the last 60 days
+      // Uses a synonym map so "root rot", "mushy roots", "brown base" all count as the same cluster.
+      const sixtyDaysAgo = new Date(); sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+      const currentTopic = (data.title || data.featured_product || "").toLowerCase();
+      const topicSearchTerms = expandTopicTerms(currentTopic);
+      let recentSameTopicScripts = [];
+      if (topicSearchTerms.length) {
+        const orClauses = topicSearchTerms.map(k => `script_title.ilike.%${k}%`).join(",");
+        const { data: topicMatches } = await supabase
+          .from("script_outputs")
+          .select("script_title, created_at, opening_hook")
+          .or(orClauses)
+          .gte("created_at", sixtyDaysAgo.toISOString())
+          .order("created_at", { ascending: false })
+          .limit(10);
+        recentSameTopicScripts = (topicMatches || []).filter(s =>
+          s.script_title?.toLowerCase() !== (data.title || "").toLowerCase()
+        );
+      }
+
+      prompt = buildScriptGenPrompt(data, rules || [], target, lessons, learningMemory, recentHooks, recentSameTopicScripts);
       const gen = await callClaude(prompt, 2048);
 
       // Ensure the voiceover starts with the hook (safety net if AI forgot)
@@ -1288,6 +1307,140 @@ Review this brief and return ONLY valid JSON:
 }`;
 }
 
+// ── Plant category detection ───────────────────────────────────────────────────
+// Used to scope synonym clusters so "root rot" in succulents doesn't match
+// "root rot" scripts written for tropical houseplants or air plants.
+// Air plants are checked FIRST — tillandsia is technically a bromeliad and
+// shares some names with houseplants, but its care is completely different.
+const AIR_PLANT_SIGNALS = [
+  "air plant", "tillandsia", "tillandsia ionantha", "tillandsia xerographica",
+  "tillandsia stricta", "tillandsia caput", "soaking air plant", "misting air plant",
+  "no soil plant", "soilless plant",
+];
+const SUCCULENT_SIGNALS = [
+  "succulent", "cactus", "cacti", "echeveria", "haworthia", "aloe", "sedum",
+  "aeonium", "agave", "sempervivum", "gasteria", "lithops", "kalanchoe",
+  "crassula", "jade", "euphorbia", "graptopetalum", "pachyphytum", "dudleya",
+  "portulacaria", "string of pearl", "string of heart", "burro tail", "donkey tail",
+  "ghost plant", "hen and chick", "prickly pear", "barrel cactus",
+];
+const HOUSEPLANT_SIGNALS = [
+  "pothos", "monstera", "philodendron", "snake plant", "sansevieria", "zz plant",
+  "zamioculcas", "peace lily", "spathiphyllum", "fern", "orchid", "calathea",
+  "prayer plant", "maranta", "fiddle leaf", "ficus lyrata", "rubber plant",
+  "ficus elastica", "dracaena", "spider plant", "chlorophytum", "tradescantia",
+  "hoya", "anthurium", "alocasia", "dieffenbachia", "begonia",
+  "syngonium", "arrowhead", "chinese evergreen", "aglaonema", "bird of paradise",
+  "strelitzia", "bromeliad", "peperomia",
+];
+
+function detectPlantCategory(topic) {
+  const lower = (topic || "").toLowerCase();
+  // Air plant checked first — overlaps with bromeliad/houseplant signals
+  if (AIR_PLANT_SIGNALS.some(s => lower.includes(s))) return "airplant";
+  const isSuc   = SUCCULENT_SIGNALS.some(s => lower.includes(s));
+  const isHouse = HOUSEPLANT_SIGNALS.some(s => lower.includes(s));
+  if (isSuc && !isHouse) return "succulent";
+  if (isHouse && !isSuc) return "houseplant";
+  if (isSuc && isHouse)  return "general";
+  return "general";
+}
+
+// ── Topic synonym clusters ─────────────────────────────────────────────────────
+// category: "succulent" | "houseplant" | "general" (matches both)
+// Root cause and symptoms differ between categories, so they are separate clusters
+// with different synonyms even when the problem name is similar.
+const TOPIC_CLUSTERS = [
+  // ── SUCCULENT-SPECIFIC ──
+  { category: "succulent", name: "root rot (succulent)",
+    terms: ["root rot", "mushy base", "squishy base", "soft base", "brown root", "soggy root", "rotting root", "mushy stem", "black stem base"] },
+  { category: "succulent", name: "stretching / etiolation",
+    terms: ["stretch", "etiolat", "leggy", "leaning", "reaching for light", "grow tall", "tall and skinny", "not enough light", "low light fix"] },
+  { category: "succulent", name: "watering (succulent)",
+    terms: ["overwater", "underwater", "watering succulent", "how often to water succulent", "water schedule", "soak and dry", "bottom water", "deep water"] },
+  { category: "succulent", name: "leaf shriveling",
+    terms: ["shriveled", "shrivelling", "wrinkled leaf", "wrinkl", "flat leaf", "deflated", "thirsty"] },
+  { category: "succulent", name: "sunburn (succulent)",
+    terms: ["sunburn", "sun damage", "bleach", "bleaching", "too much direct sun", "crispy tip", "white patch"] },
+  { category: "succulent", name: "propagation (succulent)",
+    terms: ["propagat", "leaf prop", "leaf cutting", "offset", "pup", "baby plant", "chick", "hen and chick"] },
+  { category: "succulent", name: "soil (succulent)",
+    terms: ["gritty mix", "well-drain", "drainage", "perlite", "coarse sand", "cactus mix", "succulent soil", "soil mix"] },
+
+  // ── HOUSEPLANT-SPECIFIC ──
+  { category: "houseplant", name: "root rot (houseplant)",
+    terms: ["root rot", "mushy root", "brown root", "soggy soil", "overwatered", "standing water", "wet soil", "no drainage", "smelly soil"] },
+  { category: "houseplant", name: "watering (houseplant)",
+    terms: ["overwater", "underwater", "watering houseplant", "how often to water", "moisture meter", "finger test", "dry out", "let it dry"] },
+  { category: "houseplant", name: "leaf yellowing",
+    terms: ["yellow leaf", "yellowing", "yellow leaves", "leaf yellow", "chlorosis"] },
+  { category: "houseplant", name: "leaf drop",
+    terms: ["leaf drop", "dropping leaves", "falling leaves", "losing leaves"] },
+  { category: "houseplant", name: "humidity (houseplant)",
+    terms: ["humid", "mist", "misting", "dry air", "brown tip", "crispy edge", "humidity tray", "pebble tray"] },
+  { category: "houseplant", name: "light (houseplant)",
+    terms: ["low light", "indirect light", "bright indirect", "not enough light", "leggy", "leaning toward light", "grow light"] },
+  { category: "houseplant", name: "propagation (houseplant)",
+    terms: ["propagat", "stem cutting", "node cutting", "water propagat", "root in water", "division", "air layer"] },
+  { category: "houseplant", name: "semi-hydro / leca",
+    terms: ["semi-hydro", "leca", "hydropon", "water culture", "grow in water", "growing in water", "passive hydro"] },
+
+  // ── AIR PLANT-SPECIFIC ──
+  // Air plants absorb water through leaves (trichomes), never through roots.
+  // "Root rot" equivalent is base rot from trapped water. No soil = no soil problems.
+  { category: "airplant", name: "base rot (air plant)",
+    terms: ["base rot", "mushy base", "brown base", "soft base", "rotting base", "rot at base", "bottom rot", "dark base"] },
+  { category: "airplant", name: "watering (air plant)",
+    terms: ["soak", "soaking", "mist", "misting", "how to water air plant", "water air plant", "watering air plant", "dunk", "submerge", "dry upside down", "shake dry"] },
+  { category: "airplant", name: "drying / air circulation",
+    terms: ["dry", "drying", "air circulation", "airflow", "not drying", "too wet", "sit in water", "after watering", "dry upside down", "fan"] },
+  { category: "airplant", name: "crispy / dehydrated (air plant)",
+    terms: ["crispy", "crisp", "dry tip", "brown tip", "curling", "curled leaf", "dehydrat", "thirsty air plant", "dry air plant"] },
+  { category: "airplant", name: "sunburn (air plant)",
+    terms: ["sunburn", "sun damage", "bleach", "too much sun", "direct sun", "white patch", "faded color"] },
+  { category: "airplant", name: "mounting / display",
+    terms: ["mount", "mounting", "display", "hang", "terrarium", "driftwood", "wire", "glue", "no pot", "how to display"] },
+  { category: "airplant", name: "blooming / pups (air plant)",
+    terms: ["bloom", "blooming", "flower", "after bloom", "pup", "baby", "offset", "dying after bloom", "monocarpic"] },
+  { category: "airplant", name: "fertilizing (air plant)",
+    terms: ["fertiliz", "fertilis", "feed air plant", "bromeliad fertilizer", "tillandsia fertilizer", "diluted fertilizer"] },
+
+  // ── GENERAL (applies to all categories) ──
+  { category: "general", name: "pests",
+    terms: ["pest", "mealybug", "mealy", "spider mite", "fungus gnat", "scale insect", "aphid", "thrip", "insect", "bug infestation"] },
+  { category: "general", name: "repotting",
+    terms: ["repot", "re-pot", "new pot", "pot size", "root bound", "rootbound", "too small pot", "outgrown pot"] },
+  { category: "general", name: "fertilizing",
+    terms: ["fertiliz", "fertilis", "feed", "nutrient", "nitrogen", "phosphor", "liquid feed", "slow release fertiliz"] },
+  { category: "general", name: "dormancy",
+    terms: ["dormant", "dormancy", "winter care", "slow growth", "stop growing", "resting period"] },
+];
+
+// Given a topic string, return all search terms that should be used to find
+// "same subject" scripts — scoped by plant category so succulent root rot
+// doesn't match houseplant root rot scripts.
+function expandTopicTerms(topic) {
+  if (!topic) return [];
+  const lower = topic.toLowerCase();
+  const category = detectPlantCategory(lower);
+
+  const expanded = new Set();
+  for (const cluster of TOPIC_CLUSTERS) {
+    // Only use clusters that match this topic's category (or are general)
+    if (cluster.category !== "general" && cluster.category !== category) continue;
+    const clusterHit = cluster.terms.some(t => lower.includes(t));
+    if (clusterHit) {
+      cluster.terms.forEach(t => expanded.add(t));
+    }
+  }
+
+  // Fallback: 4+ char words from the topic itself for anything unclustered
+  const rawWords = lower.split(/\s+/).filter(w => w.length >= 4);
+  rawWords.forEach(w => expanded.add(w));
+
+  return [...expanded];
+}
+
 // Lessons learned from past brief-review gaps — injected into brief
 // generation/revision prompts so the same gaps stop recurring.
 // Fetch Active/Approved learning_memory rows, optionally filtered by topic hint.
@@ -1297,18 +1450,22 @@ async function fetchLearningMemory(supabase, topicHint) {
     let q = supabase
       .from("learning_memory")
       .select("applies_to, topic, what_happened, recommendation_next_time, confidence")
-      .in("status", ["Active", "Approved rule"])
+      .eq("status", "Approved rule")
       .order("date_added", { ascending: false })
       .limit(15);
     const { data } = await q;
     const rows = data || [];
     if (!rows.length) return null;
-    // If a topic hint is provided, prioritise matching rows (put them first)
+    // If a topic hint is provided, prioritise matching rows using synonym expansion
     if (topicHint) {
-      const hint = (topicHint || "").toLowerCase();
+      const expandedTerms = expandTopicTerms(topicHint);
+      const matchScore = (memTopic) => {
+        const t = (memTopic || "").toLowerCase();
+        return expandedTerms.some(term => t.includes(term)) ? -1 : 0;
+      };
       rows.sort((a, b) => {
-        const aMatch = (a.topic || "").toLowerCase().includes(hint) || hint.includes((a.topic || "").toLowerCase()) ? -1 : 0;
-        const bMatch = (b.topic || "").toLowerCase().includes(hint) || hint.includes((b.topic || "").toLowerCase()) ? -1 : 0;
+        const aMatch = matchScore(a.topic);
+        const bMatch = matchScore(b.topic);
         return aMatch - bMatch;
       });
     }
@@ -1482,7 +1639,7 @@ PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing
 7. No em dashes anywhere in the script — not in the hook, not in the body. Use a comma or a new sentence instead.
 8. No AI filler phrases: "here's the thing", "at the end of the day", "the good news is", "let's dive in", "the key takeaway".`;
 
-function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, recentHooks = []) {
+function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, recentHooks = [], recentSameTopicScripts = []) {
   const rulesText = rules.map(r =>
     `[${r.severity}] ${r.category} — ${r.rule_name}: ${r.rule_text}`
   ).join("\n");
@@ -1494,6 +1651,17 @@ function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, rec
 ${recentHooks.map(h => `- "${h}"`).join("\n")}
 
 Avoid repeating the same sentence structure even with different words. For example, if "Your cactus base is squishy" was used, do not start with "Your [plant] [body part] is [adjective]". Pick a structurally different opening.`
+    : "";
+
+  // Topic repetition block — warn if this subject was covered recently
+  const topicRepeatBlock = recentSameTopicScripts.length
+    ? `TOPIC REPETITION WARNING — this subject was already covered ${recentSameTopicScripts.length} time${recentSameTopicScripts.length > 1 ? "s" : ""} in the last 60 days:
+${recentSameTopicScripts.map(s => {
+  const daysAgo = Math.round((Date.now() - new Date(s.created_at).getTime()) / (1000 * 60 * 60 * 24));
+  return `- "${s.script_title}" (${daysAgo}d ago)${s.opening_hook ? ` — hook: "${s.opening_hook}"` : ""}`;
+}).join("\n")}
+
+You MUST take a clearly different angle: different symptom, different plant stage, different fix step, or different audience (beginner vs. experienced). Do not repeat the same hook structure or the same core advice.`
     : "";
 
   return `You are writing a short-form video script for Succulents Box, a succulent plant subscription company.
@@ -1509,7 +1677,7 @@ Video flow: ${b.video_flow || "not specified"}
 TARGET DURATION: ${targetSecs} seconds — the voiceover must be ${wordBudget} words or fewer. Count your words before returning. Cut sentences if needed — do not go over.
 Length guidance: under 10s for a single quick tip, 10-15s is ideal for most care advice, 20s for anything with a fix step, 60s is the absolute maximum. Default short — only stretch if the topic genuinely needs more steps to be useful.
 
-${hookAvoidanceBlock ? hookAvoidanceBlock + "\n" : ""}${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
+${topicRepeatBlock ? topicRepeatBlock + "\n\n" : ""}${hookAvoidanceBlock ? hookAvoidanceBlock + "\n" : ""}${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
 BRAND RULES (follow all Required rules, never do Forbidden ones):
 ${rulesText || "No rules loaded"}
 ${SCRIPT_PREFLIGHT_CHECKLIST}
