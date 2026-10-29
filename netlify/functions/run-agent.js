@@ -168,7 +168,7 @@ async function runAgent(caller, deadline, finish = {}) {
     tools:      TOOL_SCHEMAS,
     messages,
     ...extra,
-  }, { timeoutMs: deadline.remaining(), signal: deadline.signal });
+  }, { signal: deadline.signal });   // the run deadline is the ONLY timer for agent model calls
 
   const logAction = async (toolName, input, output, status, needsReview) => {
     const row = actionRow(runId, toolName, input, output, status, needsReview);
@@ -253,11 +253,11 @@ async function runAgent(caller, deadline, finish = {}) {
         const textBlock = (last.content || []).find(b => b.type === "text");
         finalSummary = textBlock?.text || null;
       } catch (err) {
-        if (isDeadlineError(err, deadline.signal)) hitTimeLimit = true;
+        if (isDeadlineError(err, deadline.signal) || deadline.expired()) hitTimeLimit = true;
       }
     }
   } catch (err) {
-    if (isDeadlineError(err, deadline.signal)) {
+    if (isDeadlineError(err, deadline.signal) || deadline.expired()) {
       hitTimeLimit = true;                 // deadline expiry is a timeout, not a provider failure
     } else {
       // stored in agent_run_log: keep it generic (no provider payloads)
