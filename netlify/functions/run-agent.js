@@ -133,73 +133,61 @@ async function runAgent(caller) {
 
   // ── Agentic loop ──────────────────────────────────────────────────────────
   try {
-    while (true) {
-      // Check hard caps before each Claude call
-      if (toolCallsCount >= MAX_TOOL_CALLS && !hitToolLimit) {
-        hitToolLimit = true;
-        messages.push({
-          role: "user",
-          content: `You have reached the ${MAX_TOOL_CALLS}-tool-call limit. Stop calling tools and provide your final summary now.`,
-        });
-      }
-      if (Date.now() - startedAt > MAX_RUNTIME_MS && !hitTimeLimit) {
-        hitTimeLimit = true;
-        messages.push({
-          role: "user",
-          content: "Run time limit reached. Stop calling tools and provide your final summary now.",
-        });
-      }
+    // Limits are enforced here in code, not left to the model:
+    //  - never more than MAX_TOOL_CALLS tool executions (checked before EACH dispatch,
+    //    also when one response asks for many tools);
+    //  - no new model call or tool after MAX_RUNTIME_MS; every model call gets only the
+    //    remaining time budget;
+    //  - once a limit is hit: at most ONE tool-free summary call (tool_choice none), only
+    //    if there is still time, otherwise a deterministic summary.
+    const remaining = () => MAX_RUNTIME_MS - (Date.now() - startedAt);
+    const callModel = (extra = {}) => claude.messages({
+      model:      CLAUDE_MODEL,
+      max_tokens: 1024,
+      system:     SYSTEM_PROMPT(),
+      tools:      TOOL_SCHEMAS,
+      messages,
+      ...extra,
+    }, { timeoutMs: Math.max(1000, remaining()) });
 
-      // ── Call Claude ───────────────────────────────────────────────────────
-      const claudeBody = await claude.messages({
-        model:      CLAUDE_MODEL,
-        max_tokens: 1024,
-        system:     SYSTEM_PROMPT(),
-        tools:      TOOL_SCHEMAS,
-        messages,
-      });
+    for (let turn = 0; turn <= MAX_TOOL_CALLS + 1; turn++) {
+      if (remaining() <= 0) { hitTimeLimit = true; break; }
+      if (toolCallsCount >= MAX_TOOL_CALLS) { hitToolLimit = true; break; }
 
-      // Add assistant turn to message history
+      const claudeBody = await callModel();
       messages.push({ role: "assistant", content: claudeBody.content });
 
-      // ── Stop condition: Claude finished ───────────────────────────────────
       if (claudeBody.stop_reason === "end_turn") {
         const textBlock = (claudeBody.content || []).find(b => b.type === "text");
         finalSummary = textBlock?.text || "Run complete.";
         break;
       }
-
-      // ── Stop condition: no more tool calls expected ────────────────────────
       if (claudeBody.stop_reason !== "tool_use") break;
 
-      // ── Process tool calls ────────────────────────────────────────────────
       const toolUseBlocks = (claudeBody.content || []).filter(b => b.type === "tool_use");
       const toolResults   = [];
 
       for (const toolUse of toolUseBlocks) {
-        toolCallsCount++;
-
         const toolName  = toolUse.name;
         const toolInput = toolUse.input || {};
 
-        // Enforce batch cap
-        if (toolName === "process_signal_batch") {
-          if (batchCallsCount >= MAX_BATCHES) {
-            const skippedOutput = {
-              error: `Batch limit (${MAX_BATCHES}) reached. This call was skipped. Note remaining signals in your summary.`,
-            };
-            await _logAction(runId, toolName, toolInput, skippedOutput, "skipped", false);
-            toolResults.push({
-              type:        "tool_result",
-              tool_use_id: toolUse.id,
-              content:     JSON.stringify(skippedOutput),
-            });
-            continue;
-          }
-          batchCallsCount++;
+        // Hard caps — checked before each dispatch
+        let skipReason = null;
+        if (toolCallsCount >= MAX_TOOL_CALLS) { hitToolLimit = true; skipReason = `Tool-call limit (${MAX_TOOL_CALLS}) reached.`; }
+        else if (remaining() <= 0) { hitTimeLimit = true; skipReason = "Run time limit reached."; }
+        else if (toolName === "process_signal_batch" && batchCallsCount >= MAX_BATCHES) {
+          skipReason = `Batch limit (${MAX_BATCHES}) reached. This call was skipped. Note remaining signals in your summary.`;
+        }
+        if (skipReason) {
+          const skippedOutput = { error: skipReason };
+          await _logAction(runId, toolName, toolInput, skippedOutput, "skipped", false);
+          toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: JSON.stringify(skippedOutput) });
+          continue;
         }
 
-        // ── Dispatch the tool ─────────────────────────────────────────────
+        toolCallsCount++;
+        if (toolName === "process_signal_batch") batchCallsCount++;
+
         let toolOutput, toolStatus;
         try {
           toolOutput = await dispatchTool(toolName, toolInput, context);
@@ -207,25 +195,31 @@ async function runAgent(caller) {
         } catch (err) {
           toolOutput = { error: err.message };
           toolStatus = "error";
-          console.error(`Tool "${toolName}" failed:`, err.message);
+          console.error(`Tool "${toolName}" failed`);
         }
 
         const needsReview = REQUIRES_REVIEW.has(toolName);
         await _logAction(runId, toolName, toolInput, toolOutput, toolStatus, needsReview);
-
-        toolResults.push({
-          type:        "tool_result",
-          tool_use_id: toolUse.id,
-          content:     JSON.stringify(toolOutput),
-        });
+        toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: JSON.stringify(toolOutput) });
       }
 
-      // Append tool results as a user turn
       messages.push({ role: "user", content: toolResults });
+      if (hitToolLimit || hitTimeLimit) break;
+    }
 
-      // Safety: if we've been going long, force stop on next iteration
-      if (toolCallsCount >= MAX_TOOL_CALLS || Date.now() - startedAt > MAX_RUNTIME_MS) {
-        // Limits already injected above — loop once more to let Claude summarize
+    if (!finalSummary && (hitToolLimit || hitTimeLimit)) {
+      const why = hitTimeLimit ? "the run time limit" : `the ${MAX_TOOL_CALLS}-tool-call limit`;
+      if (!hitTimeLimit && remaining() > 2000) {
+        // one bounded, tool-free summary call
+        messages.push({ role: "user", content: `You have reached ${why}. Do not call tools. Provide your final summary now.` });
+        try {
+          const last = await callModel({ tool_choice: { type: "none" } });
+          const textBlock = (last.content || []).find(b => b.type === "text");
+          finalSummary = textBlock?.text || null;
+        } catch (_) { /* fall through to the deterministic summary */ }
+      }
+      if (!finalSummary) {
+        finalSummary = `Stopped at ${why} after ${toolCallsCount} tool call(s) and ${batchCallsCount} batch call(s). Check the action log for details.`;
       }
     }
 
@@ -244,7 +238,7 @@ async function runAgent(caller) {
     status:            finalStatus,
     completed_at:      new Date().toISOString(),
     summary:           finalSummary ? { text: finalSummary } : null,
-    error:             agentError   || null,
+    error:             agentError || (hitToolLimit ? "stopped at tool-call limit" : hitTimeLimit ? "stopped at time limit" : null),
     tool_calls_count:  toolCallsCount,
     batch_calls_count: batchCallsCount,
   }).eq("id", runId);
@@ -259,6 +253,7 @@ async function runAgent(caller) {
       batches:     batchCallsCount,
       summary:     finalSummary,
       error:       agentError || undefined,
+      limit:       hitToolLimit ? "tool_calls" : hitTimeLimit ? "time" : undefined,
     }),
   };
 }

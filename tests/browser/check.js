@@ -119,6 +119,41 @@ async function shot(page, name) { if (shotsDir) await page.screenshot({ path: pa
     check("assistant session: no page errors", assistantErrors.length === 0, assistantErrors.slice(0, 3).join(" | "));
     await s.ctx.close();
 
+    // ── stored-XSS regressions (admin session, deployed CSP) ──────────────
+    {
+      const X = (n) => `</textarea></span><img src=x onerror="window.__xss=${n}"><svg onload="window.__xss=${n}">`;
+      const evilId = "59999999-0000-0000-0000-000000000000";
+      h.fake.state.tables.discovery_clusters.push({ id: evilId, title: `x');window.__xss=10;//&quot;);window.__xss=11;//` + X(12),
+        status: "Pattern detected", signal_count: 3, audience_wording: [X(1), "normal wording"], problems_mentioned: [X(2)],
+        tips_mentioned: [X(3)], platforms: [X(4)], summary: X(5), primary_question: X(6), plant_or_product: X(7),
+        novelty_status: X(8), reviewer_note: X(9), created_at: new Date().toISOString(), last_seen_at: new Date().toISOString() });
+      h.fake.state.tables.cluster_audit_log.push({ id: "59999998-0000-0000-0000-000000000000", cluster_id: evilId, field_changed: X(13), new_value: X(14), reason: X(15), trigger: X(16), created_at: new Date().toISOString() });
+      h.fake.state.tables.signals.push({ id: "59999997-0000-0000-0000-000000000000", topic: X(17), platform: X(18), creator_name: X(19), caption_summary: X(20), status: "New", priority: "High", is_manual_submission: false, created_at: new Date().toISOString(), source_url: "javascript:window.__xss=21" });
+      h.fake.state.tables.help_docs[0].content = "# Manual\n\n## " + X(22) + "\n" + X(23);
+      const x = await openAs(browser, base, "admin");
+      const xp = x.page;
+      await xp.evaluate(() => showView("discovery", null)); await xp.waitForTimeout(500);
+      await xp.evaluate((id) => openDiscoveryPanel(id), evilId); await xp.waitForTimeout(600);
+      const wordingValue = await xp.locator("#edit-wording").inputValue();
+      const delBtn = xp.locator("button:has-text('Delete + block')").first();
+      x.page.removeAllListeners("dialog");
+      xp.on("dialog", d => d.dismiss());                // open the confirm, then cancel
+      await delBtn.click(); await xp.waitForTimeout(200);
+      // merge picker lists the malicious title as a candidate for another cluster
+      await xp.evaluate(() => showView("discovery", null)); await xp.waitForTimeout(400);
+      await xp.evaluate(() => openDiscoveryPanel("50000003-0000-0000-0000-000000000000")); await xp.waitForTimeout(500);
+      await xp.evaluate(() => { openMergePicker("50000003-0000-0000-0000-000000000000"); filterMergeCandidates("50000003-0000-0000-0000-000000000000", "x"); });
+      const cand = xp.locator("#merge-candidates-50000003-0000-0000-0000-000000000000 > div").first();
+      if (await cand.count()) { await cand.click(); await xp.waitForTimeout(200); }
+      await xp.evaluate(() => showView("inbox", null)); await xp.waitForTimeout(500);
+      await xp.evaluate(() => openSignalDetail("59999997-0000-0000-0000-000000000000")); await xp.waitForTimeout(200);
+      await xp.evaluate(() => showView("help", null)); await xp.waitForTimeout(500);
+      const injected = await xp.evaluate(() => ({ flag: window.__xss, imgs: document.querySelectorAll('img[src="x"]').length, svgs: document.querySelectorAll('svg[onload]').length }));
+      check("XSS: malicious cluster/signal/help data stays text (no script, no injected elements)", injected.flag === undefined && injected.imgs === 0 && injected.svgs === 0, JSON.stringify(injected));
+      check("XSS: textarea shows the wording literally", wordingValue.includes("</textarea></span><img src=x"), wordingValue.slice(0, 60));
+      await x.ctx.close();
+    }
+
     // ── admin ─────────────────────────────────────────────────────────────
     s = await openAs(browser, base, "admin");
     const a = s.page;

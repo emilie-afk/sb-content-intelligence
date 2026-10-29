@@ -12,7 +12,8 @@ saved SQL snippets.
 | Who gets data | any signed-in account (auto-created `viewer`) | approved members only; new sign-ins are *pending* |
 | Database | `USING (true)` update/delete for every signed-in user | per-role policies; anon has no privileges; deletes owner/admin |
 | Functions | several open or fail-open | every endpoint authorizes first; scoped service secrets; durable limits/locks |
-| Sheets / Apps Script | URLs in public code; secret optional | private config; secret required; POST only; exactly-once export |
+| Sheets / Apps Script | URLs in public code; secret optional | private config; secret required; POST only; retry-safe export (reservation ledger) |
+| Runtime | Node 18 | Node 22 (required by the locked Supabase client) |
 | Prompts | in public source | private, versioned rows in `ci_prompt_versions` |
 
 ## B. Rollout sequence (≈45 min window)
@@ -36,6 +37,9 @@ Confirm with the owner which accounts are staff and which role each keeps. Do no
 ownership from display names or GitHub usernames.
 
 ### 3. Prepare configuration (no effect on the live app yet)
+- Runtime: the branch sets `NODE_VERSION = "22"` (build). Also add the Netlify env var
+  `AWS_LAMBDA_JS_RUNTIME = nodejs22.x` (Functions scope) so functions run on Node 22, not only
+  the build. On older runtimes the functions refuse with 503 instead of crashing.
 - Netlify env (Functions scope): add `INTERNAL_FUNCTION_SECRET` and `METRICS_INGEST_SECRET`
   (32+ random chars each, all distinct); make sure `CALENDAR_SCRIPT_SECRET` is set (32+ chars).
   Leave `INTERNAL_SECRET` as is (GitHub uses it). Leave `ALLOWED_ORIGIN` unset.
@@ -98,6 +102,8 @@ Deploy → Manage deployments → ✏️ → Version: **New version** → Deploy
 (Until this step, repetition history returns nothing; export keeps working.)
 
 ### 9. Verify
+- Runtime: Netlify → Logs → Functions → any function: the runtime shows Node.js 22 and no
+  "Server runtime is misconfigured" message.
 - Owner signs in → dashboard. A team member signs in → their role. An unapproved Google
   account → "Waiting for approval".
 - Anonymous checks (should be refused):

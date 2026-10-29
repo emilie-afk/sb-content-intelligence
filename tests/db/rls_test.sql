@@ -320,4 +320,51 @@ do $$ begin
 end $$;
 select ci_private.set_maintenance(false);
 
+
+-- ── R3: approval provenance can't be cleared or forged by an assistant ───────
+insert into script_outputs (id, script_title, review_status, full_voiceover_script)
+values ('20000000-0000-0000-0000-000000000011', 'R3 a', 'Draft', 'original'),
+       ('20000000-0000-0000-0000-000000000012', 'R3 b', 'Draft', 'original'),
+       ('20000000-0000-0000-0000-000000000013', 'R3 c', 'Draft', 'original');
+-- legacy approved/used rows from before the migration: no timestamp at all
+insert into script_outputs (id, script_title, review_status, full_voiceover_script, ever_approved, content_locked)
+values ('20000000-0000-0000-0000-000000000014', 'R3 legacy', 'Used in production', 'original', true, true);
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a2","role":"authenticated"}', false);
+select t.expect_ok($q$update script_outputs set review_status = 'Approved' where id in ('20000000-0000-0000-0000-000000000011','20000000-0000-0000-0000-000000000012','20000000-0000-0000-0000-000000000013')$q$, 'admin approves R3 scripts');
+reset role; select set_config('request.jwt.claims', '', false);
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a3","role":"authenticated"}', false);
+-- a) Approved -> Archived while clearing metadata, then rewrite
+select t.expect_ok($q$update script_outputs set review_status = 'Archived', approved_at = null, approved_by = null, ever_approved = false, content_locked = false where id = '20000000-0000-0000-0000-000000000011'$q$, 'archive + try to clear metadata');
+select t.expect_denied($q$update script_outputs set full_voiceover_script = 'assistant rewrite' where id = '20000000-0000-0000-0000-000000000011'$q$, 'R3a rewrite after clearing');
+-- b) archive first, clear metadata afterwards, then rewrite
+select t.expect_ok($q$update script_outputs set review_status = 'Archived' where id = '20000000-0000-0000-0000-000000000012'$q$, 'archive');
+select t.expect_ok($q$update script_outputs set approved_at = null, approved_by = null, ever_approved = false, content_locked = false where id = '20000000-0000-0000-0000-000000000012'$q$, 'try to clear metadata later');
+select t.expect_denied($q$update script_outputs set script_title = 'rewritten' where id = '20000000-0000-0000-0000-000000000012'$q$, 'R3b rewrite after clearing later');
+-- c) Approved -> Used -> Archived, then rewrite
+select t.expect_ok($q$update script_outputs set review_status = 'Used in production' where id = '20000000-0000-0000-0000-000000000013'$q$, 'mark used');
+select t.expect_ok($q$update script_outputs set review_status = 'Archived' where id = '20000000-0000-0000-0000-000000000013'$q$, 'archive used');
+select t.expect_denied($q$update script_outputs set caption = 'rewritten' where id = '20000000-0000-0000-0000-000000000013'$q$, 'R3c rewrite after used+archived');
+-- d) legacy record without timestamp
+select t.expect_ok($q$update script_outputs set review_status = 'Archived' where id = '20000000-0000-0000-0000-000000000014'$q$, 'archive legacy');
+select t.expect_denied($q$update script_outputs set full_voiceover_script = 'rewritten' where id = '20000000-0000-0000-0000-000000000014'$q$, 'R3d legacy rewrite');
+-- forging approval metadata on a draft
+select t.expect_ok($q$insert into script_outputs (id, script_title, review_status, approved_at, approved_by, ever_approved) values ('20000000-0000-0000-0000-000000000015', 'forged', 'Draft', now(), '00000000-0000-0000-0000-0000000000a1', true)$q$, 'assistant inserts draft with forged metadata');
+-- assistant workflow on its own drafts still works
+select t.expect_ok($q$update script_outputs set full_voiceover_script = 'draft edit', review_status = 'Needs review' where id = '20000000-0000-0000-0000-000000000015'$q$, 'assistant edits own draft');
+reset role; select set_config('request.jwt.claims', '', false);
+do $$ declare r record; begin
+  select approved_at, approved_by, ever_approved into r from script_outputs where id = '20000000-0000-0000-0000-000000000015';
+  if r.approved_at is not null or r.approved_by is not null or r.ever_approved then raise exception 'FAIL [R3 forged metadata kept]'; end if;
+  select approved_at, approved_by, ever_approved, content_locked into r from script_outputs where id = '20000000-0000-0000-0000-000000000011';
+  if r.approved_at is null or r.approved_by is null or not r.ever_approved or not r.content_locked then raise exception 'FAIL [R3 metadata cleared]'; end if;
+  if exists (select 1 from script_outputs where full_voiceover_script in ('assistant rewrite','rewritten')) then raise exception 'FAIL [R3 text changed]'; end if;
+end $$;
+-- admins keep full control
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a2","role":"authenticated"}', false);
+select t.expect_ok($q$update script_outputs set full_voiceover_script = 'admin edit' where id = '20000000-0000-0000-0000-000000000011'$q$, 'admin edits archived approved script');
+reset role; select set_config('request.jwt.claims', '', false);
+
 \echo 'RLS TESTS PASSED'
