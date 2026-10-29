@@ -22,7 +22,13 @@ function sleep(ms, signal) {
  * aborts: the write is NOT applied and { error } is returned, as supabase-js does when its
  * fetch is aborted. Cancelled operations are recorded in state.aborted.
  */
-function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = null, maintenance = false, delays = {} } = {}) {
+// constraints (optional, per table): { unique: [col, …] } extra unique keys enforced on
+// insert/upsert like PostgreSQL (statement fails with 23505, nothing written; the upsert's
+// onConflict column stays the arbiter), { missing: [col, …] } columns that don't exist yet
+// (42703 when written, selected or filtered). hooks.beforeWrite(table, rows) runs before an
+// insert/upsert is applied, hooks.afterWrite(table, rows, state) right after it (lets tests
+// interleave a concurrent writer).
+function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = null, maintenance = false, delays = {}, constraints = {}, hooks = {} } = {}) {
   const state = {
     sessions, profiles, maintenance, delays,
     tables: JSON.parse(JSON.stringify(tables)),
@@ -119,16 +125,16 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
 
   function builder(table, signal) {
     state.tables[table] = state.tables[table] || [];
-    const q = { table, op: "select", filters: [], payload: null, opts: {}, single: false, maybe: false, limit: null, returning: false, head: false, count: null };
+    const q = { table, op: "select", filters: [], payload: null, opts: {}, single: false, maybe: false, limit: null, returning: false, head: false, count: null, cols: [], filterCols: [] };
     const api = {
-      select(cols, o = {}) { if (q.op === "select") q.op = "select"; else q.returning = true; if (o.head) q.head = true; if (o.count) q.count = o.count; return api; },
+      select(cols, o = {}) { if (typeof cols === "string") q.cols.push(...cols.split(",").map(c => c.trim())); if (q.op === "select") q.op = "select"; else q.returning = true; if (o.head) q.head = true; if (o.count) q.count = o.count; return api; },
       insert(p) { q.op = "insert"; q.payload = p; return api; },
       upsert(p, o = {}) { q.op = "upsert"; q.payload = p; q.opts = o; return api; },
       update(p) { q.op = "update"; q.payload = p; return api; },
       delete(o = {}) { q.op = "delete"; q.count = o.count || null; return api; },
-      eq(c, v) { q.filters.push(r => r[c] === v); return api; },
+      eq(c, v) { q.filterCols.push(c); q.filters.push(r => r[c] === v); return api; },
       neq(c, v) { q.filters.push(r => r[c] !== v); return api; },
-      in(c, vs) { q.filters.push(r => vs.includes(r[c])); return api; },
+      in(c, vs) { q.filterCols.push(c); q.filters.push(r => vs.includes(r[c])); return api; },
       is(c, v) { q.filters.push(r => (r[c] ?? null) === v); return api; },
       not(c, op, v) { if (op === "is") q.filters.push(r => (r[c] ?? null) !== v); return api; },
       gte(c, v) { q.filters.push(r => r[c] == null || r[c] >= v); return api; },
@@ -147,6 +153,10 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
     function match() { return state.tables[table].filter(r => q.filters.every(f => f(r))); }
     function run() {
       state.calls.push({ kind: "from", table, op: q.op });
+      const cons = constraints[table] || {};
+      const payloadCols = q.payload ? (Array.isArray(q.payload) ? q.payload : [q.payload]).flatMap(r => Object.keys(r)) : [];
+      const missing = (cons.missing || []).find(c => q.cols.includes(c) || q.filterCols.includes(c) || payloadCols.includes(c));
+      if (missing) return { data: null, error: { code: "42703", message: `column ${table}.${missing} does not exist` } };
       const rows = state.tables[table];
       if (q.op === "select") {
         let out = match();
@@ -159,7 +169,21 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
         return { data: out.map(r => ({ ...r })), error: null, count: out.length };
       }
       if (q.op === "insert" || q.op === "upsert") {
+        if (hooks.beforeWrite) hooks.beforeWrite(table, q.payload, state);
         const list = (Array.isArray(q.payload) ? q.payload : [q.payload]).map(r => ({ id: r.id || crypto.randomUUID(), created_at: new Date().toISOString(), ...r }));
+        // Extra unique keys: any violation fails the whole statement (nothing written).
+        for (const col of cons.unique || []) {
+          if (col === q.opts.onConflict) continue;
+          const seen = new Set(rows.map(x => x[col]).filter(v => v != null));
+          for (const r of list) {
+            const arbiter = q.opts.onConflict && rows.some(x => x[q.opts.onConflict] != null && x[q.opts.onConflict] === r[q.opts.onConflict]);
+            if (arbiter && q.opts.ignoreDuplicates) continue; // DO NOTHING happens first for this row
+            if (r[col] != null && seen.has(r[col])) {
+              return { data: null, error: { code: "23505", message: `duplicate key value violates unique constraint "${table}_${col}_key"`, details: `Key (${col})=(${r[col]}) already exists.` } };
+            }
+            if (r[col] != null) seen.add(r[col]);
+          }
+        }
         const added = [];
         for (const r of list) {
           const conflictCol = q.opts.onConflict;
@@ -171,6 +195,7 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
           rows.push(r); added.push(r);
         }
         const data = q.single ? { ...added[0] } : added.map(r => ({ ...r }));
+        if (hooks.afterWrite) hooks.afterWrite(table, q.payload, state);
         return { data, error: null };
       }
       if (q.op === "update") {
