@@ -204,7 +204,7 @@ declare
 begin
   if not ci_private.is_api_user() then return new; end if;
   if tg_op = 'INSERT' then
-    if new.review_status = 'Approved' and not is_admin then
+    if new.review_status in ('Approved','Used in production','Measured') and not is_admin then
       raise exception 'Only an owner or admin can approve scripts' using errcode = '42501';
     end if;
     if new.review_status = 'Approved' then
@@ -226,7 +226,10 @@ begin
     -- keep approval metadata trustworthy
     new.approved_by := old.approved_by; new.approved_at := old.approved_at;
   end if;
-  if old.review_status = 'Approved' and not is_admin then
+  -- Text is locked once a script has been approved (also after it moves on to
+  -- Used in production / Measured / Archived), so approval can't be bypassed in two steps.
+  if not is_admin and (old.approved_at is not null
+                       or old.review_status in ('Approved','Used in production','Measured')) then
     foreach c in array content_cols loop
       if (to_jsonb(new) -> c) is distinct from (to_jsonb(old) -> c) then
         raise exception 'Approved scripts can only be edited by an owner or admin' using errcode = '42501';
@@ -366,6 +369,10 @@ end $$;
 -- "waiting for approval"); nobody writes through the API.
 grant select on public.users_profile to authenticated;
 create policy ci_select_own on public.users_profile for select to authenticated using (id = auth.uid());
+-- Approved members can see their approved teammates (names in the activity log);
+-- pending/revoked accounts are never listed to anyone through the API.
+create policy ci_select_team on public.users_profile for select to authenticated
+  using ((select ci_private.is_member()) and access_status = 'approved');
 drop trigger if exists ci_guard_profile on public.users_profile;
 create trigger ci_guard_profile before insert or update or delete on public.users_profile
   for each row execute function ci_private.guard_profile();
@@ -501,6 +508,7 @@ create or replace function public.ci_consume_submission_token(p_hash text, p_act
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare t record;
 begin
+  if ci_private.maintenance_on() then return jsonb_build_object('ok', false, 'reason', 'maintenance'); end if;
   update public.submission_tokens s
      set requests_this_hour = case when s.hour_window_start is null or s.hour_window_start < now() - interval '1 hour'
                                    then 1 else coalesce(s.requests_this_hour, 0) + 1 end,

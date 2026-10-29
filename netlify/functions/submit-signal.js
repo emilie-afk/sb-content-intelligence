@@ -66,7 +66,8 @@ exports.handler = async (event) => {
 
     // ── 3. Map to signals table columns (same mapping as before) ────────
     const rows = signals.map((s) => {
-      const isManual = (s.is_manual ?? s.is_manual_submission ?? false) === true;
+      const flag = s.is_manual ?? s.is_manual_submission ?? false;
+      const isManual = flag === true || flag === 1 || String(flag).toLowerCase() === "true";
       const likes = num(s.likes), comments = num(s.comments);
       const row = {
         date_found:            date(s.date_discovered) || date(s.date_found) || new Date().toISOString().slice(0, 10),
