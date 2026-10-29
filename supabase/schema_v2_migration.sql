@@ -94,24 +94,19 @@ DROP POLICY IF EXISTS "auth_read_scripts"      ON script_outputs;
 DROP POLICY IF EXISTS "auth_insert_scripts"    ON script_outputs;
 DROP POLICY IF EXISTS "reviewer_update_scripts" ON script_outputs;
 
-CREATE POLICY "auth_read_scripts" ON script_outputs
-  FOR SELECT USING (auth.uid() IS NOT NULL);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "auth_insert_scripts" ON script_outputs
-  FOR INSERT WITH CHECK (get_user_role() IN ('admin', 'owner', 'assistant'));
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "reviewer_update_scripts" ON script_outputs
-  FOR UPDATE USING (get_user_role() IN ('admin', 'owner'));
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Brand rules: all authenticated users can read; admin/owner can write
 DROP POLICY IF EXISTS "auth_read_brand_rules"    ON brand_content_rules;
 DROP POLICY IF EXISTS "admin_manage_brand_rules" ON brand_content_rules;
 
-CREATE POLICY "auth_read_brand_rules" ON brand_content_rules
-  FOR SELECT USING (auth.uid() IS NOT NULL);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "admin_manage_brand_rules" ON brand_content_rules
-  FOR ALL USING (get_user_role() IN ('admin', 'owner'));
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 
 -- ── 6. BRAND CONTENT RULES ───────────────────────────────────

@@ -61,11 +61,9 @@ ALTER TABLE competitor_activity
 -- RLS
 ALTER TABLE competitor_activity ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Auth users can read competitor_activity"
-  ON competitor_activity FOR SELECT TO authenticated USING (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "Service role can write competitor_activity"
-  ON competitor_activity FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_competitor_activity_signal   ON competitor_activity(signal_id);
@@ -136,11 +134,9 @@ CREATE TABLE IF NOT EXISTS market_watch_plants (
 -- RLS
 ALTER TABLE market_watch_plants ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Auth users can read market_watch_plants"
-  ON market_watch_plants FOR SELECT TO authenticated USING (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "Service role can write market_watch_plants"
-  ON market_watch_plants FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_market_watch_signal_count ON market_watch_plants(signal_count DESC);
@@ -174,11 +170,9 @@ CREATE TABLE IF NOT EXISTS market_watch_signal_links (
 
 ALTER TABLE market_watch_signal_links ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Auth users can read market_watch_signal_links"
-  ON market_watch_signal_links FOR SELECT TO authenticated USING (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "Service role can write market_watch_signal_links"
-  ON market_watch_signal_links FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 CREATE INDEX IF NOT EXISTS idx_mw_links_plant  ON market_watch_signal_links(plant_id);
 CREATE INDEX IF NOT EXISTS idx_mw_links_signal ON market_watch_signal_links(signal_id);

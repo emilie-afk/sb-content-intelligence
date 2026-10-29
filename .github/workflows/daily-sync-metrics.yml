@@ -1,5 +1,12 @@
 name: Daily Video Metrics Sync
 
+# Public repository: workflow logs are public. Print only status codes and counts.
+concurrency:
+  group: daily-sync-metrics
+  cancel-in-progress: false
+
+permissions: {}
+
 on:
   schedule:
     - cron: '0 2 * * *'   # 9:00 AM Vietnam (UTC+7) — after sheets are updated
@@ -22,7 +29,6 @@ jobs:
           BODY=$(echo "$RESPONSE" | head -n -1)
 
           echo "HTTP $HTTP_CODE"
-          echo "$BODY"
 
           if [ "$HTTP_CODE" != "200" ]; then
             echo "❌ Sync failed with HTTP $HTTP_CODE"

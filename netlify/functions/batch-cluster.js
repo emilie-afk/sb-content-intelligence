@@ -5,16 +5,14 @@
  * Returns { total, processed, errors, remaining } so the caller can loop.
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole, CORS_HEADERS: headers } = require("./_auth");
+const crypto = require("crypto");
+const { preflightOrMethod, errorResponse, baseHeaders, parseBody } = require("../lib/http");
+const { requireUserOrService, ROLES, internalHeaders, siteUrl } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const prompts = require("../lib/prompts");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-const NETLIFY_URL =
-  process.env.URL || "https://sb-content-intelligence.netlify.app";
+const supabase = lazyService;
+const headers = baseHeaders();
 const BATCH_SIZE = 6; // signals dispatched per call
 // Analyses are dispatched to cluster-signal-background (15-min budget, returns
 // 202 instantly), because a full clustering pass — especially for manual
@@ -22,19 +20,18 @@ const BATCH_SIZE = 6; // signals dispatched per call
 // just dispatches and returns; ai-analyze writes results to the DB directly.
 
 exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers, body: "" };
-  }
-
-  // Allow scheduled task (no user JWT) via shared internal secret
-  const internalSecret = event.headers["x-internal-secret"] || event.headers["X-Internal-Secret"];
-  const isInternalCall = internalSecret && internalSecret === process.env.INTERNAL_SECRET;
-  if (!isInternalCall) {
-    const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
-    if (authError) return authError;
-  }
-
   try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    // GitHub Actions schedule (scheduler), the agent's tool call (internal), or an
+    // owner/admin pressing "Cluster all". Each dispatch costs model calls.
+    const caller = await requireUserOrService(event, { roles: ROLES.ADMINS, scopes: ["scheduler", "internal"], bucket: "dispatch" });
+    const body = parseBody(event, { maxBytes: 4096 });
+    // Pin the prompt version for every background analysis started by this batch
+    // (an agent run passes the version it started with).
+    const pinned = caller.kind === "service" && Number.isInteger(body.prompt_version) ? body.prompt_version : undefined;
+    const promptSet = await prompts.loadPromptSet(supabase, { versionId: pinned });
+
     // ── Step 1: Fix signals already linked but still stuck as New ──────────
     const { data: linkedRows } = await supabase
       .from("signal_cluster_links")
@@ -58,18 +55,17 @@ exports.handler = async (event) => {
       .eq("status", "Clustering")
       .lt("updated_at", staleCutoff);
 
-    // ── Step 2: Fetch up to BATCH_SIZE truly-unclustered New signals ────────
-    const { data: allNew, error: fetchError } = await supabase
-      .from("signals")
-      .select(
-        "id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission"
-      )
-      .eq("status", "New")
-      .order("created_at", { ascending: true })
-      .limit(BATCH_SIZE);
+    // ── Step 2: Atomically claim up to BATCH_SIZE New signals ───────────────
+    // FOR UPDATE SKIP LOCKED + a claim id: overlapping runs (schedule, agent,
+    // button) can never dispatch the same signal twice.
+    // Check dispatch configuration BEFORE claiming, so a missing setting can't strand signals.
+    const analyzeUrl = `${siteUrl()}/.netlify/functions/cluster-signal-background`;
+    const callHeaders = internalHeaders();
+    const claim = crypto.randomUUID();
+    const { data: allNew, error: fetchError } = await supabase.rpc("ci_claim_signals_for_clustering", { p_limit: BATCH_SIZE, p_claim: claim });
 
     if (fetchError) {
-      console.error("Step 2 fetch error:", fetchError.message, fetchError.details);
+      console.error("Step 2 claim error:", fetchError.code || "db error");
     }
 
     if (!allNew || allNew.length === 0) {
@@ -79,37 +75,18 @@ exports.handler = async (event) => {
         .select("*", { count: "exact", head: true })
         .eq("status", "New");
 
-      console.log(`Step 2: no signals fetched (fetchError=${fetchError?.message ?? "none"}, remaining=${remaining})`);
-
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
           success: true,
-          message: fetchError ? `Fetch error: ${fetchError.message}` : "No new signals to cluster",
-          fetchError: fetchError?.message ?? null,
+          message: fetchError ? "Could not claim signals (database error)" : "No new signals to cluster",
           processed: 0,
           remaining: remaining ?? 0,
         }),
       };
     }
 
-    // ── Step 3: Dispatch each signal to the background cluster function ─────
-    // Mark them "Clustering" first so they leave the New queue immediately and
-    // the next batch-cluster call doesn't re-dispatch the same signals.
-    const dispatchIds = allNew.map((s) => s.id);
-    const { error: markError } = await supabase
-      .from("signals")
-      .update({ status: "Clustering" })
-      .in("id", dispatchIds);
-    if (markError) {
-      // Most likely the signals_status_check constraint is missing 'Clustering'
-      // — run supabase/migration_add_clustering_status.sql. Without the interim
-      // status, the same signals get re-dispatched on every call.
-      console.error("Failed to mark signals as Clustering:", markError.message);
-    }
-
-    const analyzeUrl = `${NETLIFY_URL}/.netlify/functions/cluster-signal-background`;
     let done = 0;   // dispatched (202 accepted)
     const failedIds = [];
 
@@ -117,11 +94,8 @@ exports.handler = async (event) => {
       allNew.map((sig) =>
         fetch(analyzeUrl, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-internal-secret": process.env.INTERNAL_SECRET || "",
-          },
-          body: JSON.stringify({ type: "cluster", data: sig }),
+          headers: callHeaders,
+          body: JSON.stringify({ type: "cluster", data: { id: sig.id }, claim, prompt_version: promptSet.id }),
           signal: AbortSignal.timeout(8000), // 202 arrives near-instantly
         })
           .then((r) => {
@@ -143,7 +117,8 @@ exports.handler = async (event) => {
         .from("signals")
         .update({ status: "New" })
         .in("id", failedIds)
-        .eq("status", "Clustering");
+        .eq("status", "Clustering")
+        .eq("clustering_claim", claim);
     }
 
     // ── Step 4: Count how many New signals remain ──────────────────────────
@@ -164,11 +139,6 @@ exports.handler = async (event) => {
       }),
     };
   } catch (err) {
-    console.error("batch-cluster error:", err);
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: err.message }),
-    };
+    return errorResponse(err, "batch-cluster");
   }
 };

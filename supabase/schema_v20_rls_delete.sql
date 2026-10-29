@@ -1,6 +1,5 @@
--- Allow authenticated users to delete signals
--- (owner/admin only — no anon access)
-CREATE POLICY "authenticated_delete_signals"
-ON signals FOR DELETE
-TO authenticated
-USING (true);
+-- RETIRED 2026-10-28.
+-- This file used to grant every signed-in account update/delete on all dashboard tables
+-- (USING (true)). It must never be run again. Access rules are defined only in
+-- supabase/migrations/20261028_ci_access_control.sql (approved members, per-role).
+select 1;
