@@ -1,39 +1,29 @@
 /**
- * Netlify Scheduled Function: scheduled-agent
+ * Netlify Function: scheduled-agent
  *
- * Runs daily (configured in netlify.toml) to trigger the Signal Flow Agent.
- * Calls run-agent with internal secret — no user JWT needed.
+ * Optional server-side trigger for the Signal Flow Agent (the daily schedule runs
+ * in GitHub Actions). Not registered as a Netlify schedule, so it is reachable over
+ * HTTP — it therefore requires the scheduler credential, and forwards with the
+ * internal credential. No model call happens here.
  */
+const { json, preflightOrMethod, errorResponse } = require("../lib/http");
+const { requireService, internalHeaders, siteUrl } = require("../lib/auth");
 
-const NETLIFY_URL =
-  process.env.URL || "https://sb-content-intelligence.netlify.app";
-const INTERNAL_SECRET = process.env.INTERNAL_SECRET;
-
-exports.handler = async () => {
+exports.handler = async (event) => {
   try {
-    const resp = await fetch(`${NETLIFY_URL}/.netlify/functions/run-agent`, {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    await requireService(event, ["scheduler"]);
+    const resp = await fetch(`${siteUrl()}/.netlify/functions/run-agent`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-internal-secret": INTERNAL_SECRET,
-      },
+      headers: internalHeaders(),
       body: JSON.stringify({ run_type: "scheduled" }),
+      signal: AbortSignal.timeout(25000),
     });
-
-    const data = await resp.json();
-
-    if (!resp.ok) {
-      console.error("run-agent failed:", JSON.stringify(data));
-      return { statusCode: resp.status, body: JSON.stringify(data) };
-    }
-
-    console.log("scheduled-agent done:", JSON.stringify(data));
-    return { statusCode: 200, body: JSON.stringify(data) };
+    const data = await resp.json().catch(() => ({}));
+    console.log("scheduled-agent:", resp.status, data.status || "");
+    return json(resp.ok ? 200 : resp.status, { run_id: data.run_id || null, status: data.status || null, error: data.error || undefined });
   } catch (err) {
-    console.error("scheduled-agent error:", err.message);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: err.message }),
-    };
+    return errorResponse(err, "scheduled-agent");
   }
 };

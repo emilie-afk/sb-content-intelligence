@@ -21,36 +21,39 @@
  * Body: { offset: 0, limit: 15, dry_run: false }
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
+const prompts = require("../lib/prompts");
+const { PublicError, preflightOrMethod, errorResponse, baseHeaders, parseBody } = require("../lib/http");
+const { requireUser, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
+const claude = require("../lib/claude");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+const supabase = lazyService;
+const headers = baseHeaders();
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const PROMPT_VERSION = "cleanup-v1";
 
 exports.handler = async (event) => {
+  let lockHolder = null;
+  try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    const caller = await requireUser(event, { roles: ROLES.WRITERS, bucket: "ai_batch" });
+    const body = parseBody(event, { maxBytes: 4096 });
+    const set = await prompts.loadPromptSet(supabase);
+    lockHolder = await locks.acquire("ai_cleanup_batch", 5 * 60, "A cleanup pass is already running.");
+    return await prompts.runWithPrompts(set, () => cleanup(body, caller.userId));
+  } catch (err) {
+    return errorResponse(err, "ai-cleanup-batch");
+  } finally {
+    if (lockHolder) await locks.release("ai_cleanup_batch", lockHolder);
+  }
+};
 
-  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
-  if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
-
-  const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
-  if (authError) return authError;
-  const performedBy = await getUserId(event, supabase);
-
-  if (!CLAUDE_API_KEY) return { statusCode: 500, headers, body: JSON.stringify({ error: "CLAUDE_API_KEY not set" }) };
-
-  let body = {};
-  try { if (event.body) body = JSON.parse(event.body); }
-  catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
-
-  const offset  = body.offset  ?? 0;
-  const limit   = Math.min(body.limit ?? 10, 12); // 10 clusters keeps Claude response under ~1800 tokens and well within timeout
-  const dryRun  = body.dry_run ?? false;
+async function cleanup(body, performedBy) {
+  const offset  = Math.max(0, Math.min(Number(body.offset) || 0, 100000));
+  const limit   = Math.max(1, Math.min(Number(body.limit ?? 10) || 10, 12)); // 10 clusters keeps Claude response under ~1800 tokens and well within timeout
+  const dryRun  = body.dry_run === true;
 
   try {
     // ── 1. FETCH BATCH OF CLUSTERS ─────────────────────────────────────────────
@@ -132,54 +135,7 @@ exports.handler = async (event) => {
       ].filter(Boolean).join("\n");
     }).join("\n\n");
 
-    const prompt = `You are cleaning up a social listening Discovery board for Succulents Box, a succulent plant subscription company.
-
-Review each cluster and assign a cleanup action using this decision tree:
-
-DECISION TREE:
-1. Is the topic completely unrelated to plants, plant care, plant shopping, or plant gifting?
-   → delete_and_block (topic class will keep returning: spam, food, fashion, pets without plants, travel, broken extraction)
-   → dismiss (weak/vague/one-off with no plant context — could still be logged)
-
-2. Is the topic plant-related but NOT useful for content planning?
-   - Catalog plant BUT only a showcase/photo/positive caption with no question, problem, claim, or confusion → reroute_mention
-   - Non-catalog plant with visible collector demand or market interest → reroute_market_watch
-   - Mainly about a competitor promotion, giveaway, or sale → reroute_competitor
-   - Care claim that could be wrong or risky → needs_research
-   - Same audience issue as another cluster with slightly different wording → merge (include which cluster it's similar to in reason)
-
-3. Is the topic useful audience demand that belongs in Discovery? → keep
-
-CONTENT RELEVANCE TEST (keep if any of these are true):
-- Audience question about care, identification, selection, or gifting
-- Audience problem or confusion about a catalog plant
-- Repeated tip or claim across independent sources
-- Product selection confusion
-- Clear follow-up demand under owned content
-- Contradiction worth explaining to audience
-
-AUTO-APPLY rules (no reviewer needed):
-- delete_and_block: only for clearly irrelevant topics (no plant connection at all, or spam)
-- dismiss: weak plant content, vague, one-off, no content value
-- reroute_mention: catalog plant that is only a showcase or aesthetic post
-
-REVIEWER QUEUE (flag but don't auto-apply):
-- reroute_market_watch, reroute_competitor, needs_research, merge
-
-CLUSTERS TO CLASSIFY:
-${clusterLines}
-
-Return ONLY a JSON array, one object per cluster, in the same order. Keep reasons under 8 words.
-[
-  {
-    "id": "<uuid>",
-    "action": "keep|dismiss|reroute_mention|reroute_market_watch|reroute_competitor|needs_research|delete_and_block|merge",
-    "confidence": "High|Medium|Low",
-    "reason": "under 8 words"
-  }
-]
-
-No extra text. Just the JSON array.`;
+    const prompt = prompts.t("ai-cleanup-batch.handler.prompt.1", [clusterLines]);
 
     // ── 4. CALL CLAUDE ─────────────────────────────────────────────────────────
     const decisions = await callClaude(prompt, 2000);
@@ -369,34 +325,23 @@ No extra text. Just the JSON array.`;
 
   } catch (err) {
     console.error("ai-cleanup-batch error:", err);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    throw err;
   }
-};
+}
 
 
 // ── CALL CLAUDE (JSON response) ───────────────────────────────────────────────
 async function callClaude(prompt, maxTokens = 1200) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method:  "POST",
-    headers: {
-      "x-api-key":         CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type":      "application/json",
-    },
-    body: JSON.stringify({
-      model:      CLAUDE_MODEL,
-      max_tokens: maxTokens,
-      messages:   [{ role: "user", content: prompt }],
-    }),
+  const data = await claude.messages({
+    model:      CLAUDE_MODEL,
+    max_tokens: maxTokens,
+    messages:   [{ role: "user", content: prompt }],
   });
-
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
 
   const text = (data.content?.[0]?.text || "").trim();
   // Strip markdown code fences if present
   const jsonStr = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/, "").trim();
   const arr = JSON.parse(jsonStr);
-  if (!Array.isArray(arr)) throw new Error("Expected JSON array from Claude");
+  if (!Array.isArray(arr)) throw new PublicError(502, "Could not read the AI response. Try again.");
   return arr;
 }

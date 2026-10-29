@@ -15,9 +15,12 @@
  * POST (no body required)
  */
 
-const { createClient } = require("@supabase/supabase-js");
 const { google }       = require("googleapis");
-const { CORS_HEADERS } = require("./_auth");
+const { PublicError, preflightOrMethod, errorResponse, baseHeaders } = require("../lib/http");
+const { requireUserOrService, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
+const CORS_HEADERS = baseHeaders();
 
 const SHEET_NAME = "SB Videos";
 
@@ -50,38 +53,33 @@ const V = {
   SUBMITTED:    18, // R
 };
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = lazyService;
 
 exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+  let lockHolder = null;
+  try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    // GitHub Actions daily schedule (scheduler credential) or an owner/admin.
+    await requireUserOrService(event, { roles: ROLES.ADMINS, scopes: ["scheduler"], bucket: "sheet" });
+    lockHolder = await locks.acquire("sync_video_metrics", 5 * 60, "A metrics sync is already running.");
+    return await syncMetrics();
+  } catch (err) {
+    return errorResponse(err, "sync-video-metrics");
+  } finally {
+    if (lockHolder) await locks.release("sync_video_metrics", lockHolder);
   }
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method Not Allowed" };
-  }
+};
 
-  // Allow internal secret (GitHub Actions) or authenticated users
-  const internalSecret = event.headers["x-internal-secret"];
-  if (internalSecret !== process.env.INTERNAL_SECRET) {
-    const { requireUserRole } = require("./_auth");
-    const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
-    if (authError) return authError;
-  }
-
+async function syncMetrics() {
   const sheetId        = process.env.GOOGLE_VIDEO_TRACKER_ID;
-  const serviceAccount = process.env.GOOGLE_SERVICE_ACCOUNT_JSON
-    ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)
-    : null;
+  let serviceAccount = null;
+  try {
+    serviceAccount = process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON) : null;
+  } catch { throw new PublicError(503, "Video tracker credentials are misconfigured"); }
 
   if (!sheetId || !serviceAccount) {
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "GOOGLE_VIDEO_TRACKER_ID or GOOGLE_SERVICE_ACCOUNT_JSON not configured" }),
-    };
+    throw new PublicError(503, "The video tracker sheet is not configured on the server");
   }
 
   try {
@@ -188,7 +186,7 @@ exports.handler = async (event) => {
           .select("id")
           .single();
 
-        if (insErr) console.error("INSERT FAILED:", insErr.message, JSON.stringify(insertRow));
+        if (insErr) console.error("sync-video-metrics: insert failed:", insErr.code || "db error");
 
         if (ins) {
           // Auto-link script by keyword matching across title, hook, caption, voiceover
@@ -307,14 +305,9 @@ exports.handler = async (event) => {
     };
 
   } catch (err) {
-    console.error("sync-video-metrics error:", err);
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: err.message }),
-    };
+    throw err;
   }
-};
+}
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 function toInt(s) { const n = parseInt((s || "").replace(/,/g, ""), 10); return isNaN(n) ? null : n; }

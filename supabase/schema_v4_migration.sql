@@ -35,11 +35,9 @@ CREATE OR REPLACE TRIGGER plant_watchlist_updated_at
 ALTER TABLE plant_watchlist ENABLE ROW LEVEL SECURITY;
 
 -- All authenticated users can read; admin/owner can write
-CREATE POLICY "auth_read_watchlist" ON plant_watchlist
-  FOR SELECT USING (auth.uid() IS NOT NULL);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "admin_manage_watchlist" ON plant_watchlist
-  FOR ALL USING (get_user_role() IN ('admin', 'owner'));
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 
 -- ── 2. ADD REVENUE PRIORITY FIELDS TO SIGNALS ─────────────────

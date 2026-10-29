@@ -8,42 +8,120 @@
  * Body: { type: "signal"|"brief"|"script", data: { ...fields } }
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
+const prompts = require("../lib/prompts");
+const crypto = require("crypto");
+const { PublicError, parseBody, preflightOrMethod, errorResponse, header, baseHeaders } = require("../lib/http");
+const { requireUser, requireService, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
+const { fetchScriptHistory } = require("../lib/sources");
+const claude = require("../lib/claude");
+const { isUuid, uuid, clampDeep, oneOf } = require("../lib/validate");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = lazyService;
+const headers = baseHeaders();
 
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const PROMPT_VERSION = "extract-v2";
 
+const TYPES = ["signal", "brief", "generate_brief", "revise_brief", "opportunity", "script",
+               "generate_script", "revise_script", "delete_scraper_cleanup", "cluster"];
+
+// Load the stored row for an id the browser sent, so analysis/generation always
+// works on the database version of the record (client fields can't spoof it).
+async function loadRow(table, id) {
+  if (!isUuid(id)) return null;
+  const { data: row, error } = await supabase.from(table).select("*").eq("id", id).maybeSingle();
+  if (error) throw new PublicError(503, "Could not load the record");
+  if (!row) throw new PublicError(404, "Record not found");
+  return row;
+}
+
 exports.handler = async (event) => {
+  try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
 
-  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
-  if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
+    const body = parseBody(event, { maxBytes: 256 * 1024, allowEmpty: false });
+    const type = oneOf(body.type, "type", TYPES);
+    if (!body.data || typeof body.data !== "object" || Array.isArray(body.data)) {
+      throw new PublicError(400, "type and data are required");
+    }
 
-  // Internal calls from batch-cluster / submit-signal pass a shared secret instead of a user token
-  const internalSecret = event.headers["x-internal-secret"] || event.headers["X-Internal-Secret"];
-  if (!internalSecret || internalSecret !== process.env.INTERNAL_SECRET) {
-    const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
-    if (authError) return authError;
+    // Internal calls (batch-cluster → cluster-signal-background) carry the internal
+    // service credential and may only run clustering. Everyone else needs an approved
+    // session; deleting is owner/admin only.
+    let caller;
+    if (header(event, "x-internal-secret") !== undefined) {
+      caller = await requireService(event, ["internal"]);
+      if (type !== "cluster") throw new PublicError(403, "Not allowed for service calls");
+    } else {
+      const adminOnly = type === "delete_scraper_cleanup";
+      caller = await requireUser(event, { roles: adminOnly ? ROLES.ADMINS : ROLES.WRITERS, bucket: adminOnly ? "admin" : "ai" });
+    }
+    const performedBy = caller.kind === "user" ? caller.userId : null;
+
+    // Prompt set first: background jobs use the version their batch started with.
+    // (Loaded before any claim or lock so missing configuration changes nothing.)
+    const set = await prompts.loadPromptSet(supabase, { versionId: caller.kind === "service" && body.prompt_version != null ? Number(body.prompt_version) : undefined });
+
+    let data = clampDeep(body.data);
+    let lockKey = null, lockHolder = null, clusterClaim = null, previousStatus = null;
+
+    // Server truth for referenced records
+    if (type === "signal" && data.id) data = { ...data, ...(await loadRow("signals", data.id)) };
+    if (type === "brief" && data.id) data = { ...data, ...(await loadRow("briefs", data.id)) };
+    if (type === "opportunity" && data.id) data = { ...data, ...(await loadRow("opportunities", data.id)) };
+    if (type === "script" && data.id) data = { ...data, ...(await loadRow("script_outputs", data.id)) };
+    if (type === "generate_script") {
+      if (data.id) data = { ...data, ...(await loadRow("briefs", uuid(data.id, "brief id"))) };
+      if (data.id) lockKey = `generate_script:${data.id}`;
+    }
+    if (type === "revise_brief") {
+      const id = uuid(data.brief && data.brief.id, "brief id");
+      data = { ...data, brief: await loadRow("briefs", id) };
+      lockKey = `revise_brief:${id}`;
+    }
+    if (type === "revise_script" && data.script && data.script.id) {
+      const id = uuid(data.script.id, "script id");
+      data = { ...data, script: { ...data.script, ...(await loadRow("script_outputs", id)) } };
+      lockKey = `revise_script:${id}`;
+    }
+    if (type === "generate_brief") {
+      for (const k of ["cluster_id", "opportunity_id"]) if (data[k] != null && !isUuid(data[k])) throw new PublicError(400, `${k} must be a valid id`);
+      const ref = data.cluster_id || data.opportunity_id || (isUuid(data.id) ? data.id : null);
+      if (ref) lockKey = `generate_brief:${ref}`;
+    }
+    if (type === "delete_scraper_cleanup" && Array.isArray(data.ids)) {
+      if (data.ids.length > 500) throw new PublicError(400, "Too many ids (max 500)");
+      data.ids.forEach(id => uuid(id));
+    }
+    if (type === "cluster") {
+      const id = uuid(data.id, "signal id");
+      clusterClaim = crypto.randomUUID();
+      // Atomic claim: background jobs must hold the claim batch-cluster gave them;
+      // interactive calls claim the signal unless it is already being clustered.
+      const expected = caller.kind === "service" ? uuid(body.claim, "claim") : null;
+      const { data: prev, error: claimErr } = await supabase.rpc("ci_claim_signal", { p_id: id, p_claim: clusterClaim, p_expected: expected });
+      if (claimErr) throw new PublicError(503, "Could not claim the signal");
+      if (!prev) throw new PublicError(409, "This signal is already being clustered", { code: "in_progress" });
+      previousStatus = prev;
+      data = { ...(await loadRow("signals", id)) };
+    }
+
+    if (lockKey) lockHolder = await locks.acquire(lockKey, 300, "This is already being generated. Wait for it to finish.");
+
+    try {
+      return await prompts.runWithPrompts(set, () => analyze(type, data, { performedBy, clusterClaim, previousStatus, isService: caller.kind === "service" }));
+    } finally {
+      if (lockKey) await locks.release(lockKey, lockHolder);
+    }
+  } catch (err) {
+    return errorResponse(err, "ai-analyze");
   }
-  const performedBy = await getUserId(event, supabase); // null for internal secret calls
+};
 
-  if (!CLAUDE_API_KEY) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "CLAUDE_API_KEY not set in Netlify environment variables." }) };
-  }
-
-  let body;
-  try { body = JSON.parse(event.body); }
-  catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
-
-  const { type, data } = body;
-  if (!type || !data) return { statusCode: 400, headers, body: JSON.stringify({ error: "type and data are required" }) };
-
+async function analyze(type, data, { performedBy, clusterClaim, previousStatus, isService }) {
   try {
     let prompt, result;
 
@@ -218,19 +296,8 @@ exports.handler = async (event) => {
 
     } else if (type === "opportunity") {
       // Fetch content history from the 2026 Google Sheet (all monthly tabs)
-      let sheetEntries = [];
-      try {
-        const { data: setting } = await supabase
-          .from("settings").select("value").eq("key", "calendar_script_url").single();
-        const scriptUrl = setting?.value?.url;
-        if (scriptUrl) {
-          const sheetResp = await fetch(scriptUrl, { method: "GET", redirect: "follow" });
-          const sheetData = await sheetResp.json();
-          sheetEntries = sheetData?.entries || [];
-        }
-      } catch (sheetErr) {
-        console.warn("Could not fetch sheet history:", sheetErr.message);
-      }
+      // Owned-channel history from the script sheet (server-side source; [] if unavailable)
+      const sheetEntries = await fetchScriptHistory(supabase);
 
       // Also fetch any manually logged published videos from Supabase
       const { data: dbPublished } = await supabase
@@ -576,17 +643,8 @@ exports.handler = async (event) => {
       const knownClusters = [...(fetchedClusters || [])];
 
       // Fetch owned-channel history once (shared across all ideas for this signal)
-      let sheetEntries = [];
-      try {
-        const { data: setting } = await supabase
-          .from("settings").select("value").eq("key", "calendar_script_url").single();
-        const scriptUrl = setting?.value?.url;
-        if (scriptUrl) {
-          const sheetResp = await fetch(scriptUrl, { method: "GET", redirect: "follow" });
-          const sheetData = await sheetResp.json();
-          sheetEntries = sheetData?.entries || [];
-        }
-      } catch (e) { console.warn("Sheet fetch failed:", e.message); }
+      // Owned-channel history from the script sheet (server-side source; [] if unavailable)
+      const sheetEntries = await fetchScriptHistory(supabase);
 
       const { data: dbPublished } = await supabase
         .from("published_videos")
@@ -1000,6 +1058,12 @@ exports.handler = async (event) => {
       } else if (allRouted) {
         await supabase.from("signals").update({ status: "Watch" }).eq("id", signalId);
       }
+      // Interactive (re-)clustering claimed the signal as "Clustering": if no outcome
+      // above set a new status, put back the status it had before the claim.
+      if (!isService && previousStatus && previousStatus !== "Clustering") {
+        await supabase.from("signals").update({ status: previousStatus })
+          .eq("id", signalId).eq("status", "Clustering").eq("clustering_claim", clusterClaim);
+      }
 
       // Return summary of all clusters touched
       const primaryResult = clusterResults[0] || {};
@@ -1017,9 +1081,15 @@ exports.handler = async (event) => {
     return { statusCode: 200, headers, body: JSON.stringify({ success: true, analysis: result }) };
 
   } catch (err) {
-    console.error("ai-analyze error:", err);
-    // If clustering failed: scraper signals → delete; manual → mark Needs cleanup
-    if (type === "cluster" && data?.id) {
+    console.error("ai-analyze failed:", type, err && err.isPublic ? err.message : "internal error");
+    // If clustering failed: queued scraper signals → delete; queued manual → Needs cleanup.
+    // A re-cluster of an already-routed signal is put back to its previous status instead.
+    if (type === "cluster" && data?.id && !isService && previousStatus && !["New", "Clustering"].includes(previousStatus)) {
+      try {
+        await supabase.from("signals").update({ status: previousStatus })
+          .eq("id", data.id).eq("status", "Clustering").eq("clustering_claim", clusterClaim);
+      } catch (_) {}
+    } else if (type === "cluster" && data?.id) {
       try {
         if (data.is_manual_submission) {
           await supabase.from("signals")
@@ -1034,9 +1104,9 @@ exports.handler = async (event) => {
         }
       } catch (_) {}
     }
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    throw err; // → safe error response in the handler
   }
-};
+}
 
 
 // ── MARKET WATCH UPSERT HELPER ────────────────────────────────────────────────
@@ -1149,37 +1219,7 @@ function mergeRepetitionType(existing, incoming) {
 
 // ── SIGNAL PROMPT ─────────────────────────────────────────────────────────────
 function buildSignalPrompt(s, watchlistText) {
-  return `You are analyzing a social media signal for Succulents Box, a succulent plant subscription company.
-
-RAW INPUT: ${s.topic || s.raw_input || ""}
-Platform: ${s.platform || "unknown"}
-Source URL: ${s.source_url || "not provided"}
-Caption/notes: ${s.caption_summary || "not provided"}
-
-HIGH-REVENUE PLANT WATCHLIST (genus name — revenue tier — stock):
-${watchlistText}
-
-Return ONLY valid JSON:
-{
-  "topic": "short clear topic, e.g. Echeveria etiolation / stretching",
-  "plant_product": "plant or product name, e.g. Echeveria, String of Pearls",
-  "signal_type": "one of: TikTok manual observation | Instagram manual observation | Facebook Group manual observation | YouTube observation | Competitor observation | Customer comment / DM theme | Other community signal",
-  "why_matters": "1 sentence on why this is worth making a video about",
-  "priority": "High | Medium | Low",
-  "shelf_life": "Trend | Seasonal | Evergreen | Experimental",
-  "content_pillar": "one of: Repeated Questions | Common Mistakes | Plant Rescue | Myths and Debates | Experiments | Unusual Plant Features | Seasonal Problems | Trend Adaptation | Product / Catalog Fit",
-  "suggestions": "Hook: [one strong opening line] | Format: [e.g. Talking head / Before-after / Tutorial]",
-  "catalog_fit": "matched SB product name, or Needs check, or Not applicable",
-  "revenue_priority_match": "Yes | No | Needs check",
-  "revenue_priority_note": "e.g. Echeveria is High-revenue — strong reason to prioritize. Or: weak demand despite revenue match — watch item only."
-}
-
-Rules:
-- High priority = strong comment demand + clear product fit.
-- If plant matches watchlist AND demand is strong → mark revenue_priority_match Yes, boost priority.
-- If plant matches watchlist BUT demand is weak → mark Yes but note watch item, not automatic priority.
-- If plant is uncertain → Needs check.
-- Keep it factual, no invented metrics.`;
+  return prompts.t("ai-analyze.buildSignalPrompt.1", [s.topic || s.raw_input || "", s.platform || "unknown", s.source_url || "not provided", s.caption_summary || "not provided", watchlistText]);
 }
 
 
@@ -1195,7 +1235,7 @@ function buildOpportunityPrompt(o, watchlistText, sheetEntries, dbPublished) {
   // DB published videos: manually logged with hook/angle/performance detail
   const dbText = dbPublished.length
     ? dbPublished.map(p =>
-        `- "${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | Hook: ${p.hook_used || "—"} | Angle: ${p.angle_used || "—"} | Platform: ${p.platform || "?"} | Performance: ${p.performance_summary || "not recorded"} | Follow-up: ${p.audience_followup_questions || "none"}`
+        prompts.t("ai-analyze.buildOpportunityPrompt.1", [p.video_title || p.topic, p.plant_or_product || "?", p.hook_used || "—", p.angle_used || "—", p.platform || "?", p.performance_summary || "not recorded", p.audience_followup_questions || "none"])
       ).join("\n")
     : "";
 
@@ -1212,62 +1252,14 @@ function buildOpportunityPrompt(o, watchlistText, sheetEntries, dbPublished) {
 
   // DB published videos (manually logged with hook/angle detail)
   dbPublished.forEach(p => {
-    historyLines.push(`[Published ${p.publish_date || "?"}] "${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | Hook: ${p.hook_used || "—"} | Angle: ${p.angle_used || "—"} | Performance: ${p.performance_summary || "not recorded"}`);
+    historyLines.push(prompts.t("ai-analyze.buildOpportunityPrompt.2", [p.publish_date || "?", p.video_title || p.topic, p.plant_or_product || "?", p.hook_used || "—", p.angle_used || "—", p.performance_summary || "not recorded"]));
   });
 
   const historyText = historyLines.length
     ? historyLines.join("\n")
     : "No content history available yet.";
 
-  return `You are reviewing a content opportunity for Succulents Box, a succulent plant subscription company.
-
-OPPORTUNITY:
-Topic: ${o.topic || ""}
-Plant/product: ${o.plant_or_product || ""}
-Why now: ${o.why_now || ""}
-Evidence: ${o.evidence_summary || ""}
-Suggested hook: ${o.suggested_hook || ""}
-Suggested format: ${o.suggested_format || ""}
-Platform: ${o.platform || ""}
-Shelf life: ${o.shelf_life || ""}
-
-HIGH-REVENUE PLANT WATCHLIST:
-${watchlistText}
-
-2026 PRODUCTION CONTENT HISTORY (published or scheduled — all months):
-These are real Succulents Box production scripts. Use them to check repetition.
-${historyText}
-
-Check whether this opportunity is too similar to something already in production.
-Rules:
-- Same topic + same plant + same angle = High or Block risk regardless of timing.
-- Same topic + different plant = Low risk (usually fine — different visual, different problem).
-- Same plant + different care problem = Low risk.
-- Same topic + follow-up from audience comments = Low risk, often priority.
-- Same topic + new seasonal urgency = Medium risk — needs a distinct hook.
-- High revenue alone does not justify repetition.
-- "*No script*" entries are ideas only — still count as claimed territory for that month.
-
-Return ONLY valid JSON:
-{
-  "repetition_risk": "Low | Medium | High | Block",
-  "repetition_recommendation": "one clear sentence — can review / hold and revise angle / hold unless new format / do not recommend",
-  "freshness_reason": "why this is or is not fresh — one to two sentences",
-  "new_angle_available": true,
-  "similar_published_url": "link from content history if found, else null",
-  "similar_published_date": "month and year if found, e.g. April 2026, else null",
-  "days_since_similar": null,
-  "previous_plant": "plant from similar entry, or null",
-  "previous_hook": "hook from similar entry, or null",
-  "previous_angle": "angle from similar entry, or null",
-  "previous_format": "format from similar entry, or null",
-  "previous_performance": null,
-  "audience_followup_demand": "any follow-up question opportunity found, or null",
-  "revenue_priority_match": "Yes | No | Needs check",
-  "revenue_priority_note": "note if plant is high-revenue"
-}
-
-If no similar entry exists, set repetition_risk to Low and similar fields to null.`;
+  return prompts.t("ai-analyze.buildOpportunityPrompt.3", [o.topic || "", o.plant_or_product || "", o.why_now || "", o.evidence_summary || "", o.suggested_hook || "", o.suggested_format || "", o.platform || "", o.shelf_life || "", watchlistText, historyText]);
 }
 
 
@@ -1277,34 +1269,7 @@ If no similar entry exists, set repetition_risk to Low and similar fields to nul
 // target_audience/key_message/notes, none of which exist on the table, so
 // AI Review was silently reviewing blank fields regardless of brief content.
 function buildBriefPrompt(b, watchlistText) {
-  return `You are reviewing a video brief for Succulents Box, a succulent plant subscription company.
-
-BRIEF TITLE: ${b.title || ""}
-FEATURED PRODUCT: ${b.featured_product || "not specified"}
-AUDIENCE PROBLEM: ${b.audience_problem || "not specified"}
-OPENING HOOK: ${b.opening_hook || "not specified"}
-VISUAL HOOK: ${b.visual_hook || "not specified"}
-VIDEO FORMAT: ${b.video_format || "not specified"}
-VIDEO FLOW: ${b.video_flow || "not specified"}
-CAPTION DRAFT: ${b.caption || "not specified"}
-CALL TO ACTION: ${b.cta || "not specified"}
-
-HIGH-REVENUE PLANT WATCHLIST (genus — revenue tier — stock):
-${watchlistText}
-
-Review this brief and return ONLY valid JSON:
-{
-  "overall": "Strong | Needs work | Incomplete",
-  "strengths": ["strength 1", "strength 2"],
-  "gaps": ["what is missing or unclear"],
-  "suggested_angles": ["angle 1 not covered", "angle 2"],
-  "recommended_script_type": "e.g. TikTok / Reel short script | Longer educational script",
-  "suggested_hook": "one strong opening line for this brief",
-  "brand_fit": "High | Medium | Low",
-  "revenue_priority_match": "Yes | No | Needs check",
-  "revenue_priority_note": "note if plant is high-revenue and whether stock is confirmed",
-  "notes": "any other recommendations in 1-2 sentences"
-}`;
+  return prompts.t("ai-analyze.buildBriefPrompt.1", [b.title || "", b.featured_product || "not specified", b.audience_problem || "not specified", b.opening_hook || "not specified", b.visual_hook || "not specified", b.video_format || "not specified", b.video_flow || "not specified", b.caption || "not specified", b.cta || "not specified", watchlistText]);
 }
 
 // ── Plant category detection ───────────────────────────────────────────────────
@@ -1488,16 +1453,10 @@ function briefLessonsBlock(lessons) {
   const lines = lessons.map(l =>
     `- ${l.issue}${l.count > 1 ? ` (flagged ${l.count}× before)` : ""}`
   ).join("\n");
-  return `\nPAST REVIEWER FEEDBACK — previous briefs were marked "Needs work"/"Incomplete" for these exact gaps. Do NOT repeat them:\n${lines}\n`;
+  return prompts.t("ai-analyze.briefLessonsBlock.1", [lines]);
 }
 
-const BRIEF_PREFLIGHT_CHECKLIST = `
-PRE-FLIGHT CHECKLIST — the brief will be marked incomplete if ANY of these are missing:
-1. Audience problem: must name the specific problem/question the audience has, in their own words — not just a topic label.
-2. Opening hook: must create curiosity or name the problem in one line — never a generic restatement of the title.
-3. Visual hook: must describe a specific, filmable first shot (not "show the plant").
-4. Video flow: must lay out concrete steps/beats the video follows, not a vague summary.
-5. CTA: every brief must end with a clear call to action.`;
+const BRIEF_PREFLIGHT_CHECKLIST = () => prompts.t("ai-analyze.BRIEF_PREFLIGHT_CHECKLIST.1");
 
 // ── BRIEF GENERATION PROMPT ────────────────────────────────────────────────────
 // Source (`c`) is usually a content_review_candidates row (optionally with a
@@ -1511,42 +1470,7 @@ function buildGenerateBriefPrompt(c, rules, lessons, humanNotes, learningMemory)
   const wording = (c.representative_wording || cluster.audience_wording || []).slice(0, 5);
   const directions = (c.possible_directions || []).slice(0, 5);
 
-  return `You are writing a first-draft video brief for Succulents Box, a succulent plant subscription company, based on an approved audience-research finding.
-
-SOURCE TITLE: ${c.title || c.topic || ""}
-PLANT / PRODUCT: ${c.plant_or_product || cluster.plant_or_product || "not specified"}
-WHAT PEOPLE ARE SAYING: ${c.what_people_are_saying || c.evidence_summary || c.why_now || "not specified"}
-AUDIENCE WORDING (exact phrases): ${wording.length ? wording.map(w => `"${w}"`).join(", ") : "none captured"}
-WHAT APPEARS NEW: ${c.what_appears_new || "not specified"}
-CLAIMS NEEDING VERIFICATION: ${c.claims_needing_verification || "none"}
-CONTRADICTORY ADVICE FOUND: ${c.contradictory_advice || "none"}
-APPROVED DIRECTION (reviewer's chosen angle — follow this if given): ${c.approved_direction || "not specified — pick the strongest of the possible directions below"}
-POSSIBLE DIRECTIONS: ${directions.length ? directions.join(", ") : "not specified"}
-SUGGESTED HOOK FROM RESEARCH: ${c.suggested_hook || "none — write your own"}
-SUGGESTED FORMAT: ${c.suggested_format || "not specified"}
-${humanNotes ? `\nHUMAN EDITOR NOTES (incorporate these into the brief):\n${humanNotes}` : ""}
-${learningMemory ? `\nREVIEWER LESSONS FROM PAST CONTENT — apply these when writing the brief:\n${learningMemory}` : ""}
-BRAND RULES (follow all Required rules, never do Forbidden ones):
-${rulesText || "No rules loaded"}
-${BRIEF_PREFLIGHT_CHECKLIST}
-${briefLessonsBlock(lessons)}
-Writing guidance:
-- The audience problem must be written in plain audience language, grounded in the wording above — not a generic restatement of the title.
-- The opening hook must create curiosity or name the problem in the first line.
-- Video flow should read as a short numbered/beat outline a filmmaker could follow.
-
-Return ONLY valid JSON:
-{
-  "title": "short internal title",
-  "featured_product": "plant or product name, or null",
-  "audience_problem": "the specific problem/question in plain audience language",
-  "opening_hook": "first line of the video, under 12 words",
-  "visual_hook": "specific first shot — what's on screen in the first 2 seconds",
-  "video_format": "Talking head | Tutorial | Before & after | POV | Timelapse | Voiceover",
-  "video_flow": "Step 1: … Step 2: … one per line",
-  "caption": "post caption, 1-2 sentences",
-  "cta": "closing call to action"
-}`;
+  return prompts.t("ai-analyze.buildGenerateBriefPrompt.1", [c.title || c.topic || "", c.plant_or_product || cluster.plant_or_product || "not specified", c.what_people_are_saying || c.evidence_summary || c.why_now || "not specified", wording.length ? wording.map(w => `"${w}"`).join(", ") : "none captured", c.what_appears_new || "not specified", c.claims_needing_verification || "none", c.contradictory_advice || "none", c.approved_direction || prompts.t("ai-analyze.buildGenerateBriefPrompt.2"), directions.length ? directions.join(", ") : "not specified", c.suggested_hook || "none — write your own", c.suggested_format || "not specified", humanNotes ? prompts.t("ai-analyze.buildGenerateBriefPrompt.3", [humanNotes]) : "", learningMemory ? prompts.t("ai-analyze.buildGenerateBriefPrompt.4", [learningMemory]) : "", rulesText || "No rules loaded", BRIEF_PREFLIGHT_CHECKLIST(), briefLessonsBlock(lessons)]);
 }
 
 // ── BRIEF REVISION PROMPT ──────────────────────────────────────────────────────
@@ -1557,43 +1481,7 @@ function buildBriefRevisionPrompt(orig, feedback, rules, lessons, humanNotes) {
   const gaps = (feedback.gaps || []).map(g => `- ${g}`).join("\n");
   const angles = (feedback.suggested_angles || []).map(a => `- ${a}`).join("\n");
 
-  return `You are revising a video brief for Succulents Box, a succulent plant subscription company.
-A reviewer flagged gaps in the current brief. Write an improved version that fixes EVERY gap while keeping what already works.
-
-CURRENT BRIEF:
-Title: ${orig.title || ""}
-Featured product: ${orig.featured_product || "not specified"}
-Audience problem: ${orig.audience_problem || "not specified"}
-Opening hook: ${orig.opening_hook || "not specified"}
-Visual hook: ${orig.visual_hook || "not specified"}
-Video format: ${orig.video_format || "not specified"}
-Video flow: ${orig.video_flow || "not specified"}
-Caption: ${orig.caption || "not specified"}
-REVIEWER FEEDBACK (verdict: ${feedback.overall || "Needs work"}):
-${gaps ? `Gaps to fix:\n${gaps}` : "No gaps listed."}
-${angles ? `\nSuggested angles not yet covered:\n${angles}` : ""}
-${feedback.suggested_hook ? `\nReviewer's suggested hook: "${feedback.suggested_hook}"` : ""}
-${feedback.notes ? `\nReviewer notes: ${feedback.notes}` : ""}
-${humanNotes ? `\nHUMAN EDITOR NOTES (incorporate these into the revision):\n${humanNotes}` : ""}
-
-BRAND RULES (follow all Required rules, never do Forbidden ones):
-${rulesText || "No rules loaded"}
-${BRIEF_PREFLIGHT_CHECKLIST}
-${briefLessonsBlock(lessons)}
-Keep the parts of the original that were NOT flagged — this is a revision, not a rewrite from scratch.
-
-Return ONLY valid JSON:
-{
-  "title": "short internal title (keep the original unless it was flagged)",
-  "featured_product": "plant or product name, or null",
-  "audience_problem": "the specific problem/question in plain audience language",
-  "opening_hook": "first line of the video, under 12 words",
-  "visual_hook": "specific first shot — what's on screen in the first 2 seconds",
-  "video_format": "Talking head | Tutorial | Before & after | POV | Timelapse | Voiceover",
-  "video_flow": "Step 1: … Step 2: … one per line",
-  "caption": "post caption, 1-2 sentences",
-  "cta": "closing call to action"
-}`;
+  return prompts.t("ai-analyze.buildBriefRevisionPrompt.1", [orig.title || "", orig.featured_product || "not specified", orig.audience_problem || "not specified", orig.opening_hook || "not specified", orig.visual_hook || "not specified", orig.video_format || "not specified", orig.video_flow || "not specified", orig.caption || "not specified", feedback.overall || "Needs work", gaps ? `Gaps to fix:\n${gaps}` : "No gaps listed.", angles ? prompts.t("ai-analyze.buildBriefRevisionPrompt.2", [angles]) : "", feedback.suggested_hook ? prompts.t("ai-analyze.buildBriefRevisionPrompt.3", [feedback.suggested_hook]) : "", feedback.notes ? `\nReviewer notes: ${feedback.notes}` : "", humanNotes ? prompts.t("ai-analyze.buildBriefRevisionPrompt.4", [humanNotes]) : "", rulesText || "No rules loaded", BRIEF_PREFLIGHT_CHECKLIST(), briefLessonsBlock(lessons)]);
 }
 
 
@@ -1613,7 +1501,7 @@ function lessonsBlock(lessons) {
   const lines = lessons.map(l =>
     `- ${l.rule}${l.count > 1 ? ` (flagged ${l.count}× before)` : ""}: ${l.fix}`
   ).join("\n");
-  return `\nPAST REVIEWER FEEDBACK — previous scripts failed brand review for these exact reasons. Do NOT repeat them:\n${lines}\n`;
+  return prompts.t("ai-analyze.lessonsBlock.1", [lines]);
 }
 
 // Must match the CHECK constraint on script_outputs.script_type
@@ -1628,16 +1516,7 @@ const ALLOWED_SCRIPT_TYPES = [
 
 // Hard requirements the brand check always verifies — bake them in up front so
 // v1 passes review instead of needing a revision round.
-const SCRIPT_PREFLIGHT_CHECKLIST = `
-PRE-FLIGHT CHECKLIST — the script will be rejected if ANY of these are missing:
-1. Hook is the first line: the "full_voiceover_script" MUST open with the exact text from "opening_hook". The hook is not a separate intro card — it IS the first spoken sentence.
-2. Caption: the "caption" field MUST be filled in — it doubles as the cover/text overlay.
-3. Visual opening: the shot list MUST specify what is on screen in the first 2 seconds, and it must show the plant/symptom/comparison immediately.
-4. Hook: must create curiosity or name the specific problem — NEVER restate the title or open with a generic question like "Is your plant dying?".
-5. Care claims: hedge diagnosis language based on visual signs ("usually points to", "often means") — never absolute verdicts like "your roots are rotting".
-6. No CTA: do NOT end with a call to action. The script ends when the content ends — no "save this", "follow for more", "comment below".
-7. No em dashes anywhere in the script — not in the hook, not in the body. Use a comma or a new sentence instead.
-8. No AI filler phrases: "here's the thing", "at the end of the day", "the good news is", "let's dive in", "the key takeaway".`;
+const SCRIPT_PREFLIGHT_CHECKLIST = () => prompts.t("ai-analyze.SCRIPT_PREFLIGHT_CHECKLIST.1");
 
 function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, recentHooks = [], recentSameTopicScripts = []) {
   const rulesText = rules.map(r =>
@@ -1647,93 +1526,18 @@ function buildScriptGenPrompt(b, rules, targetSecs, lessons, learningMemory, rec
 
   // Build hook avoidance block — exact lines + structural patterns extracted from them
   const hookAvoidanceBlock = recentHooks.length
-    ? `HOOKS USED IN THE LAST 30 DAYS — do NOT reuse these phrasings or their underlying patterns:
-${recentHooks.map(h => `- "${h}"`).join("\n")}
-
-Avoid repeating the same sentence structure even with different words. For example, if "Your cactus base is squishy" was used, do not start with "Your [plant] [body part] is [adjective]". Pick a structurally different opening.`
+    ? prompts.t("ai-analyze.buildScriptGenPrompt.1", [recentHooks.map(h => `- "${h}"`).join("\n")])
     : "";
 
   // Topic repetition block — warn if this subject was covered recently
   const topicRepeatBlock = recentSameTopicScripts.length
-    ? `TOPIC REPETITION WARNING — this subject was already covered ${recentSameTopicScripts.length} time${recentSameTopicScripts.length > 1 ? "s" : ""} in the last 60 days:
-${recentSameTopicScripts.map(s => {
+    ? prompts.t("ai-analyze.buildScriptGenPrompt.2", [recentSameTopicScripts.length, recentSameTopicScripts.length > 1 ? "s" : "", recentSameTopicScripts.map(s => {
   const daysAgo = Math.round((Date.now() - new Date(s.created_at).getTime()) / (1000 * 60 * 60 * 24));
   return `- "${s.script_title}" (${daysAgo}d ago)${s.opening_hook ? ` — hook: "${s.opening_hook}"` : ""}`;
-}).join("\n")}
-
-You MUST take a clearly different angle: different symptom, different plant stage, different fix step, or different audience (beginner vs. experienced). Do not repeat the same hook structure or the same core advice.`
+}).join("\n")])
     : "";
 
-  return `You are writing a short-form video script for Succulents Box, a succulent plant subscription company.
-
-BRIEF:
-Title: ${b.title || ""}
-Featured product: ${b.featured_product || "not specified"}
-Audience problem: ${b.audience_problem || "not specified"}
-Hook idea from brief: ${b.opening_hook || "none — write your own"}
-Visual hook: ${b.visual_hook || "not specified"}
-Video format: ${b.video_format || "TikTok / Reel short script"}
-Video flow: ${b.video_flow || "not specified"}
-TARGET DURATION: ${targetSecs} seconds — the voiceover must be ${wordBudget} words or fewer. Count your words before returning. Cut sentences if needed — do not go over.
-Length guidance: under 10s for a single quick tip, 10-15s is ideal for most care advice, 20s for anything with a fix step, 60s is the absolute maximum. Default short — only stretch if the topic genuinely needs more steps to be useful.
-
-${topicRepeatBlock ? topicRepeatBlock + "\n\n" : ""}${hookAvoidanceBlock ? hookAvoidanceBlock + "\n" : ""}${learningMemory ? `REVIEWER LESSONS FROM PAST CONTENT — apply these when writing the script:\n${learningMemory}\n` : ""}
-BRAND RULES (follow all Required rules, never do Forbidden ones):
-${rulesText || "No rules loaded"}
-${SCRIPT_PREFLIGHT_CHECKLIST}
-${lessonsBlock(lessons)}
-Writing guidance:
-
-HOOK (opening_hook field - most important line of the script):
-The first line determines whether someone keeps watching. Apply ONE of these proven TikTok hook patterns:
-1. SYMPTOM FIRST - lead with what the viewer already sees or feels, not the topic name.
-   Good: "Your succulent leaves are getting mushy and you don't know why."
-   Bad: "Today we're talking about overwatering."
-2. CHALLENGE A BELIEF - open with something counterintuitive.
-   Good: "The more you water a succulent, the faster it dies."
-   Bad: "Succulents are easy to care for."
-3. STAKES / URGENCY - something is at risk right now.
-   Good: "If you don't fix this before summer, your plant won't make it."
-   Bad: "Here are some care tips for your succulent."
-4. BOLD CLAIM - promise a specific, surprising payoff.
-   Good: "Three signs your succulent is begging you to stop watering."
-   Bad: "Let me show you how to water your succulent."
-5. MID-ACTION START - drop the viewer into the middle of something.
-   Good: "Wait - before you water that, look at the soil first."
-   Bad: "Hi everyone, today I want to talk about..."
-
-Hook rules (non-negotiable):
-- Must use "you" or "your" - speak directly to the viewer, not about succulents in general.
-- Must be under 10 words.
-- Must NOT start with "Today", "Hi", "Welcome", "In this video", or a restatement of the title.
-- Must name a problem the viewer already has OR make a bold claim they haven't heard before.
-- Must create a reason to keep watching in the first 2 seconds.
-- No em dashes in the hook or anywhere in the script.
-
-Script structure:
-- Write the way you'd explain something to a friend, not like a listicle or a how-to article. Sentences connect naturally into each other.
-- Use "you" and "your" throughout. Keep it direct and grounded.
-- No curt one-liners dropped back to back. Each sentence should flow into the next.
-- No em dashes anywhere. No AI-style transitions ("here's the thing", "at the end of the day", "the good news is").
-- Structure: hook → name the problem → explain what's going on → what to do about it. End there — no CTA.
-- The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
-- The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook. The hook lands the problem; the next line should pivot to the cause or solution with new information.
-
-Return ONLY valid JSON:
-{
-  "script_title": "short internal title",
-  "platform": "TikTok | Instagram | YouTube | Facebook",
-  "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | UGC-style script",
-  "opening_hook": "first line of the video, under 12 words",
-  "thumbnail_title": "bold 3-6 word text that appears on the video thumbnail cover — grabs attention at a glance",
-  "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
-  "on_screen_text": "text overlays, one per line",
-  "shot_list": "Shot 1: … one per line",
-  "broll_notes": "b-roll / close-up suggestions",
-  "product_mention": "how/when the product is mentioned, or null",
-  "caption": "post caption, 1-2 sentences",
-  "hashtags": "#space #separated #hashtags"
-}`;
+  return prompts.t("ai-analyze.buildScriptGenPrompt.3", [b.title || "", b.featured_product || "not specified", b.audience_problem || "not specified", b.opening_hook || "none — write your own", b.visual_hook || "not specified", b.video_format || "TikTok / Reel short script", b.video_flow || "not specified", targetSecs, wordBudget, topicRepeatBlock ? topicRepeatBlock + "\n\n" : "", hookAvoidanceBlock ? hookAvoidanceBlock + "\n" : "", learningMemory ? prompts.t("ai-analyze.buildScriptGenPrompt.4", [learningMemory]) : "", rulesText || "No rules loaded", SCRIPT_PREFLIGHT_CHECKLIST(), lessonsBlock(lessons), wordBudget]);
 }
 
 
@@ -1751,140 +1555,15 @@ function buildScriptRevisionPrompt(orig, feedback, rules, targetSecs, lessons, h
   const improvements  = (feedback.improvements || []).map(i => `- ${i}`).join("\n");
 
   const hookAvoidanceBlock = recentHooks.length
-    ? `HOOKS USED IN THE LAST 30 DAYS — do NOT reuse these phrasings or their underlying patterns:
-${recentHooks.map(h => `- "${h}"`).join("\n")}
-
-Avoid repeating the same sentence structure even with different words.`
+    ? prompts.t("ai-analyze.buildScriptRevisionPrompt.1", [recentHooks.map(h => `- "${h}"`).join("\n")])
     : "";
 
   // Fresh rewrite mode: no brand check was run, user just wants a genuinely new take
   if (forceFresh) {
-    return `You are writing a fresh new version of a short-form video script for Succulents Box, a succulent plant subscription company.
-The previous version is shown below as reference only — do NOT copy it. Write a meaningfully different script on the same topic.
-
-TOPIC LOCK — this is non-negotiable:
-The plant, symptom, and subject must be exactly "${orig.script_title || "the same topic as the original"}". Do not switch to a different plant, a different problem, or a different angle. Only the hook, wording, and structure may change.
-${hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : ""}
-PREVIOUS SCRIPT (${orig.script_version || "v1"}) — for reference, do NOT reuse its hook or opening structure:
-Topic/title: ${orig.script_title || ""}
-Platform: ${orig.platform || ""}
-Previous hook (must be replaced): "${orig.opening_hook || ""}"
-Previous voiceover: ${orig.full_voiceover_script || ""}
-${humanNotes ? `EDITOR DIRECTION (prioritize these above all else):\n${humanNotes}\n` : ""}
-TARGET DURATION: ${targetSecs} seconds — the voiceover must be ${wordBudget} words or fewer. Count your words before returning. Cut sentences if needed — do not go over. 60s is the absolute maximum regardless of topic.
-
-BRAND RULES (follow all Required rules, never do Forbidden ones):
-${rulesText || "No rules loaded"}
-${SCRIPT_PREFLIGHT_CHECKLIST}
-${lessonsBlock(lessons)}
-Writing guidance:
-
-HOOK (write a brand new hook - do not use or paraphrase the previous one):
-${hookPattern ? `REQUESTED HOOK PATTERN: Use the "${hookPattern}" pattern specifically.\n` : "Pick whichever pattern creates the strongest hook for this topic."}
-Apply ONE of these proven TikTok hook patterns:
-1. SYMPTOM FIRST - lead with what the viewer already sees, not the topic name.
-   Good: "Your succulent leaves are getting mushy and you don't know why."
-2. CHALLENGE A BELIEF - counterintuitive opener.
-   Good: "The more you water a succulent, the faster it dies."
-3. STAKES / URGENCY - something is at risk right now.
-   Good: "If you don't fix this before summer, your plant won't make it."
-4. BOLD CLAIM - specific, surprising payoff.
-   Good: "Three signs your succulent is begging you to stop watering."
-5. MID-ACTION START - drop into the middle of something.
-   Good: "Wait - before you water that, look at the soil first."
-Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In this video", must name a problem or make a bold claim, no em dashes.
-
-Script: write the way you'd explain something to a friend. Sentences flow into each other naturally — no curt one-liners, no em dashes, no AI phrases. Use "you/your" throughout.
-Structure: hook → name the problem → explain what's going on → what to do about it. End there — no CTA.
-The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
-The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook. The hook lands the problem; the next line pivots to the solution or deepens the stakes with new information.
-
-Return ONLY valid JSON:
-{
-  "script_title": "short internal title",
-  "platform": "TikTok | Instagram | YouTube | Facebook",
-  "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | Caption-only variant | UGC-style script",
-  "opening_hook": "first line of the video, under 10 words",
-  "thumbnail_title": "bold 3-6 word text that appears on the video thumbnail cover — grabs attention at a glance",
-  "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
-  "on_screen_text": "text overlays, one per line",
-  "shot_list": "Shot 1: ... one per line",
-  "broll_notes": "b-roll / close-up suggestions",
-  "product_mention": "how/when the product is mentioned, or null",
-  "cta": "closing call to action",
-  "caption": "post caption, 1-2 sentences",
-  "hashtags": "#space #separated #hashtags"
-}`;
+    return prompts.t("ai-analyze.buildScriptRevisionPrompt.2", [orig.script_title || "the same topic as the original", hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : "", orig.script_version || "v1", orig.script_title || "", orig.platform || "", orig.opening_hook || "", orig.full_voiceover_script || "", humanNotes ? prompts.t("ai-analyze.buildScriptRevisionPrompt.3", [humanNotes]) : "", targetSecs, wordBudget, rulesText || "No rules loaded", SCRIPT_PREFLIGHT_CHECKLIST(), lessonsBlock(lessons), hookPattern ? prompts.t("ai-analyze.buildScriptRevisionPrompt.4", [hookPattern]) : prompts.t("ai-analyze.buildScriptRevisionPrompt.5"), wordBudget]);
   }
 
-  return `You are revising a short-form video script for Succulents Box, a succulent plant subscription company.
-A brand reviewer flagged issues in the current version. Write an improved version that fixes EVERY flagged issue while keeping what already works.
-
-TOPIC LOCK — this is non-negotiable:
-The plant, symptom, and subject must remain exactly "${orig.script_title || "the same topic as the original"}". Do not switch to a different plant, problem, or angle. Only the hook, wording, and structure may change.
-${hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : ""}
-CURRENT SCRIPT (${orig.script_version || "v1"}):
-Title: ${orig.script_title || ""}
-Platform: ${orig.platform || ""}
-Hook: ${orig.opening_hook || ""}
-Voiceover:
-${orig.full_voiceover_script || ""}
-On-screen text: ${orig.on_screen_text || "none"}
-CTA: ${orig.cta || "none"}
-Caption: ${orig.caption || "none"}
-
-REVIEWER FEEDBACK (score ${feedback.score ?? "?"}/100, verdict: ${feedback.overall || "Needs revision"}):
-${violationsText ? `Brand issues to fix — ALL Required issues MUST be resolved:\n${violationsText}` : "No brand violations."}
-${hookIdeas ? `\nStronger hook ideas from the reviewer (use one or write something equally strong):\n${hookIdeas}` : ""}
-${improvements ? `\nSuggested improvements:\n${improvements}` : ""}
-${feedback.notes ? `\nReviewer notes: ${feedback.notes}` : ""}
-${humanNotes ? `\nHUMAN EDITOR NOTES (incorporate these into the revision):\n${humanNotes}` : ""}
-
-TARGET DURATION: ${targetSecs} seconds — the voiceover must be ${wordBudget} words or fewer. Count your words before returning. Cut sentences if needed — do not go over.
-Length guidance: under 10s for a single quick tip, 10-15s is ideal for most care advice, 20s for anything with a fix step, 60s is the absolute maximum. Default short — only stretch if the topic genuinely needs more steps to be useful.
-
-BRAND RULES (follow all Required rules, never do Forbidden ones):
-${rulesText || "No rules loaded"}
-${SCRIPT_PREFLIGHT_CHECKLIST}
-${lessonsBlock(lessons)}
-Writing guidance:
-
-HOOK (if the hook was flagged, rewrite it - if it wasn't, keep it or make it stronger):
-${hookPattern ? `REQUESTED HOOK PATTERN: Use the "${hookPattern}" pattern specifically.\n` : ''}Apply ONE of these proven TikTok hook patterns:
-1. SYMPTOM FIRST - lead with what the viewer already sees, not the topic name.
-   Good: "Your succulent leaves are getting mushy and you don't know why."
-2. CHALLENGE A BELIEF - counterintuitive opener.
-   Good: "The more you water a succulent, the faster it dies."
-3. STAKES / URGENCY - something is at risk right now.
-   Good: "If you don't fix this before summer, your plant won't make it."
-4. BOLD CLAIM - specific, surprising payoff.
-   Good: "Three signs your succulent is begging you to stop watering."
-5. MID-ACTION START - drop into the middle of something.
-   Good: "Wait - before you water that, look at the soil first."
-Hook rules: use "you"/"your", under 10 words, never start with "Today"/"Hi"/"In this video", must name a problem or make a bold claim, no em dashes.
-
-Script:
-- Casual, warm, plant-lover language. Short sentences that sound natural spoken aloud.
-- Keep the parts of the original that were NOT flagged — this is a revision, not a rewrite from scratch.
-- The full_voiceover_script MUST begin with the exact opening_hook text as its first sentence.
-- The sentence immediately after the hook must ADVANCE the story — never restate, echo, or paraphrase the hook's wording. The hook lands the problem; the next line should pivot to the solution or deepen the stakes with new information.
-
-Return ONLY valid JSON:
-{
-  "script_title": "short internal title (keep the original unless it was flagged)",
-  "platform": "TikTok | Instagram | YouTube | Facebook",
-  "script_type": "TikTok / Reel short script | YouTube Shorts script | Facebook Reel script | Longer educational script | UGC-style script",
-  "opening_hook": "first line of the video, under 12 words",
-  "thumbnail_title": "bold 3-6 word text that appears on the video thumbnail cover — grabs attention at a glance",
-  "full_voiceover_script": "the complete spoken script, ~${wordBudget} words",
-  "on_screen_text": "text overlays, one per line",
-  "shot_list": "Shot 1: … one per line",
-  "broll_notes": "b-roll / close-up suggestions",
-  "product_mention": "how/when the product is mentioned, or null",
-  "cta": "closing call to action",
-  "caption": "post caption, 1-2 sentences",
-  "hashtags": "#space #separated #hashtags"
-}`;
+  return prompts.t("ai-analyze.buildScriptRevisionPrompt.6", [orig.script_title || "the same topic as the original", hookAvoidanceBlock ? "\n" + hookAvoidanceBlock + "\n" : "", orig.script_version || "v1", orig.script_title || "", orig.platform || "", orig.opening_hook || "", orig.full_voiceover_script || "", orig.on_screen_text || "none", orig.cta || "none", orig.caption || "none", feedback.score ?? "?", feedback.overall || "Needs revision", violationsText ? prompts.t("ai-analyze.buildScriptRevisionPrompt.7", [violationsText]) : "No brand violations.", hookIdeas ? prompts.t("ai-analyze.buildScriptRevisionPrompt.8", [hookIdeas]) : "", improvements ? prompts.t("ai-analyze.buildScriptRevisionPrompt.9", [improvements]) : "", feedback.notes ? `\nReviewer notes: ${feedback.notes}` : "", humanNotes ? prompts.t("ai-analyze.buildScriptRevisionPrompt.10", [humanNotes]) : "", targetSecs, wordBudget, rulesText || "No rules loaded", SCRIPT_PREFLIGHT_CHECKLIST(), lessonsBlock(lessons), hookPattern ? prompts.t("ai-analyze.buildScriptRevisionPrompt.11", [hookPattern]) : '', wordBudget]);
 }
 
 // ── SCRIPT PROMPT ─────────────────────────────────────────────────────────────
@@ -1898,71 +1577,21 @@ function buildScriptPrompt(s, rules) {
   const spokenSecs = words ? Math.round(words / 2.5) : null;
   const target = s.estimated_duration_seconds || null;
 
-  return `You are reviewing a video script for Succulents Box, a succulent plant subscription company.
-
-SCRIPT TITLE: ${s.script_title || ""}
-PLATFORM: ${s.platform || ""}
-TYPE: ${s.script_type || ""}
-HOOK: ${s.opening_hook || "not provided"}
-VOICEOVER: ${s.full_voiceover_script || "not provided"}
-VOICEOVER LENGTH: ${words ? `${words} words ≈ ${spokenSecs}s at a normal speaking pace` : "not provided"}
-TARGET DURATION: ${target ? `${target}s` : "not set"}
-CTA: ${s.cta || "not provided"}
-CAPTION: ${s.caption || "not provided"}
-
-BRAND RULES:
-${rulesText || "No rules loaded"}
-
-Review this script and return ONLY valid JSON:
-{
-  "overall": "Approved | Needs revision | Rejected",
-  "score": 85,
-  "hook_strength": "Strong | Weak | Missing",
-  "hook_suggestions": ["2-3 stronger alternative opening hooks, each under 12 words, written in casual audience language (curiosity gap, surprising fact, or direct question). Empty array if hook_strength is Strong."],
-  "duration_check": "OK | Too long — spoken length exceeds target, suggest what to cut | Too short — suggest what to add | No target set",
-  "cta_present": true,
-  "brand_violations": [
-    { "severity": "Required|Recommended|Avoid|Forbidden", "rule": "rule name", "issue": "what's wrong", "fix": "how to fix it" }
-  ],
-  "strengths": ["strength 1"],
-  "improvements": ["improvement 1"],
-  "notes": "overall 1-2 sentence summary"
-}
-
-Score out of 100. brand_violations empty array if none found. A hook is Strong only if it creates curiosity or names a specific problem in the first sentence — restating the title is Weak.`;
+  return prompts.t("ai-analyze.buildScriptPrompt.1", [s.script_title || "", s.platform || "", s.script_type || "", s.opening_hook || "not provided", s.full_voiceover_script || "not provided", words ? prompts.t("ai-analyze.buildScriptPrompt.2", [words, spokenSecs]) : "not provided", target ? `${target}s` : "not set", s.cta || "not provided", s.caption || "not provided", rulesText || "No rules loaded"]);
 }
 
 
 // ── CALL CLAUDE ───────────────────────────────────────────────────────────────
 async function callClaude(prompt, maxTokens = 1024) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3 * 60 * 1000); // 3-min safety net
-  let response;
-  try {
-    response = await fetch("https://api.anthropic.com/v1/messages", {
-      method:  "POST",
-      signal:  controller.signal,
-      headers: {
-        "x-api-key":         CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-      },
-      body: JSON.stringify({
-        model:      CLAUDE_MODEL,
-        max_tokens: maxTokens,
-        messages:   [{ role: "user", content: prompt }],
-      }),
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
+  const data = await claude.messages({
+    model:      CLAUDE_MODEL,
+    max_tokens: maxTokens,
+    messages:   [{ role: "user", content: prompt }],
+  });
 
   const text = data.content?.[0]?.text || "";
   const jsonMatch = text.match(/```json\n?([\s\S]*?)\n?```/) || text.match(/(\{[\s\S]*\})/);
-  if (!jsonMatch) throw new Error("Could not parse Claude response");
+  if (!jsonMatch) throw new PublicError(502, "Could not read the AI response. Try again.");
 
   return JSON.parse(jsonMatch[1] || jsonMatch[0]);
 }
@@ -1971,185 +1600,7 @@ async function callClaude(prompt, maxTokens = 1024) {
 // ── EXTRACTION PROMPT ─────────────────────────────────────────────────────────
 // Full extraction: source attribution → dates → ideas → routing
 function buildExtractionPrompt(signal) {
-  return `You are analyzing a social listening signal for Succulents Box, a succulent plant subscription company.
-
-RAW SIGNAL:
-Platform:   ${signal.platform || "unknown"}
-Source URL: ${signal.source_url || "not provided"}
-Content:    ${signal.raw_input || signal.caption_summary || signal.topic || "not provided"}
-
-═══════════════════════════════════════════════════
-STEP 1 — SOURCE ATTRIBUTION
-═══════════════════════════════════════════════════
-Identify who published this content BEFORE reading its meaning.
-
-Succulents Box official handles: @succulentsbox (Instagram, TikTok, Facebook).
-Any other account is NOT owned content, even if it tags or collaborates with Succulents Box.
-
-ownership_type values:
-  Owned content       — published by an official Succulents Box account
-  Competitor content  — plant seller, nursery, or direct competitor
-  Community content   — plant hobbyist, grower community, non-commercial creator
-  Customer content    — a customer of Succulents Box
-  Third-party media   — blogger, media outlet, aggregator
-  Unknown             — cannot be determined from available information
-
-Rules:
-- Never infer ownership from the monitoring account, scraper URL, or dashboard.
-- Collaborator status does not make content "owned" unless an official SB account is the publisher.
-- If account cannot be identified, use Unknown.
-
-═══════════════════════════════════════════════════
-STEP 2 — DATE EXTRACTION
-═══════════════════════════════════════════════════
-Separate these three date types:
-
-  published_at        — platform publication timestamp (ISO 8601). If only relative ("3 hours ago"), estimate from observed_at and mark estimated: true.
-  observed_at         — when this system collected the signal (use ${new Date().toISOString()}).
-  event_dates_claimed — dates mentioned INSIDE the caption, image, or transcript (entry deadlines, sale dates, event dates). These are NOT publication dates.
-
-Never use an event date as the publication date.
-
-═══════════════════════════════════════════════════
-STEP 3 — LANGUAGE + RELEVANCE CHECK
-═══════════════════════════════════════════════════
-First: Is the caption or audience content written primarily in a non-English language?
-  Non-English = Spanish, French, Portuguese, Serbian, Turkish, Korean, Japanese, German, Dutch, etc.
-  Exception: scientific plant names (Latin) are fine. A single non-English word in an otherwise English post is fine.
-  If the main body of text is non-English → { "relevant": false, "noise_reason": "Non-English content" }
-
-Second: Is this signal relevant to the plant/succulent market?
-  Relevant = succulents, cacti, houseplants, plant care, propagation, watering, soil, pots, plant products, or anything a plant hobbyist would care about.
-  NOT relevant = unrelated food, fashion, travel, celebrities, non-plant viral trends.
-
-If NOT relevant:
-{ "relevant": false, "noise_reason": "one sentence why" }
-
-═══════════════════════════════════════════════════
-STEP 4 — EXTRACT IDEAS + ROUTING
-═══════════════════════════════════════════════════
-If relevant, extract EVERY distinct idea. Most signals have 1. A post with two plants or two issues produces 2 ideas.
-
-For each idea:
-
-A) Context normalization
-  core_issue          — the reusable question, problem, tip, or claim (stripped of incidental details)
-  relevant_conditions — conditions that materially change the care answer (frost zone, humidity, indoor/outdoor, season)
-  incidental_context  — details that describe the source but don't define the issue (city, personal story, promo language)
-  Location rule: keep location only when it changes the meaning. Never put a country/city in normalized_cluster_title unless the cluster is genuinely about that region.
-
-B) Plant and catalog matching
-  plant               — plant or product name extracted from the signal
-  catalog_match_status:
-    Catalog match        — plant clearly matches an SB product (by scientific name, common name, cultivar, product title, or known alias)
-    Catalog family match — matches a genus or family SB carries but specific variety unclear
-    Not in catalog       — plant is confirmed outside current SB catalog
-    Needs catalog review — name is ambiguous or uncertain
-    No plant identified  — no plant mentioned
-
-C) Signal purpose
-  signal_purpose — what the source is doing:
-    Audience question | Problem report | Care tip | Care claim | Comparison | Disagreement | Follow-up request |
-    Product showcase | Giveaway or contest | Sale or promotion | Product launch | Availability announcement |
-    Collaboration | General sentiment | Lifestyle post | Other
-
-  IMPORTANT: Marketing copy from the source account is NOT audience wording.
-  audience_wording = public comments, viewer questions, community phrases.
-  source_marketing_wording = promotional captions, contest instructions, seller claims.
-
-D) Section routing (assign based on ownership + purpose + catalog status)
-
-  GEOGRAPHIC FILTER — apply when there is clear non-US evidence:
-  Succulents Box ships within the US only. Apply this filter if the caption, bio, or content contains
-  one or more of these signals:
-    - Non-US currency (£, €, ₹, ₱, ¥, ₩, AUS$, NZ$, CAD$, R for ZAR, "Rs.", "INR", etc.)
-    - Explicit non-US shipping phrase ("ships to Chile", "envíos a todo Chile", "deliver to Australia", "EU shipping", "ships to Canada", "all India delivery", "pan India shipping", "COD available")
-    - A city or country clearly outside the US named in the caption or bio (e.g. "Cairns", "Sydney", "Melbourne", "London", "Toronto", "Cape Town", "Santiago", "Chile", "Australia", "UK", "Serbia", "Turkey", "Korea", "Brazil", "India", "Delhi", "Mumbai", "Bangalore", "Pune", "Manila", "Jakarta")
-    - Caption or audience wording written primarily in a non-English language (Spanish, Serbian, Turkish, Korean, French, Portuguese, Hindi, Tagalog, etc.)
-    - Hashtags indicating non-US geography (#australia, #serbia, #türkiye, #chile, #uk, #southafrica, #india, #plantsofindia, #nurserylife (when paired with other India cues), etc.)
-    - Phone numbers in non-US formats (+91, +63, +44, WhatsApp ordering with country codes)
-
-  Extra caution for Competitor Activity specifically: a seller is only a real competitor if a US
-  customer could plausibly buy from them. If the seller's location or shipping region cannot be
-  determined AND there are weak non-US cues (spelling, phrasing, currency ambiguity), prefer
-  "Mention Tracking" over "Competitor Activity".
-
-  If ANY of the above are present → Set section_route to "Mention Tracking", processing_path to "Mention only".
-
-  DO NOT apply this filter based on:
-    - Account name or handle alone (handles don't reveal location)
-    - A single foreign word that is a plant name or scientific term
-    - A city name that is common in the US without other context (e.g. "Portland", "Norfolk" alone)
-
-  section_route:
-    Catalog Discovery    — US source, catalog match AND (question | problem | tip | claim | comparison | disagreement | purchase intent)
-    Competitor Activity  — US source, competitor/third-party AND (giveaway | sale | launch | showcase | collaboration | promotion)
-    Market Watch         — US source, not in catalog AND relevant audience interest or competitor feature
-    Mention Tracking     — catalog match BUT only showcase/sentiment/lifestyle with no audience issue; OR non-US source
-    Needs Catalog Review — catalog match uncertain
-    Noise                — unrelated to plants/market
-
-  A single post can produce ideas with different routes. Route each idea independently.
-  Competitor Activity and Market Watch can both apply to the same idea (store the idea once, link to both).
-
-E) Processing path (for Discovery pipeline)
-  processing_path:
-    Discovery eligible — catalog match + discovery-worthy content → creates/updates a cluster
-    Mention only       — catalog match + mention only → updates mention tracking only
-    Competitor routed  — goes to competitor_activity table, not Discovery
-    Market Watch       — goes to market_watch_plants table, not Discovery
-    Noise              — discard
-    Needs review       — hold for human
-
-Evidence types (for Discovery eligible): Question | Problem report | Tip | Claim | Personal experience | Disagreement | Follow-up request | Purchase intent | General mention
-
-Return ONLY valid JSON:
-{
-  "relevant": true,
-  "attribution": {
-    "source_account_handle": "@handle or null",
-    "source_account_name": "Display name or null",
-    "collaborator_accounts": ["@handle"],
-    "ownership_type": "Owned content | Competitor content | Community content | Customer content | Third-party media | Unknown",
-    "ownership_confidence": "High | Medium | Low"
-  },
-  "dates": {
-    "published_at": "ISO 8601 or null",
-    "published_at_estimated": false,
-    "observed_at": "${new Date().toISOString()}",
-    "event_dates_claimed": ["July 10", "July 11"],
-    "event_date_labels": ["Last day to enter", "Winner drawn live"],
-    "date_confidence": "High | Medium | Low"
-  },
-  "ideas": [
-    {
-      "section_route": "Catalog Discovery | Competitor Activity | Market Watch | Mention Tracking | Needs Catalog Review | Noise",
-      "processing_path": "Discovery eligible | Mention only | Competitor routed | Market Watch | Noise | Needs review",
-      "signal_purpose": "one value from the list above",
-      "discovery_reason": "why discovery-eligible or why not, or null",
-      "normalized_cluster_title": "reusable issue in audience language, no incidental location",
-      "core_issue": "the reusable question, problem, tip, or claim",
-      "relevant_conditions": ["conditions that materially affect the answer"],
-      "incidental_context": ["details kept as evidence only"],
-      "summary": "1-2 sentence description",
-      "plant": "plant or product name, or null",
-      "catalog_match_status": "Catalog match | Catalog family match | Not in catalog | Needs catalog review | No plant identified",
-      "matched_catalog_name": "matched SB product name or null",
-      "match_confidence": "High | Medium | Low | null",
-      "question": "exact question if present, or null",
-      "problems": ["problem or symptom"],
-      "tips": ["care tip or recommendation"],
-      "audience_wording": ["exact phrases from the audience, NOT from the source account's promotional copy"],
-      "source_marketing_wording": ["promotional language from the source account"],
-      "evidence_type": "single best-fit evidence type, or null",
-      "novelty_status": "Known recurring topic | New audience wording | New question about a known topic | New tip or claim | New contradiction | New plant connected to a known problem | Unclear",
-      "revenue_priority_match": "Yes | No | Needs check",
-      "relevant_conditions": ["conditions that materially affect the care answer"],
-      "location_materiality": "Material | Incidental | Unclear | Not provided",
-      "confidence": "High | Medium | Low"
-    }
-  ]
-}`;
+  return prompts.t("ai-analyze.buildExtractionPrompt.1", [signal.platform || "unknown", signal.source_url || "not provided", signal.raw_input || signal.caption_summary || signal.topic || "not provided", new Date().toISOString(), new Date().toISOString()]);
 }
 
 
@@ -2158,49 +1609,11 @@ Return ONLY valid JSON:
 function buildClusterMatchPrompt(extracted, existingClusters) {
   const clusterList = existingClusters.length
     ? existingClusters.map((c, i) =>
-        `[${i}] id:${c.id} | "${c.title}" | plant:${c.plant_or_product || "?"} | signals:${c.signal_count} | question:"${c.primary_question || "—"}" | wording:${(c.audience_wording || []).slice(0, 3).join(" / ")}`
+        prompts.t("ai-analyze.buildClusterMatchPrompt.1", [i, c.id, c.title, c.plant_or_product || "?", c.signal_count, c.primary_question || "—", (c.audience_wording || []).slice(0, 3).join(" / ")])
       ).join("\n")
     : "No existing clusters";
 
-  return `You are matching a new signal extraction to an existing discovery cluster for Succulents Box.
-
-NEW SIGNAL EXTRACTION:
-Title: ${extracted.normalized_cluster_title || extracted.cluster_title}
-Plant: ${extracted.plant || "unknown"}
-Core issue: ${extracted.core_issue || "none"}
-Question: ${extracted.question || "none"}
-Problems: ${(extracted.problems || []).join(", ") || "none"}
-Tips: ${(extracted.tips || []).join(", ") || "none"}
-Audience wording: ${(extracted.audience_wording || []).join(", ") || "none"}
-Evidence type: ${extracted.evidence_type || "unknown"}
-
-EXISTING CLUSTERS:
-${clusterList}
-
-MATCHING RULES — read carefully, two different cases:
-
-CASE A — PLANT-SPECIFIC ISSUE (ID, cultivar behavior, species-specific care):
-  Example: "Why does my Haworthia go red?", "Echeveria lilacina losing lower leaves"
-  → Require SAME plant genus/species to match. Different plant = different cluster.
-
-CASE B — GENERAL CARE ISSUE (applies broadly across plants, plant is incidental evidence):
-  Example: sunburn, overwatering, root rot, etiolation, propagation failure, pest damage
-  → Match by ISSUE TYPE, not by plant. If the care answer would be substantially the same regardless of plant, merge into one cluster.
-  → A new sunburn signal about Echeveria runyonii should match an existing "sunburn recovery" cluster even if the existing cluster mentions Echeveria lilacina.
-
-OTHER RULES:
-- Clearly different stages of the same problem should stay separate only if the audience question or care answer is meaningfully different (e.g. "how to prevent sunburn" vs "how to recover from sunburn" = two clusters).
-- If an existing cluster already covers the same issue with broader plant scope, prefer it over creating a new narrow cluster.
-- If no good match exists, declare "new".
-- Do NOT force a match if genuinely uncertain.
-
-Return ONLY valid JSON:
-{
-  "match_type": "existing" or "new",
-  "cluster_id": "UUID of best matching cluster, or null if new",
-  "match_reason": "one sentence explaining the match or why no match was found",
-  "is_duplicate": false
-}`;
+  return prompts.t("ai-analyze.buildClusterMatchPrompt.2", [extracted.normalized_cluster_title || extracted.cluster_title, extracted.plant || "unknown", extracted.core_issue || "none", extracted.question || "none", (extracted.problems || []).join(", ") || "none", (extracted.tips || []).join(", ") || "none", (extracted.audience_wording || []).join(", ") || "none", extracted.evidence_type || "unknown", clusterList]);
 }
 
 
@@ -2212,65 +1625,11 @@ function buildCandidatePrompt(cluster, sheetEntries, dbPublished, watchlistText)
     historyLines.push(`[${e.month} 2026] "${e.title}"${e.style ? " | " + e.style : ""}${e.note ? " | " + e.note : ""}`);
   });
   dbPublished.forEach(p => {
-    historyLines.push(`[Published ${p.publish_date || "?"}] "${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | Hook: ${p.hook_used || "—"} | Performance: ${p.performance_summary || "not recorded"} | Follow-up: ${p.audience_followup_questions || "none"}`);
+    historyLines.push(prompts.t("ai-analyze.buildCandidatePrompt.1", [p.publish_date || "?", p.video_title || p.topic, p.plant_or_product || "?", p.hook_used || "—", p.performance_summary || "not recorded", p.audience_followup_questions || "none"]));
   });
   const historyText = historyLines.length ? historyLines.join("\n") : "No content history available.";
 
-  return `You are preparing a Content Review candidate card for Succulents Box, a succulent plant subscription company.
-
-DISCOVERY CLUSTER:
-Title: ${cluster.title}
-Plant: ${cluster.plant_or_product || "unknown"}
-Primary question: ${cluster.primary_question || "none"}
-Problems: ${(cluster.problems_mentioned || []).join(", ") || "none"}
-Tips: ${(cluster.tips_mentioned || []).join(", ") || "none"}
-Audience wording: ${(cluster.audience_wording || []).slice(0, 8).join(", ") || "none"}
-Novelty: ${cluster.novelty_status || "Unclear"}
-Signal count: ${cluster.signal_count}
-Question count: ${cluster.question_count}
-Distinct sources: ${cluster.distinct_source_count}
-Platforms: ${(cluster.platforms || []).join(", ") || "unknown"}
-First seen: ${cluster.first_seen_at || "unknown"}
-Last seen: ${cluster.last_seen_at || "unknown"}
-
-HIGH-REVENUE PLANT WATCHLIST:
-${watchlistText}
-
-2026 PRODUCTION CONTENT HISTORY:
-${historyText}
-
-Analyze whether this cluster should become a content candidate and prepare the full review card.
-
-Repetition risk: Low | Medium | High | Block | Needs reviewer check
-Candidate status: Ready for review | Recommended follow-up | Needs research | Needs reviewer check | Hold for repetition | Already covered
-
-Return ONLY valid JSON:
-{
-  "title": "candidate title using audience language",
-  "what_people_are_saying": "2-3 sentence summary of what the audience is asking or saying",
-  "representative_wording": ["exact audience phrases, up to 5"],
-  "pattern_growth": "description of how this pattern has grown over time",
-  "evidence_urls": [],
-  "what_appears_new": "what is genuinely new about this pattern vs existing content, or null",
-  "claims_needing_verification": "any care claims that need fact-checking, or null",
-  "contradictory_advice": "if sources disagree, describe both positions, or null",
-  "closest_published_title": "title of most similar owned content, or null",
-  "closest_published_urls": [],
-  "closest_published_date": "YYYY-MM-DD or null",
-  "days_since_similar": null,
-  "previous_performance": "performance summary of closest content, or null",
-  "audience_followup_demand": "any follow-up question demand found, or null",
-  "repetition_risk": "Low | Medium | High | Block | Needs reviewer check",
-  "freshness_reason": "why this is or is not fresh — 1-2 sentences",
-  "same_topic": null,
-  "same_plant": null,
-  "same_question": null,
-  "same_advice": null,
-  "same_hook_or_angle": null,
-  "possible_directions": ["Answer the repeated question", "Verify the claim", "Compare conflicting advice"],
-  "ai_confidence": "High | Medium | Low",
-  "candidate_status": "Ready for review | Recommended follow-up | Needs research | Needs reviewer check | Hold for repetition | Already covered"
-}`;
+  return prompts.t("ai-analyze.buildCandidatePrompt.2", [cluster.title, cluster.plant_or_product || "unknown", cluster.primary_question || "none", (cluster.problems_mentioned || []).join(", ") || "none", (cluster.tips_mentioned || []).join(", ") || "none", (cluster.audience_wording || []).slice(0, 8).join(", ") || "none", cluster.novelty_status || "Unclear", cluster.signal_count, cluster.question_count, cluster.distinct_source_count, (cluster.platforms || []).join(", ") || "unknown", cluster.first_seen_at || "unknown", cluster.last_seen_at || "unknown", watchlistText, historyText]);
 }
 
 

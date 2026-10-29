@@ -30,8 +30,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 ALTER TABLE activity_log ENABLE ROW LEVEL SECURITY;
 
 -- All authenticated users can read the log
-CREATE POLICY "auth_read_log" ON activity_log
-  FOR SELECT USING (auth.uid() IS NOT NULL);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Triggers insert via SECURITY DEFINER — no direct user insert policy needed
 
@@ -40,18 +39,12 @@ CREATE POLICY "auth_read_log" ON activity_log
 -- Opportunities: assistant can approve/reject
 DROP POLICY IF EXISTS "reviewer_update_opportunities" ON opportunities;
 
-CREATE POLICY "reviewer_update_opportunities" ON opportunities
-  FOR UPDATE USING (
-    get_user_role() IN ('admin', 'owner', 'assistant')
-  );
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Briefs: assistant can approve/reject
 DROP POLICY IF EXISTS "reviewer_update_briefs" ON briefs;
 
-CREATE POLICY "reviewer_update_briefs" ON briefs
-  FOR UPDATE USING (
-    get_user_role() IN ('admin', 'owner', 'assistant')
-  );
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Scripts: only owner/admin can approve (unchanged — assistant cannot approve scripts)
 -- reviewer_update_scripts already set correctly in schema_v2_migration.sql

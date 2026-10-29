@@ -13,38 +13,40 @@
  * }
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole, CORS_HEADERS: headers } = require("./_auth");
+const prompts = require("../lib/prompts");
+const { PublicError, preflightOrMethod, errorResponse, baseHeaders, parseBody } = require("../lib/http");
+const { requireUser, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
+const claude = require("../lib/claude");
+const { clampDeep } = require("../lib/validate");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+const supabase = lazyService;
+const headers = baseHeaders();
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";  // Haiku: fast enough for 10s Netlify timeout
 const PROMPT_VERSION = "briefing-v1";
 
 exports.handler = async (event) => {
-
-  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
-  if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
-
-  const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
-  if (authError) return authError;
-
-  if (!CLAUDE_API_KEY) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "CLAUDE_API_KEY not set" }) };
+  let lockHolder = null;
+  try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    const caller = await requireUser(event, { roles: ROLES.WRITERS, bucket: "ai_batch" });
+    const body = parseBody(event, { maxBytes: 16 * 1024 });
+    const briefingType = ["daily", "weekly", "on-demand"].includes(body.briefing_type) ? body.briefing_type : "on-demand";
+    const filterState  = clampDeep(body.filter_state && typeof body.filter_state === "object" ? body.filter_state : {}, { maxString: 200 });
+    const generatedBy  = caller.userId; // from the verified session, never from the body
+    const set = await prompts.loadPromptSet(supabase);
+    lockHolder = await locks.acquire("ai_briefing", 5 * 60, "A briefing is already being generated. Wait for it to finish.");
+    return await prompts.runWithPrompts(set, () => generateBriefing({ briefingType, filterState, generatedBy }));
+  } catch (err) {
+    return errorResponse(err, "ai-briefing");
+  } finally {
+    if (lockHolder) await locks.release("ai_briefing", lockHolder);
   }
+};
 
-  let body = {};
-  try { if (event.body) body = JSON.parse(event.body); }
-  catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
-
-  const briefingType  = body.briefing_type || "on-demand";
-  const filterState   = body.filter_state  || {};
-  const generatedBy   = body.generated_by  || "auto";
-
+async function generateBriefing({ briefingType, filterState, generatedBy }) {
   try {
     // ── 1. DETERMINE TIME WINDOW ──────────────────────────────────────────────
     const now      = new Date();
@@ -707,10 +709,9 @@ exports.handler = async (event) => {
     };
 
   } catch (err) {
-    console.error("ai-briefing error:", err);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    throw err;
   }
-};
+}
 
 
 // ── Match learning memories to a cluster by topic/plant text ─────────────────
@@ -736,40 +737,24 @@ function buildSummaryPrompt(ctx) {
     learningBlock, topPerformanceNotes } = ctx;
 
   const performanceSection = topPerformanceNotes?.length
-    ? `\nPrior content performance on top topics:\n${topPerformanceNotes.join("\n")}`
+    ? prompts.t("ai-briefing.buildSummaryPrompt.1", [topPerformanceNotes.join("\n")])
     : "";
 
   const learningSection = learningBlock
-    ? `\nLessons from past published videos (use these to shape what you recommend — if we tried a topic/angle and it underperformed, say so; if something drove saves or follows, flag it as worth repeating):\n${learningBlock}`
+    ? prompts.t("ai-briefing.buildSummaryPrompt.2", [learningBlock])
     : "";
 
-  return `Write 2-3 sentences summarizing this social listening briefing for Succulents Box (succulent plant subscriptions). Highlight what's most actionable based on the data and any lessons below.
-
-Data: ${totalClusters} active discovery clusters, ${newSignalCount} new signals (${periodStart?.slice(0,10)} to ${periodEnd?.slice(0,10)}), ${changedCount} clusters updated.
-Top topics: ${topTopics.join(", ") || "none yet"}.
-Competitor activity: ${competitorCount} items. Market watch: ${marketWatchCount} plants.${performanceSection}${learningSection}
-
-Write only the 2-3 sentence summary. No intro, no lists, no JSON.`;
+  return prompts.t("ai-briefing.buildSummaryPrompt.3", [totalClusters, newSignalCount, periodStart?.slice(0,10), periodEnd?.slice(0,10), changedCount, topTopics.join(", ") || "none yet", competitorCount, marketWatchCount, performanceSection, learningSection]);
 }
 
 
 // ── CALL CLAUDE: PLAIN TEXT (no JSON parsing) ─────────────────────────────────
 async function callClaudeText(prompt, maxTokens = 150) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method:  "POST",
-    headers: {
-      "x-api-key":         CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type":      "application/json",
-    },
-    body: JSON.stringify({
-      model:      CLAUDE_MODEL,
-      max_tokens: maxTokens,
-      messages:   [{ role: "user", content: prompt }],
-    }),
+  const data = await claude.messages({
+    model:      CLAUDE_MODEL,
+    max_tokens: maxTokens,
+    messages:   [{ role: "user", content: prompt }],
   });
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
   return (data.content?.[0]?.text || "").trim();
 }
 
@@ -840,51 +825,7 @@ function buildTopicsPrompt(ctx) {
     clusterSummaries, totalClusters, newSignalCount, changedCount,
     competitorText, marketWatchText, publishedText, prevSummary, catalogText } = ctx;
 
-  return `You are generating Part 1 of an AI Discovery Briefing for Succulents Box (succulent plant subscriptions).
-Internal use only. Identify the strongest patterns from this data.
-
-BRIEFING TYPE: ${briefingType} | PERIOD: ${periodStart?.slice(0,10)} to ${periodEnd?.slice(0,10)}
-
-ACTIVE CLUSTERS (${totalClusters} total, top 40 shown):
-${clusterSummaries}
-
-RECENT ACTIVITY: ${newSignalCount} new signals | ${changedCount} clusters changed
-
-COMPETITOR ACTIVITY: ${competitorText}
-
-MARKET WATCH (non-catalog plants): ${marketWatchText}
-
-OWNED CONTENT (recent): ${publishedText}
-
-CATALOG PLANTS: ${catalogText}
-
-PREVIOUS BRIEFING: ${prevSummary}
-
-Rules: Only cite evidence from the data above. Link conclusions to cluster IDs. Do not invent demand.
-
-Pick the 3–5 strongest patterns by signal volume, question volume, source diversity, and growth.
-
-Return ONLY valid JSON — no markdown:
-{
-  "summary": "2-3 sentence plain-English briefing summary",
-  "signal_count": ${newSignalCount},
-  "cluster_count": ${totalClusters},
-  "clusters_changed": ${changedCount},
-  "prominent_topics": [
-    {
-      "theme": "plain-language topic name",
-      "cluster_ids": ["uuid"],
-      "signal_count": 0,
-      "source_count": 0,
-      "question_count": 0,
-      "catalog_plants": ["plant name"],
-      "platforms": ["Instagram"],
-      "change_from_prior": "new | growing | stable | declining | not in prior briefing",
-      "related_owned_content": "title or null",
-      "why_prominent": "1-2 sentences"
-    }
-  ]
-}`;
+  return prompts.t("ai-briefing.buildTopicsPrompt.1", [briefingType, periodStart?.slice(0,10), periodEnd?.slice(0,10), totalClusters, clusterSummaries, newSignalCount, changedCount, competitorText, marketWatchText, publishedText, catalogText, prevSummary, newSignalCount, totalClusters, changedCount]);
 }
 
 
@@ -894,101 +835,44 @@ function buildActionsPrompt(ctx, prominentTopics) {
 
   const topicsText = prominentTopics.length
     ? prominentTopics.map(t =>
-        `- "${t.theme}" (cluster_ids: ${(t.cluster_ids || []).join(", ")}): ${t.why_prominent}`
+        prompts.t("ai-briefing.buildActionsPrompt.1", [t.theme, (t.cluster_ids || []).join(", "), t.why_prominent])
       ).join("\n")
     : "None identified yet";
 
   // Compact cluster list for actions context (ID + title + status only)
   const compactClusters = clusterSummaries;
 
-  return `You are generating Part 2 of an AI Discovery Briefing for Succulents Box (succulent plant subscriptions).
-Part 1 already identified the prominent topics. Now flag what needs a reviewer decision and what should be cleaned up.
-
-PROMINENT TOPICS FROM PART 1:
-${topicsText}
-
-CLUSTERS (for reference — ID, title, signals, status):
-${compactClusters}
-
-Rules:
-- AI must NOT merge, dismiss, or approve anything automatically — only suggest.
-- Link every item to a specific cluster ID.
-- Preserve minority and contradictory signals.
-
-ATTENTION ITEMS: Up to 5 clusters needing a reviewer decision (prioritize high signal + no action taken).
-recommended_action values: "Move to Content Review" | "Needs research" | "Keep watching" | "Review owned-content match" | "Review catalog match" | "Send to Market Watch" | "Send to Competitor Activity" | "No action yet"
-
-CLEANUP SUGGESTIONS: Up to 5 clusters to dismiss, merge, reroute, or flag.
-suggestion_type values: "Dismiss" | "Reroute" | "Merge" | "Split" | "Keep watching" | "Needs research" | "Needs catalog review" | "Needs source review" | "Move to Content Review"
-
-Return ONLY valid JSON — no markdown:
-{
-  "attention_items": [
-    {
-      "reason": "short reason label",
-      "cluster_id": "uuid or null",
-      "title": "plain-language title",
-      "evidence_strength": "Strong | Moderate | Weak",
-      "ai_confidence": "High | Medium | Low",
-      "recommended_action": "one value from the list above",
-      "detail": "1-2 sentences of evidence"
-    }
-  ],
-  "cleanup_suggestions": [
-    {
-      "cluster_id": "uuid",
-      "cluster_title": "cluster title",
-      "suggestion_type": "one value from the list above",
-      "suggested_destination": "target section or null",
-      "suggested_match_cluster_id": "uuid to merge into or null",
-      "reason": "why this action is suggested",
-      "confidence": "High | Medium | Low",
-      "evidence_preview": "short excerpt supporting this suggestion"
-    }
-  ]
-}`;
+  return prompts.t("ai-briefing.buildActionsPrompt.2", [topicsText, compactClusters]);
 }
 
 
 // ── CALL CLAUDE ────────────────────────────────────────────────────────────────
 async function callClaude(prompt, maxTokens = 1024) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method:  "POST",
-    headers: {
-      "x-api-key":         CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type":      "application/json",
-    },
-    body: JSON.stringify({
-      model:      CLAUDE_MODEL,
-      max_tokens: maxTokens,
-      messages:   [{ role: "user", content: prompt }],
-    }),
+  const data = await claude.messages({
+    model:      CLAUDE_MODEL,
+    max_tokens: maxTokens,
+    messages:   [{ role: "user", content: prompt }],
   });
-
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
 
   const text = data.content?.[0]?.text || "";
   const stopReason = data.stop_reason || "unknown";
 
   // Log to Netlify function logs for debugging
   console.log("[callClaude] stop_reason:", stopReason, "| text_length:", text.length);
-  console.log("[callClaude] text_preview:", text.slice(0, 400));
 
   if (stopReason === "max_tokens") {
-    throw new Error(`Claude output truncated (hit max_tokens=${maxTokens}). Text so far: ${text.slice(0, 300)}`);
+    throw new PublicError(502, "The AI response was cut off. Try again.");
   }
 
   // Extract JSON — try markdown block first, then bare object
   const mdMatch  = text.match(/```json\n?([\s\S]*?)\n?```/);
   const rawMatch = text.match(/\{[\s\S]*\}/);
   const raw = mdMatch?.[1] || rawMatch?.[0];
-  if (!raw) throw new Error("No JSON found in Claude response. Raw: " + text.slice(0, 300));
+  if (!raw) throw new PublicError(502, "Could not read the AI response. Try again.");
 
   try {
     return JSON.parse(raw);
   } catch (e) {
-    throw new Error("Invalid JSON from Claude: " + e.message + " | Raw snippet: " + raw.slice(0, 300));
+    throw new PublicError(502, "Could not read the AI response. Try again.");
   }
 }

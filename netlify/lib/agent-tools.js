@@ -1,5 +1,5 @@
 /**
- * _agent-tools.js
+ * agent-tools.js
  *
  * Defines the allowlisted tools available to the SB Signal Flow Agent.
  *
@@ -13,8 +13,16 @@
  *             examples: ai-cleanup-batch, merge-clusters, log-published
  */
 
-const NETLIFY_URL    = process.env.URL || "https://sb-content-intelligence.netlify.app";
-const INTERNAL_SECRET = process.env.INTERNAL_SECRET;
+const { internalHeaders, siteUrl } = require("./auth");
+const { isUuid } = require("./validate");
+
+// Tool input comes from the model, which reads untrusted signal text: validate it.
+function cleanText(v, max) { return v == null ? null : String(v).slice(0, max); }
+function requireClusterId(id) {
+  if (!isUuid(id)) throw new Error("cluster_id must be a valid cluster id");
+  return id;
+}
+const CONFIDENCE = ["High", "Medium", "Low"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TOOL SCHEMAS — sent to Claude as the tools[] array in the messages API
@@ -270,7 +278,7 @@ async function check_signal_queue({ supabase }) {
 }
 
 async function get_unclustered_signals({ supabase }, { limit = 20 }) {
-  const safeLimit = Math.min(limit, 50);
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 50));
 
   const { data: linked } = await supabase
     .from("signal_cluster_links")
@@ -323,7 +331,8 @@ async function get_stuck_signals({ supabase }) {
 }
 
 async function get_cluster_health({ supabase }, { stale_days = 14, limit = 15 }) {
-  const safeLimit = Math.min(limit, 30);
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 15, 30));
+  stale_days = Math.max(1, Math.min(Number(stale_days) || 14, 365));
   const staleDate = new Date(Date.now() - stale_days * 86400_000).toISOString();
 
   const [staleResult, highCountResult, patternReadyResult] = await Promise.all([
@@ -363,7 +372,8 @@ async function get_cluster_health({ supabase }, { stale_days = 14, limit = 15 })
 }
 
 async function get_content_candidates({ supabase }, { status_filter, limit = 10 }) {
-  const safeLimit = Math.min(limit, 25);
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 25));
+  status_filter = status_filter ? String(status_filter).slice(0, 50) : null;
 
   let query = supabase
     .from("content_review_candidates")
@@ -380,16 +390,15 @@ async function get_content_candidates({ supabase }, { status_filter, limit = 10 
 
 // ── WRITE (non-destructive) ───────────────────────────────────────────────────
 
-async function process_signal_batch({ runId }) {
+async function process_signal_batch({ runId, promptVersion, signal }) {
   const resp = await fetch(
-    `${NETLIFY_URL}/.netlify/functions/batch-cluster`,
+    `${siteUrl()}/.netlify/functions/batch-cluster`,
     {
       method:  "POST",
-      headers: {
-        "Content-Type":      "application/json",
-        "x-internal-secret": INTERNAL_SECRET,
-      },
-      body: JSON.stringify({ agent_run_id: runId }),
+      headers: internalHeaders(),
+      body: JSON.stringify({ agent_run_id: runId, prompt_version: promptVersion }),
+      // bounded by the run deadline (and never longer than 20 s)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
     }
   );
   if (!resp.ok) {
@@ -404,16 +413,15 @@ async function process_signal_batch({ runId }) {
   };
 }
 
-async function run_maintenance_pass({ runId }) {
+async function run_maintenance_pass({ runId, signal }) {
   const resp = await fetch(
-    `${NETLIFY_URL}/.netlify/functions/maintenance-run`,
+    `${siteUrl()}/.netlify/functions/maintenance-run`,
     {
       method:  "POST",
-      headers: {
-        "Content-Type":      "application/json",
-        "x-internal-secret": INTERNAL_SECRET,
-      },
+      headers: internalHeaders(),
       body: JSON.stringify({ limit: 100, agent_run_id: runId }),
+      // bounded by the run deadline (and never longer than 20 s)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
     }
   );
   if (!resp.ok) {
@@ -431,17 +439,18 @@ async function suggest_review_move(
   { supabase },
   { cluster_id, cluster_title, reason, confidence, evidence_preview }
 ) {
+  requireClusterId(cluster_id);
   const { error } = await supabase.from("cluster_review_suggestions").insert({
     cluster_id,
     suggestion_type:       "Content Review",
-    reason:                `[Agent] ${reason}`,
-    confidence,
-    evidence_preview:      evidence_preview || null,
+    reason:                `[Agent] ${cleanText(reason, 1000)}`,
+    confidence:            CONFIDENCE.includes(confidence) ? confidence : "Low",
+    evidence_preview:      cleanText(evidence_preview, 1000),
     review_status:         "Pending",
     created_at:            new Date().toISOString(),
   });
   if (error) throw new Error("suggest_review_move insert failed: " + error.message);
-  return { queued: true, cluster_id, cluster_title, suggestion_type: "Content Review" };
+  return { queued: true, cluster_id, cluster_title: cleanText(cluster_title, 200), suggestion_type: "Content Review" };
 }
 
 async function suggest_cleanup(
@@ -454,16 +463,17 @@ async function suggest_cleanup(
     reroute:        "Reroute",
     needs_research: "Needs research",
   };
+  requireClusterId(cluster_id);
   const { error } = await supabase.from("cluster_review_suggestions").insert({
     cluster_id,
     suggestion_type:       typeMap[suggested_action] || "Reroute",
-    reason:                `[Agent cleanup] ${reason}`,
-    confidence,
+    reason:                `[Agent cleanup] ${cleanText(reason, 1000)}`,
+    confidence:            CONFIDENCE.includes(confidence) ? confidence : "Low",
     review_status:         "Pending",
     created_at:            new Date().toISOString(),
   });
   if (error) throw new Error("suggest_cleanup insert failed: " + error.message);
-  return { flagged: true, cluster_id, cluster_title, suggested_action };
+  return { flagged: true, cluster_id, cluster_title: cleanText(cluster_title, 200), suggested_action };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -485,7 +495,8 @@ const TOOL_IMPLEMENTATIONS = {
 /**
  * @param {string} toolName
  * @param {object} input      — Claude's tool input (already validated by schema)
- * @param {object} context    — { supabase, runId, performedBy }
+ * @param {object} context    — { supabase, runId, performedBy, promptVersion, signal }
+ *                               supabase is bound to the run deadline; signal aborts at it
  * @returns {Promise<object>} — tool result (will be JSON-stringified for Claude)
  */
 async function dispatchTool(toolName, input, context) {
@@ -500,6 +511,8 @@ async function dispatchTool(toolName, input, context) {
   if (!impl) {
     throw new Error(`Tool "${toolName}" has no implementation (this is a bug).`);
   }
+  // never start a tool once the run's deadline has passed
+  if (context && context.signal && context.signal.aborted) throw context.signal.reason;
   return impl(context, input || {});
 }
 

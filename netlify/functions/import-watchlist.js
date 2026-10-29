@@ -12,31 +12,25 @@
  * Body: { csv: "<raw csv string>" }
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole, CORS_HEADERS: headers } = require("./_auth");
+const { PublicError, preflightOrMethod, errorResponse, baseHeaders, parseBody } = require("../lib/http");
+const { requireUser, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = lazyService;
+const headers = baseHeaders();
 
 exports.handler = async (event) => {
+  try {
+  const early = preflightOrMethod(event, ["POST"]);
+  if (early) return early;
+  await requireUser(event, { roles: ROLES.WRITERS, bucket: "import" });
 
-  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
-  if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
-
-  const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
-  if (authError) return authError;
-
-  // Parse body
-  let body;
-  try { body = JSON.parse(event.body); }
-  catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
-
+  const body = parseBody(event, { maxBytes: 3 * 1024 * 1024, allowEmpty: false });
   const { csv, products } = body;
-  if (!csv) return { statusCode: 400, headers, body: JSON.stringify({ error: "csv field required" }) };
+  if (!csv || typeof csv !== "string") throw new PublicError(400, "csv field required");
+  if (csv.split("\n").length > 20000) throw new PublicError(400, "CSV has too many rows (max 20,000)");
   // products: { [tabName/genusName]: string[] } — optional, from XLSX genus tabs
-  const productsMap = products || {};
+  const productsMap = products && typeof products === "object" && !Array.isArray(products) ? products : {};
 
   // Parse CSV
   const rows = parseCSV(csv);
@@ -58,7 +52,8 @@ exports.handler = async (event) => {
     .upsert(plants, { onConflict: "plant_name", count: "exact" });
 
   if (upsertErr) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: upsertErr.message }) };
+    console.error("import-watchlist upsert failed:", upsertErr.code || "db error");
+    throw new PublicError(500, "Import failed. Nothing was changed; check the file format and try again.");
   }
 
   return {
@@ -66,6 +61,9 @@ exports.handler = async (event) => {
     headers,
     body: JSON.stringify({ success: true, upserted: plants.length, message: `${plants.length} plants imported` }),
   };
+  } catch (err) {
+    return errorResponse(err, "import-watchlist");
+  }
 };
 
 

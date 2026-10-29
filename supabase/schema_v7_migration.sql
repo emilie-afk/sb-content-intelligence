@@ -170,27 +170,21 @@ ALTER TABLE signal_cluster_links      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE content_review_candidates ENABLE ROW LEVEL SECURITY;
 
 -- Read: any authenticated user
-CREATE POLICY "auth read clusters"     ON discovery_clusters        FOR SELECT TO authenticated USING (true);
-CREATE POLICY "auth read links"        ON signal_cluster_links      FOR SELECT TO authenticated USING (true);
-CREATE POLICY "auth read candidates"   ON content_review_candidates FOR SELECT TO authenticated USING (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Write: admin or owner only
-CREATE POLICY "admin write clusters"   ON discovery_clusters        FOR ALL TO authenticated
-  USING (get_user_role() IN ('admin','owner'))
-  WITH CHECK (get_user_role() IN ('admin','owner'));
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "admin write links"      ON signal_cluster_links      FOR ALL TO authenticated
-  USING (get_user_role() IN ('admin','owner'))
-  WITH CHECK (get_user_role() IN ('admin','owner'));
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
-CREATE POLICY "admin write candidates" ON content_review_candidates FOR ALL TO authenticated
-  USING (get_user_role() IN ('admin','owner'))
-  WITH CHECK (get_user_role() IN ('admin','owner'));
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- Service role bypass (for Netlify functions)
-CREATE POLICY "service clusters"    ON discovery_clusters        FOR ALL TO service_role USING (true) WITH CHECK (true);
-CREATE POLICY "service links"       ON signal_cluster_links      FOR ALL TO service_role USING (true) WITH CHECK (true);
-CREATE POLICY "service candidates"  ON content_review_candidates FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
+-- [policy removed 2026-10-28: access rules live in migrations/20261028_ci_access_control.sql]
 
 -- ── UPDATED_AT TRIGGERS ───────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_updated_at()

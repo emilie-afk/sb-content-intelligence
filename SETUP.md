@@ -1,116 +1,97 @@
 # SB Content Intelligence — Setup Guide
 ## Social Listening + Script Production
 
----
-
-## ✅ DONE
-
-### Infrastructure
-- Supabase project created (`sb-social-listening`)
-- All schema migrations run: schema.sql → v2 → v3 → v4 → v5
-- Google OAuth configured, login working
-- Netlify deployed: https://sb-content-intelligence.netlify.app
-- GitHub repo connected (auto-deploy on push)
-- Env vars set in Netlify: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `CLAUDE_API_KEY`
-- Admin role set for Emilie
-
-### Google Sheet (script output + content history)
-- Sheet: https://docs.google.com/spreadsheets/d/1iDg61cxy6oSxb8vL2AkaivTnQJuTVJY5bKIbtNBLHAQ
-- Apps Script deployed as Version 2 (Jun 17, 2026)
-- Web app URL: `https://script.google.com/macros/s/AKfycbyaLjE54BUxcdbZWRkMjTz_j7rrO3PYJ9z-_UYoSN0rzvksTtlfZnfXQt5WrFcv7ch1/exec`
-- URL saved in dashboard settings (Scripts → ⚙ Calendar URL)
-- `doGet` reads all 12 monthly tabs for repetition checking
-- `doPost` writes approved scripts to the current month tab
-
-### Intake Sheet (assistant signal submission)
-- Sheet: https://docs.google.com/spreadsheets/d/1M_GUihNRFgODfQuwB6PnBrbP145Rr1fwjdtUKE6Ckd4
-- 6 columns: Raw input | Source URL | Platform | Source name | Status | Submitted at
-- Auto-submits to dashboard when Raw input is filled (no manual steps)
-- Script token: create one in dashboard → Settings → Submission Tokens (rotate any old token immediately)
-
-### Instagram Scraper
-- File: `SB content/sb_instagram_scraper.py` (outside sb-dashboard — not pushed to GitHub)
-- Configured with Netlify URL and submit token
-
-### Dashboard features live
-- Command Center, Inbox, Daily Board, Briefs, Scripts, Published, Learning, Sources, Brand Rules, Activity Log
-- **Plant Watchlist** — import revenue CSV by genus; auto-tiers (High/Medium/Watch); product names from individual genus tabs (collapsible)
-- **AI analysis** on signals (🤖), briefs (🤖 AI Review), scripts (🤖 AI Brand Check)
-- **Revenue priority badges** on signals and Daily Board cards
-- **Repetition check** (🔁 Rep. Check) on Daily Board — reads 2026 sheet history + Supabase published videos
-- **Content repetition guardrails** (Low/Medium/High/Block risk) with freshness reason
-- Script approval → auto-pushes to Google Sheet current month tab
-- **Discovery Board** — audience patterns clustered across signals; 5 sections (Most Mentioned, Most Asked, Emerging, New & Unfamiliar, Contradictions); reviewer actions: pin, keep watching, move to review, dismiss
-- **Content Review queue** — AI-prepared candidate cards with repetition risk, owned-channel history, possible directions; reviewer decision: Approve direction / Needs research / Hold / Already covered / Dismiss
-- **Auto-clustering** — every 🤖 signal analysis automatically clusters the signal and shows which cluster it joined
-
-### Netlify functions deployed
-- `submit-signal` — intake sheet + scraper submissions
-- `ai-analyze` — Claude Haiku analysis for signals, briefs, scripts, opportunities, **and cluster extraction/matching**
-- `import-watchlist` — CSV/XLSX upload → plant_watchlist table
-- `get-sheet-history` — fetches script sheet history from Apps Script for repetition checking (set URL in Supabase settings: key = `calendar_script_url`)
-
-### Instagram scraper
-- Rewritten with `instagrapi` (mimics mobile app — avoids Instagram API blocks)
-- Session saved to `sb_ig_session.json` for reuse
-- Runs daily at 8:00 AM via Windows Task Scheduler (`setup_schedule.bat`)
+This repository is **public**. It contains code only. Sheet locations, Apps Script
+deployment URLs, credentials, member lists, prompts, brand rules and the user manual
+live in private configuration (Netlify environment variables and protected Supabase
+tables). Security model, rollout and rollback: [docs/SECURITY-ROLLOUT.md](docs/SECURITY-ROLLOUT.md).
+Inventories and test results: [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md).
 
 ---
 
-## ⏳ STILL TO DO
+## Components
 
-### Run schema v7 migration (Discovery + Content Review)
+| Part | Where | Notes |
+|---|---|---|
+| Dashboard page | `public/index.html` (Netlify) | Signs in with Google through Supabase Auth |
+| Server functions | `netlify/functions/*` + shared `netlify/lib/*` | Every endpoint checks its caller first |
+| Database | Supabase project (shared with SB Keyword Intelligence) | Row-level security: approved members only |
+| Daily schedules | `.github/workflows/*` (GitHub Actions) | Use the `INTERNAL_SECRET` repository secret |
+| Script sheet export + history | `calendar-apps-script/Code.gs` (Apps Script web app) | Requires `SCRIPT_SECRET` |
+| Intake sheet / video tracker | `intake-sheet/*.gs` | Use a submission token in Script Properties |
+| Social Submission site, Instagram scraper | separate code (not in this repo) | Call `submit-signal` with a submission token |
 
-Required before the Discovery Board and Content Review queue will work:
+## Access and roles
 
-1. Supabase → SQL Editor → New Query
-2. Open `supabase/schema_v7_migration.sql` → Copy all → Paste → Run
-3. Creates: `discovery_clusters`, `signal_cluster_links`, `content_review_candidates`
-4. Adds RLS policies, indexes, and updated_at triggers
-
-Also run `schema_v6_migration.sql` if not already done (adds `top_products` to plant_watchlist).
-
----
-
-### Import the plant watchlist
-
-1. Download your Revenue by genus file (CSV or XLSX)
-2. Dashboard → **Plant Watchlist** → click **📂 Choose file** → select your file
-3. If XLSX: the importer auto-finds the "Revenue by genus" tab
-4. Click **Import**
-5. Plants populate with tiers: High ≥ $5,000 / Medium ≥ $1,000 / Watch < $1,000
-
-After this, AI analysis on signals and Daily Board cards shows revenue priority badges automatically.
-
----
-
-## Roles
-
-Set roles in Supabase → Table Editor → users_profile:
+Signing in is not enough: an owner must **approve** each account. New Google sign-ins
+appear as *pending* and see a "Waiting for approval" screen.
 
 | Role | Can do |
 |---|---|
-| `owner` / `admin` | Approve/reject everything including final scripts |
-| `assistant` | Approve/reject opportunities and briefs; cannot approve scripts |
+| `owner` / `admin` | Everything, including approving final scripts and learning rules, deleting, brand rules, plant watchlist, prompt versions, sheet link |
+| `assistant` | Intake, clustering review, briefs, script drafts, publishing log; cannot approve scripts or learning rules, delete, or change brand rules |
 | `viewer` | Read-only |
 
----
+Membership is managed by the owner in the Supabase SQL editor (never through the app):
+
+```sql
+select * from ci_private.list_members();                       -- who is pending / approved
+select ci_private.approve_member('<EMAIL>', 'assistant');      -- approve with a role
+select ci_private.revoke_member('<EMAIL>');                    -- remove access (next request)
+```
+
+## Environment variables (Netlify → Site configuration → Environment variables)
+
+| Name | Scope | Purpose |
+|---|---|---|
+| `SUPABASE_URL` | Functions | `https://<project-ref>.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Functions | server-only key — never a browser variable |
+| `CLAUDE_API_KEY` | Functions | AI calls |
+| `INTERNAL_SECRET` | Functions | scheduler credential (same value as the GitHub Actions secret) |
+| `INTERNAL_FUNCTION_SECRET` | Functions | function-to-function calls only; never shared outside Netlify |
+| `METRICS_INGEST_SECRET` | Functions | the scheduled metrics task that calls `update-sheet-metrics` |
+| `CALENDAR_SCRIPT_SECRET` | Functions | equals `SCRIPT_SECRET` in the Apps Script project |
+| `GOOGLE_VIDEO_TRACKER_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON` | Functions | Video Tracker sheet (Sheets API) |
+
+All secrets: 32+ random characters, all different from each other (the functions refuse
+service calls when two scoped secrets share a value). Generate with
+`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+
+## Fresh database install
+
+Run `supabase/schema.sql`, the `schema_v*` and other files in `supabase/` (order: see
+`tests/db/load_baseline.sh`), then **always last** `supabase/migrations/20261028_ci_access_control.sql`.
+Until that migration runs, tables have row-level security with no policies (closed).
+
+## Private configuration (SQL editor, values are placeholders)
+
+```sql
+-- Apps Script web app used for export + repetition history
+insert into ci_integration_config (key, value) values ('script_apps_script', '{"url":"<APPS_SCRIPT_EXEC_URL>"}')
+  on conflict (key) do update set value = excluded.value, updated_at = now();
+-- "Open sheet" link and monthly tab ids (approved members receive these links)
+insert into ci_integration_config (key, value) values
+  ('script_sheet', '{"base_url":{"<YEAR>":"https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit"},"gids":{"<YEAR>":{"1":<GID_JAN>}}}')
+  on conflict (key) do update set value = excluded.value, updated_at = now();
+-- submission token for an integration: the raw value is shown ONCE — paste it into that
+-- integration's settings, never into a file
+select ci_private.create_submission_token('<label>', 'submit_signal');
+```
 
 ## For a new year
 
-When the new year's script Google Sheet is ready:
-1. Open the new sheet → Extensions → Apps Script → paste `Code.gs` → deploy as Web App
-2. Copy the new web app URL
-3. Dashboard → Scripts → ⚙ Calendar URL → update the URL → Save
-
----
+1. Open the new script sheet → Extensions → Apps Script → paste `calendar-apps-script/Code.gs`.
+2. Project Settings → Script Properties → `SCRIPT_SECRET` = the `CALENDAR_SCRIPT_SECRET` value.
+3. Deploy → New deployment → Web app (Execute as: Me, Who has access: Anyone).
+4. Update `script_apps_script` and `script_sheet` with the SQL above (an owner/admin can also
+   change the sheet link from Scripts → ⚙ in the dashboard).
 
 ## Troubleshooting
 
-- **Login not working**: Check Supabase → Authentication → Providers → Google is on and redirect URI matches
-- **SQL errors on migration**: Run schemas in order — schema.sql first, then v2, then seed, then v3, then v4, then v5
-- **Repetition check fails**: Make sure the Apps Script URL is set in Supabase → Settings table, key = `calendar_script_url`, value = `{ "url": "https://script.google.com/macros/s/.../exec" }`. Also confirm `CALENDAR_SCRIPT_SECRET` matches `SCRIPT_SECRET` in Apps Script properties.
-- **Plant watchlist not showing**: Run schema_v4_migration.sql first, then re-import the CSV/XLSX file
-- **Discovery Board empty**: Run schema_v7_migration.sql. Clusters populate as you analyze signals with 🤖
-- **Content Review empty**: Clusters need to hit a qualification threshold first (3+ questions, 2+ sources, etc.)
-- **Auto-clustering fails silently**: Check Netlify Function logs for `ai-analyze` — verify `CLAUDE_API_KEY` is set
+- **"Waiting for approval"** — the owner has not approved the account yet (see Access).
+- **"Prompt configuration is missing"** — no active prompt version; see docs/SECURITY-ROLLOUT.md (prompts).
+- **Repetition check shows no sheet history** — check `CALENDAR_SCRIPT_SECRET` equals the Apps Script
+  `SCRIPT_SECRET`, and the `script_apps_script` row.
+- **Intake rows show "❌ Invalid or inactive token"** — the integration's token was revoked or mistyped.
+- **Daily workflow fails with 401** — `INTERNAL_SECRET` differs between GitHub and Netlify.
+- **Plant watchlist import** — Dashboard → Plant Watchlist → choose the revenue-by-genus CSV/XLSX → Import.
