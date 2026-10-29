@@ -80,6 +80,11 @@ ownership from display names or GitHub usernames.
    (from `app_settings`). If either is missing, insert it as in SETUP.md.
 5. Re-run `rollout-inventory.sql` ("after"): no non-`ci_` policies on app tables, anon has no
    privileges, views closed, row counts unchanged (settings/app_settings −1 each if moved).
+6. **Then** run `supabase/migrations/20261029_signals_client_submission_id.sql` (separate,
+   additive, safe to run twice): nullable `signals.client_submission_id`, UNIQUE constraint
+   `signals_client_submission_id_key`, UUID format check, and a trigger so browser users can't
+   set or change it. Must run **before** step 7 deploys the `submit-signal` that accepts it.
+   Check: `select count(*) from signals where client_submission_id is not null;` → 0.
 
 ### 6. Rotate submission tokens (approval required: revokes integrations)
 ```sql
@@ -118,6 +123,8 @@ Deploy → Manage deployments → ✏️ → Version: **New version** → Deploy
   click 📊 again → "already exported", no second row; Published, Learning, Brand Rules,
   Watchlist, Activity Log, Help.
 - Intake sheet row → appears in Inbox; Social Submission test → appears; scraper run → counts.
+- Social Submission: re-sending the same test entry (Retry, same submission id) → response
+  `already_received: 1`, still one signal; the signal row has `client_submission_id` set.
 - GitHub → Actions → run each workflow manually (workflow_dispatch): HTTP 200.
 - The metrics task: update it to send `x-internal-secret: <METRICS_INGEST_SECRET>`; one run.
 
@@ -141,6 +148,9 @@ Re-enable the GitHub workflows, end the window. Optional clean-up afterwards: de
   `SCRIPT_SECRET` set, the old version still checks the secret; history will be empty, export works.
 - **Bad prompt version:** `select ci_activate_prompt_version(<PREVIOUS_ID>);` (versions are immutable).
 - **Owner locked out:** `select ci_private.bootstrap_owner('<OWNER_EMAIL>');`
+- **client_submission_id change:** the column, constraint and trigger are additive; to undo the
+  code, redeploy the previous `submit-signal` and leave them in place (unset
+  `DASHBOARD_IDEMPOTENT` on Social Submission first). Rows without an id are unaffected either way.
 - **Token problem:** create a new token and update the integration; old tokens can be
   re-enabled (`update submission_tokens set active = true where id = '<ID>'`) only if they
   were never exposed.
@@ -149,7 +159,7 @@ Re-enable the GitHub workflows, end the window. Optional clean-up afterwards: de
 
 | App | Change | When |
 |---|---|---|
-| Social Submission site (`Intake/netlify-site`) | new `SUBMIT_TOKEN` env value; no code change (`is_manual` still honoured) | step 6 |
+| Social Submission site (`emilie-afk/sb-social-submission`, branch `security-hardening`) | **code and config change** (its own rollout: sessions, protected endpoints, idempotent saves). It sends `client_submission_id` (+ `Idempotency-Key`) on every signal; this app stores and deduplicates it after step 5.6. New `SUBMIT_TOKEN` value at step 6. Set `DASHBOARD_IDEMPOTENT=true` there **only after** steps 5.6 and 7 are live and verified | steps 5.6, 6, 7, then 9 |
 | Instagram scraper / `submit_csv.py` | new token (the CSV script has a token in its source — move it to an env var or delete the script) | step 6 |
 | Intake sheet / video tracker Apps Scripts | new `SUBMIT_TOKEN` Script Property (code comments updated; no logic change) | step 6 |
 | Metrics task calling `update-sheet-metrics` | send `METRICS_INGEST_SECRET` instead of `INTERNAL_SECRET` | step 9 |

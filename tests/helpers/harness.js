@@ -50,7 +50,7 @@ function setEnv(extra = {}) {
 }
 
 /** Fresh fake DB + fresh module instances for one test. */
-function setup({ env = {}, withPrompts = true, tables = {}, maintenance = false } = {}) {
+function setup({ env = {}, withPrompts = true, tables = {}, maintenance = false, constraints, hooks } = {}) {
   setEnv(env);
   for (const k of Object.keys(require.cache)) if (k.includes("/netlify/")) delete require.cache[k];
   const sessions = {}, profiles = {};
@@ -60,7 +60,7 @@ function setup({ env = {}, withPrompts = true, tables = {}, maintenance = false 
   }
   const hash = (t) => crypto.createHash("sha256").update(t).digest("hex");
   const fake = createFake({
-    sessions, profiles, maintenance,
+    sessions, profiles, maintenance, constraints, hooks,
     promptSet: withPrompts ? allTemplates() : null,
     tables: {
       submission_tokens: [
