@@ -55,7 +55,7 @@ before that (proven by the matrix test: 24 endpoint variants × 17 caller types)
 | `log-published` | Dashboard | writers | `sheet`; lock per URL | URL/date/ids validated; sheet + DB row created once |
 | `maintenance-run` | Dashboard, agent | writers, internal, scheduler | `admin`; lock | limit 1–200 |
 | `merge-clusters` | Dashboard | writers | `ai`; lock per pair | UUIDs; prompts loaded before any change |
-| `run-agent` | GitHub schedule, dashboard | writers, scheduler, internal | `ai_batch`; one run at a time; ≤20 tools, ≤4 batches, 8.5 s budget enforced in code | run type from credential, not body; tool input validated |
+| `run-agent` | GitHub schedule, dashboard | writers, scheduler, internal | `ai_batch`; one run at a time; ≤20 tools, ≤4 batches; one absolute 8.5 s run deadline cancels model, internal HTTP and DB calls; ≤1.2 s bounded finalisation | run type from credential, not body; tool input validated |
 | `scheduled-agent` | optional trigger | scheduler | → run-agent lock | — |
 | `scheduled-batch-cluster-background` | optional trigger | scheduler | loop lock | — |
 | `sync-video-metrics` | GitHub schedule, dashboard | owner, admin, scheduler | `sheet`; lock | — |
@@ -131,19 +131,20 @@ PostgreSQL 16.15, Chromium (Playwright). Branch HEAD is given in the hand-off no
 
 | Suite | Result |
 |---|---|
-| `npm test` — runtime, unit, endpoint matrix, behaviour, Apps Script (incl. failure injection), exposure | 71/71 passed |
+| `npm test` — runtime, unit, endpoint matrix, behaviour, Apps Script (incl. failure injection), exposure | 81/81 passed (includes 10 real-timer deadline tests, ≈40 s) |
 | Runtime (R1): real, uninjected `serviceClient()` initialises; every function module loads; NODE_VERSION / package engines / every locked package's `engines.node` agree | passed on Node 22. On Node 18 the runtime test fails and `serviceClient()` refuses with 503 "Server runtime is misconfigured" (logged reason) instead of crashing; Supabase JS 2.118 itself cannot initialise on Node 18 or 20 (reproduced) |
 | Prompt equivalence (old inline prompts vs private templates, rich + empty inputs, incl. model calls in generate-learning) | byte-identical |
 | `tests/db/run.sh` — PostgreSQL 16 with a Supabase stand-in (roles anon / authenticated / service_role, `request.jwt.claims`): baseline finding reproduced → migration applied twice → RLS tests as anon, pending (with forged admin claims), revoked, viewer, assistant, admin, owner; revocation; maintenance; service RPCs; tokens; views; config move; **R3** approval provenance (Approved→Archived while clearing metadata, clearing after archiving, Approved→Used→Archived, legacy rows without timestamps, forged metadata on insert, admin still allowed); legacy backfill; **R5** two concurrent sessions inserting the same snapshot key | passed; fresh install from the repository's SQL + migration also passed |
 | `node tests/browser/check.js` — Chromium, real page + real handlers + deployed CSP: signed-out, pending, assistant (intake, dismiss, delete refused, Discovery, Content Review, generation, approval refused, brand rules refused, help/history), admin (approve + export, re-send, delete), **R2** stored-XSS payloads in cluster title / wording / problems / tips / platforms / summary / note / audit log, signal fields + `javascript:` URL, help manual; Delete and Merge buttons clicked | 24/24 passed (the same XSS check fails on the pre-change page: 7 injected elements, script executed) |
 | Apps Script failure injection (**R4**): failure at the ledger reservation, each flush, each of the 9 content cells, the completion mark, then retry; retry across a month change; another export after an interrupted one | exactly one complete row each time (16 cases) |
-| Agent caps (**R6**): one response with 25 tool calls; a model that never stops; 6 batch calls; 3 s per model call | ≤20 tools, ≤4 batches, stops at the 8.5 s budget with status `timeout`, at most one tool-free summary call |
+| Agent caps (**R6**): one response with 25 tool calls; a model that never stops; 6 batch calls; 3 s per model call (fake clock) | ≤20 tools, ≤4 batches, status `timeout` once the budget is used, at most one tool-free summary call |
+| Agent deadline (**R6 follow-up**, `tests/unit/deadline.test.js`, real timers + AbortSignals, no fake clock): slow first model call (8.5 s budget); slow later model call; the reviewer's 11 s `process_signal_batch` response (8.5 s budget); slow `run_maintenance_pass`; slow DB read tool; slow DB write tool; provider failure before the deadline; slow run-log update + lock release; no model call with < 1.5 s left; real supabase-js client aborted through `boundClient` | the in-flight request's signal is aborted at the deadline; nothing is dispatched afterwards; `status: "timeout"`, `limit: "time"`, deterministic summary, run log `timeout` / "stopped at time limit"; the cancelled DB write never lands later; provider failure stays `failed`; lock released; with a hanging run-log update and lock release the handler still returns within budget + 1.2 s, the lock expires after ≤ 2 min and the next run marks the abandoned row `timeout`. Measured: 11 s batch case returns at ≈ 8.5 s (was 11.0 s) |
 | `npm run check` (syntax of all functions/libs/scripts); `npm ci --ignore-scripts` from the lockfile | passed |
 
 There is no build step (Netlify publishes `public/` and bundles functions); "production
 build" = syntax checks + all function modules load on the configured runtime.
 
-### Second independent review (R1–R6) — all fixed
+### Second independent review (R1–R6) — all fixed (R6 completed in the recheck follow-up)
 
 | # | Issue | Fix |
 |---|---|---|
@@ -152,7 +153,8 @@ build" = syntax checks + all function modules load on the configured runtime.
 | R3 | Assistants could clear approval metadata and then rewrite an approved script | `approved_at` / `approved_by` / `ever_approved` / `content_locked` are database-controlled in every state; `content_locked` is irreversible once a script is Approved, Used in production or Measured (whoever changes it); legacy rows backfilled |
 | R4 | Apps Script partial failure → duplicate row on retry | row reserved (ledger + flush) before content; retries refill the same reserved row; completion marked last |
 | R5 | Concurrent identical snapshots both inserted | idempotency key + unique index, single `INSERT … ON CONFLICT DO NOTHING` |
-| R6 | Agent tool/time caps relied on the model | caps checked before every model call and every tool dispatch; remaining time passed to each model call; one bounded tool-free summary or a deterministic one; limit recorded in the run log |
+| R6 | Agent tool/time caps relied on the model | caps checked before every model call and every tool dispatch; one bounded tool-free summary or a deterministic one; limit recorded in the run log |
+| R6 recheck | A slow tool ran 11 s past the 8.5 s budget; a model deadline expiry was recorded as `failed` | `netlify/lib/deadline.js`: one absolute deadline created at request start; its AbortSignal goes to every model call (no 1 s floor — no call starts with < 1.5 s left, no tool with < 0.25 s), to the internal batch/maintenance HTTP calls (with their 20 s cap) and, through `boundClient(signal)`, to every database query of the run (tools, action log, run log). Deadline aborts are classified as `timeout`; provider errors before the deadline stay `failed`. Action logs that can't be written before the deadline are queued. Finalisation (queued logs, run outcome, lock release) shares one 1.2 s budget, so the handler returns within ≈ 9.7 s. Recovery if the platform still kills it: lock TTL 2 min; the next run marks `running` rows older than 2 min as `timeout`. Limit: cancelling a request can't undo work `batch-cluster` / `maintenance-run` already accepted — their claims, locks and idempotency keys still apply |
 
 ## 6. Production-only checks (unverified until done)
 

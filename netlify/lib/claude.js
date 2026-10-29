@@ -25,21 +25,25 @@ function apiKey() {
  * @param {{timeoutMs?:number}} opts
  * @returns {Promise<object>} parsed API response
  */
-async function messages(body, { timeoutMs = 3 * 60 * 1000 } = {}) {
+async function messages(body, { timeoutMs = 3 * 60 * 1000, signal } = {}) {
   const key = apiKey();
   const system = body.system ? `${body.system}\n\n${UNTRUSTED_GUARD}` : UNTRUSTED_GUARD;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
   let resp, data;
   try {
+    if (signal && signal.aborted) throw signal.reason;
     resp = await fetch(API_URL, {
       method: "POST",
-      signal: controller.signal,
+      signal: combined,
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       body: JSON.stringify({ ...body, system }),
     });
     data = await resp.json().catch(() => null);
   } catch (e) {
+    // A caller's deadline is reported as such (not as a provider failure).
+    if (signal && signal.aborted && signal.reason && signal.reason.isDeadline) throw signal.reason;
     console.error("[claude] request failed:", e && e.name === "AbortError" ? "timeout" : "network error");
     throw new PublicError(502, "The AI service did not respond. Try again shortly.");
   } finally {

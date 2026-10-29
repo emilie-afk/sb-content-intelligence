@@ -38,8 +38,27 @@ const lazyService = new Proxy({}, {
   },
 });
 
+/**
+ * A client whose every request is cancelled when `signal` aborts (used to bound all
+ * database work of a run by its deadline). Not cached.
+ */
+function boundClient(signal) {
+  serviceClient(); // same configuration / runtime checks
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (factoryIsCustom) return factory(url, key, { signal });
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      fetch: (input, init = {}) =>
+        fetch(input, { ...init, signal: init.signal ? AbortSignal.any([init.signal, signal]) : signal }),
+    },
+  });
+}
+
 /** Tests only: inject a fake client factory. */
-function __setFactory(f) { factory = f; cached = null; }
+let factoryIsCustom = false;
+function __setFactory(f) { factory = f; factoryIsCustom = true; cached = null; }
 function __reset() { cached = null; }
 
-module.exports = { serviceClient, lazyService, __setFactory, __reset, MIN_NODE_MAJOR };
+module.exports = { serviceClient, boundClient, lazyService, __setFactory, __reset, MIN_NODE_MAJOR };
