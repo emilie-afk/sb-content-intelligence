@@ -60,7 +60,8 @@ service calls when two scoped secrets share a value). Generate with
 ## Fresh database install
 
 Run `supabase/schema.sql`, the `schema_v*` and other files in `supabase/` (order: see
-`tests/db/load_baseline.sh`), then **always last** `supabase/migrations/20261028_ci_access_control.sql`.
+`tests/db/load_baseline.sh`), then `supabase/migrations/20261028_ci_access_control.sql`, then
+`supabase/migrations/20261029_signals_client_submission_id.sql` (in that order).
 Until that migration runs, tables have row-level security with no policies (closed).
 
 ## Private configuration (SQL editor, values are placeholders)
