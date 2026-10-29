@@ -214,3 +214,28 @@ test("boundClient: the real supabase-js client aborts its HTTP request when the 
     assert.ok(res.error, "supabase-js reports the cancelled request as an error");
   } finally { global.fetch = real; }
 });
+
+test("deadline expiry is always 'timeout': one timer only, and any abort error after the deadline is classified as such", async () => {
+  for (let i = 0; i < 5; i++) {
+    // (a) the request signal is aborted by the run deadline itself (no competing per-call timer)
+    let fake = setup({ env: { AGENT_RUNTIME_MS: "1600" } });
+    let reason = null;
+    let f = stubFetch({ claude: (_b, opts) => slow(60_000, opts.signal, null).catch(e => { reason = opts.signal.reason; throw e; }) });
+    try {
+      const { r } = await runTimed();
+      assert.strictEqual(r.body.status, "timeout", `iteration ${i}: ${r.raw}`);
+      assert.strictEqual(r.body.limit, "time");
+      assert.ok(reason && reason.isDeadline, "aborted by the run deadline, not by another timer");
+      assert.strictEqual(fake.state.tables.agent_run_log.at(-1).status, "timeout");
+    } finally { f.restore(); }
+
+    // (b) worst case: the provider layer fails with a generic AbortError at the deadline
+    fake = setup({ env: { AGENT_RUNTIME_MS: "1600" } });
+    f = stubFetch({ claude: (_b, opts) => slow(60_000, opts.signal, null).catch(() => { throw new DOMException("aborted", "AbortError"); }) });
+    try {
+      const { r } = await runTimed();
+      assert.strictEqual(r.body.status, "timeout", `iteration ${i}: ${r.raw}`);
+      assert.ok(!r.body.error);
+    } finally { f.restore(); }
+  }
+});
