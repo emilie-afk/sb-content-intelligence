@@ -18,6 +18,16 @@ $Q -f "$ROOT/supabase/migrations/20261028_ci_access_control.sql" 2>&1 | grep -i 
 $Q -f "$ROOT/supabase/migrations/20261028_ci_access_control.sql" >/dev/null 2>&1
 $Q -Atc "select case when (select bool_and(content_locked and ever_approved) from script_outputs where id::text like '2000000f-%') then 'legacy approval backfill: ok' else 'FAIL legacy backfill' end"
 $Q -o /dev/null -f "$ROOT/tests/db/rls_test.sql"
+# Social Submission companion: client_submission_id migration (twice = idempotent) + checks
+$Q -f "$ROOT/supabase/migrations/20261029_signals_client_submission_id.sql" >/dev/null
+$Q -f "$ROOT/supabase/migrations/20261029_signals_client_submission_id.sql" >/dev/null
+$Q -o /dev/null -f "$ROOT/tests/db/client_id_test.sql"
+# two concurrent inserts of the same id with different content keys -> exactly one row
+CID="7d5f6f32-5e6f-4071-8233-4e5f60718293"
+psql -X -q -d "$DB" -c "begin; insert into signals (topic, status, submission_key, client_submission_id) values ('race a','New','k-race-a','$CID') on conflict (submission_key) do nothing; select pg_sleep(1); commit;" >/dev/null &
+sleep 0.2; LOSER=$(psql -X -q -d "$DB" -c "insert into signals (topic, status, submission_key, client_submission_id) values ('race b','New','k-race-b','$CID') on conflict (submission_key) do nothing" 2>&1 >/dev/null || true); wait
+case "$LOSER" in *signals_client_submission_id_key*) echo "concurrent loser got the id unique violation: ok";; *) echo "FAIL concurrent loser: $LOSER"; exit 1;; esac
+$Q -Atc "select case when count(*) = 1 then 'concurrent client id insert: ok' else 'FAIL concurrent client id duplicates' end from signals where client_submission_id = '$CID'"
 # R5: two concurrent sessions inserting the same snapshot key -> one row
 VID=$($Q -Atc "insert into published_videos (video_url) values ('https://example.test/v/concurrent') returning id")
 INS="insert into performance_snapshots (published_video_id, snapshot_type, views, idempotency_key) values ('$VID', '24h', 1, 'k-concurrent') on conflict (idempotency_key) do nothing"
@@ -33,3 +43,5 @@ FRESH="${DB}_fresh"
 BASELINE_DIR=supabase "$ROOT/tests/db/load_baseline.sh" "$FRESH" >/dev/null 2>&1
 psql -X -q -v ON_ERROR_STOP=1 -d "$FRESH" -f "$ROOT/supabase/migrations/20261028_ci_access_control.sql" >/dev/null 2>&1
 psql -X -q -v ON_ERROR_STOP=1 -d "$FRESH" -o /dev/null -f "$ROOT/tests/db/rls_test.sql" && echo "fresh install: RLS TESTS PASSED"
+psql -X -q -v ON_ERROR_STOP=1 -d "$FRESH" -f "$ROOT/supabase/migrations/20261029_signals_client_submission_id.sql" >/dev/null
+psql -X -q -v ON_ERROR_STOP=1 -d "$FRESH" -o /dev/null -f "$ROOT/tests/db/client_id_test.sql" && echo "fresh install: CLIENT ID TESTS PASSED"
