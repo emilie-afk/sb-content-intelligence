@@ -54,6 +54,8 @@ ownership from display names or GitHub usernames.
    select status, count(*) from signals where status in ('New','Clustering') group by 1;
    select id, status, started_at from agent_run_log where status = 'running';
    ```
+   An agent run finishes within 10 s; a `running` row older than 2 minutes was cut off by the
+   platform and is marked `timeout` by the next run (its lock expires after 2 minutes).
    Background clustering finishes within 15 minutes; anything still `Clustering` later is
    returned to `New` automatically by the next batch run (nothing is lost).
 

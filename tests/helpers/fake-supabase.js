@@ -6,12 +6,36 @@
  */
 const crypto = require("crypto");
 
-function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = null, maintenance = false } = {}) {
+// Waits `ms` with a real timer; rejects as soon as `signal` aborts (like a cancelled fetch).
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(signal.reason);
+    const t = setTimeout(() => { if (signal) signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    function onAbort() { clearTimeout(t); reject(signal.reason); }
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * state.delays: { <table>: ms, "rpc:<name>": ms } — latency injected with real timers.
+ * A client created with a signal (boundClient) cancels delayed operations when the signal
+ * aborts: the write is NOT applied and { error } is returned, as supabase-js does when its
+ * fetch is aborted. Cancelled operations are recorded in state.aborted.
+ */
+function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = null, maintenance = false, delays = {} } = {}) {
   const state = {
-    sessions, profiles, maintenance,
+    sessions, profiles, maintenance, delays,
     tables: JSON.parse(JSON.stringify(tables)),
-    usage: new Map(), locks: new Map(), calls: [],
+    usage: new Map(), locks: new Map(), calls: [], aborted: [],
   };
+  const ABORTED = { data: null, error: { message: "AbortError: the operation was aborted" } };
+  async function delayed(keys, signal, exec, label) {
+    const ms = [].concat(keys).map(k => state.delays[k]).find(Boolean);
+    if (signal && signal.aborted) { state.aborted.push(label); return ABORTED; }
+    if (!ms) return exec();
+    try { await sleep(ms, signal); } catch (_) { state.aborted.push(label); return ABORTED; }
+    return exec();
+  }
   for (const t of ["signals", "script_outputs", "briefs", "published_videos", "performance_snapshots", "submission_tokens",
                    "ci_prompt_versions", "ci_integration_config", "activity_log", "plant_watchlist", "brand_content_rules",
                    "settings", "learning_memory", "discovery_clusters", "opportunities", "agent_run_log", "agent_action_log",
@@ -93,7 +117,7 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
     },
   };
 
-  function builder(table) {
+  function builder(table, signal) {
     state.tables[table] = state.tables[table] || [];
     const q = { table, op: "select", filters: [], payload: null, opts: {}, single: false, maybe: false, limit: null, returning: false, head: false, count: null };
     const api = {
@@ -108,13 +132,17 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
       is(c, v) { q.filters.push(r => (r[c] ?? null) === v); return api; },
       not(c, op, v) { if (op === "is") q.filters.push(r => (r[c] ?? null) !== v); return api; },
       gte(c, v) { q.filters.push(r => r[c] == null || r[c] >= v); return api; },
-      lte() { return api; }, lt() { return api; }, gt() { return api; },
+      lt(c, v) { q.filters.push(r => r[c] != null && r[c] < v); return api; },
+      lte() { return api; }, gt() { return api; },
       or() { return api; }, ilike() { return api; }, contains() { return api; }, filter() { return api; },
       order() { return api; }, range() { return api; },
       limit(n) { q.limit = n; return api; },
       single() { q.single = true; return api; },
       maybeSingle() { q.maybe = true; return api; },
-      then(res, rej) { return Promise.resolve(run()).then(res, rej); },
+      then(res, rej) {
+        if (!signal && !state.delays[table] && !state.delays[`${table}:${q.op}`]) return Promise.resolve(run()).then(res, rej);
+        return delayed([`${table}:${q.op}`, table], signal, run, { table, op: q.op }).then(res, rej);
+      },
     };
     function match() { return state.tables[table].filter(r => q.filters.every(f => f(r))); }
     function run() {
@@ -158,7 +186,7 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
     return api;
   }
 
-  const client = {
+  const makeClient = (signal) => ({
     auth: {
       async getUser(token) {
         state.calls.push({ kind: "auth.getUser" });
@@ -168,13 +196,16 @@ function createFake({ sessions = {}, profiles = {}, tables = {}, promptSet = nul
       },
     },
     async rpc(name, args) {
-      state.calls.push({ kind: "rpc", name });
-      if (!rpcs[name]) return { data: null, error: { message: "unknown rpc " + name } };
-      return { data: rpcs[name](args || {}), error: null };
+      return delayed("rpc:" + name, signal, () => {
+        state.calls.push({ kind: "rpc", name });
+        if (!rpcs[name]) return { data: null, error: { message: "unknown rpc " + name } };
+        return { data: rpcs[name](args || {}), error: null };
+      }, { rpc: name });
     },
-    from(table) { return builder(table); },
-  };
-  return { client, state };
+    from(table) { return builder(table, signal); },
+  });
+  const client = makeClient(null);
+  return { client, clientFor: makeClient, state };
 }
 
 module.exports = { createFake };

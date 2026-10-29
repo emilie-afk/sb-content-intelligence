@@ -36,6 +36,7 @@ function setEnv(extra = {}) {
   delete process.env.SCRIPT_SHEET_TOKEN;
   delete process.env.SCRIPT_SHEET_HOOK_URL;
   delete process.env.ALLOWED_ORIGIN;
+  delete process.env.AGENT_RUNTIME_MS;
   Object.assign(process.env, {
     SUPABASE_URL: "https://test-ref.supabase.co",
     SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
@@ -70,7 +71,7 @@ function setup({ env = {}, withPrompts = true, tables = {}, maintenance = false 
       ...tables,
     },
   });
-  require(path.join(ROOT, "netlify/lib/supabase.js")).__setFactory(() => fake.client);
+  require(path.join(ROOT, "netlify/lib/supabase.js")).__setFactory((url, key, opts) => (opts && opts.signal ? fake.clientFor(opts.signal) : fake.client));
   require(path.join(ROOT, "netlify/lib/prompts.js")).__cache.clear();
   return fake;
 }
@@ -84,7 +85,7 @@ function stubFetch({ claude = () => ({ content: [{ text: '{"ok":true}' }], stop_
     calls.push({ url: u, opts });
     const body = opts.body ? JSON.parse(opts.body) : null;
     if (u.startsWith("https://api.anthropic.com/")) {
-      const out = claude(body);
+      const out = await claude(body, opts);
       return { ok: true, status: 200, json: async () => out };
     }
     if (u.startsWith("https://script.google.com/")) {
@@ -95,6 +96,15 @@ function stubFetch({ claude = () => ({ content: [{ text: '{"ok":true}' }], stop_
     return { ok: true, status: 202, json: async () => ({}) };
   };
   return { calls, restore: () => { global.fetch = real; } };
+}
+
+/** Real-timer latency that honours an AbortSignal (rejects with its reason, like fetch). */
+function slow(ms, signal, value) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(signal.reason);
+    const t = setTimeout(() => resolve(typeof value === "function" ? value() : value), ms);
+    if (signal) signal.addEventListener("abort", () => { clearTimeout(t); reject(signal.reason); }, { once: true });
+  });
 }
 
 function event({ method = "POST", token, secret, submit, body, query } = {}) {
@@ -113,4 +123,4 @@ async function call(name, ev) {
   return { status: res.statusCode, body: parsed, raw: res.body || "" };
 }
 
-module.exports = { ROOT, SECRETS, USERS, TOKENS, SUBMIT_TOKEN, PERF_TOKEN, setup, stubFetch, event, call, allTemplates };
+module.exports = { ROOT, SECRETS, USERS, TOKENS, SUBMIT_TOKEN, PERF_TOKEN, setup, stubFetch, slow, event, call, allTemplates };

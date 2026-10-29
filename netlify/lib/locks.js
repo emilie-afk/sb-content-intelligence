@@ -15,10 +15,10 @@ async function acquire(key, ttlSeconds = 600, message = "This task is already ru
   return holder;
 }
 
-async function release(key, holder) {
+async function release(key, holder, { client } = {}) {
   if (!holder) return;
   try {
-    await serviceClient().rpc("ci_release_lock", { p_key: key.slice(0, 200), p_holder: holder });
+    await (client || serviceClient()).rpc("ci_release_lock", { p_key: key.slice(0, 200), p_holder: holder });
   } catch (_) { /* expires on its own */ }
 }
 

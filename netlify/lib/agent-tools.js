@@ -390,14 +390,15 @@ async function get_content_candidates({ supabase }, { status_filter, limit = 10 
 
 // ── WRITE (non-destructive) ───────────────────────────────────────────────────
 
-async function process_signal_batch({ runId, promptVersion }) {
+async function process_signal_batch({ runId, promptVersion, signal }) {
   const resp = await fetch(
     `${siteUrl()}/.netlify/functions/batch-cluster`,
     {
       method:  "POST",
       headers: internalHeaders(),
       body: JSON.stringify({ agent_run_id: runId, prompt_version: promptVersion }),
-      signal: AbortSignal.timeout(20000),
+      // bounded by the run deadline (and never longer than 20 s)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
     }
   );
   if (!resp.ok) {
@@ -412,14 +413,15 @@ async function process_signal_batch({ runId, promptVersion }) {
   };
 }
 
-async function run_maintenance_pass({ runId }) {
+async function run_maintenance_pass({ runId, signal }) {
   const resp = await fetch(
     `${siteUrl()}/.netlify/functions/maintenance-run`,
     {
       method:  "POST",
       headers: internalHeaders(),
       body: JSON.stringify({ limit: 100, agent_run_id: runId }),
-      signal: AbortSignal.timeout(20000),
+      // bounded by the run deadline (and never longer than 20 s)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
     }
   );
   if (!resp.ok) {
@@ -493,7 +495,8 @@ const TOOL_IMPLEMENTATIONS = {
 /**
  * @param {string} toolName
  * @param {object} input      — Claude's tool input (already validated by schema)
- * @param {object} context    — { supabase, runId, performedBy }
+ * @param {object} context    — { supabase, runId, performedBy, promptVersion, signal }
+ *                               supabase is bound to the run deadline; signal aborts at it
  * @returns {Promise<object>} — tool result (will be JSON-stringified for Claude)
  */
 async function dispatchTool(toolName, input, context) {
@@ -508,6 +511,8 @@ async function dispatchTool(toolName, input, context) {
   if (!impl) {
     throw new Error(`Tool "${toolName}" has no implementation (this is a bug).`);
   }
+  // never start a tool once the run's deadline has passed
+  if (context && context.signal && context.signal.aborted) throw context.signal.reason;
   return impl(context, input || {});
 }
 
