@@ -16,7 +16,7 @@
  * 2. Extensions → Apps Script → paste this file → Save
  * 3. Gear icon → Script Properties → add:
  *    NETLIFY_URL  → https://sb-content-intelligence.netlify.app
- *    SUBMIT_TOKEN → sb-scraper-2026-xK9mP3qL7w
+ *    SUBMIT_TOKEN → <a submit_signal token from an admin — never paste it into this file>
  * 4. Reload sheet → click 🎬 SB Videos → Set up tracker
  */
 

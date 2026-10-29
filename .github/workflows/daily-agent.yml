@@ -1,5 +1,13 @@
 name: Daily Agent Triage
 
+# Public repository: workflow logs are public. Print only status codes and counts,
+# never response bodies (the agent summary is internal content).
+concurrency:
+  group: daily-agent
+  cancel-in-progress: false
+
+permissions: {}
+
 on:
   schedule:
     - cron: '45 0 * * *'   # 7:45 AM Vietnam (UTC+7)
@@ -11,11 +19,13 @@ jobs:
     steps:
       - name: Run Signal Flow Agent
         run: |
-          RESPONSE=$(curl -s -X POST \
+          RESPONSE=$(curl -s -w '\n%{http_code}' -X POST \
             https://sb-content-intelligence.netlify.app/.netlify/functions/run-agent \
             -H "Content-Type: application/json" \
             -H "x-internal-secret: ${{ secrets.INTERNAL_SECRET }}" \
             -d '{"run_type": "scheduled"}' \
-            --max-time 30)
-
-          echo "Agent result: $RESPONSE"
+            --max-time 30) || true
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          STATUS=$(echo "$RESPONSE" | head -n -1 | jq -r '.status // "unknown"' 2>/dev/null || echo unknown)
+          echo "HTTP $HTTP_CODE — agent run status: $STATUS"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "409" ]; then exit 1; fi

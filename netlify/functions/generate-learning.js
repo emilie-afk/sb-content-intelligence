@@ -12,32 +12,37 @@
  * POST (no body required)
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { CORS_HEADERS } = require("./_auth");
+const prompts = require("../lib/prompts");
+const { preflightOrMethod, errorResponse, baseHeaders } = require("../lib/http");
+const { requireUserOrService, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
+const claude = require("../lib/claude");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = lazyService;
+const CORS_HEADERS = baseHeaders();
+const MAX_VIDEOS_PER_RUN = 40; // the rest are picked up by the next run
 
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 
 exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+  let lockHolder = null;
+  try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    await requireUserOrService(event, { roles: ROLES.ADMINS, scopes: ["scheduler"], bucket: "ai_batch" });
+    const set = await prompts.loadPromptSet(supabase);
+    lockHolder = await locks.acquire("generate_learning", 10 * 60, "Learning generation is already running.");
+    return await prompts.runWithPrompts(set, () => generateLearning());
+  } catch (err) {
+    return errorResponse(err, "generate-learning");
+  } finally {
+    if (lockHolder) await locks.release("generate_learning", lockHolder);
   }
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method Not Allowed" };
-  }
+};
 
-  const internalSecret = event.headers["x-internal-secret"];
-  if (internalSecret !== process.env.INTERNAL_SECRET) {
-    const { requireUserRole } = require("./_auth");
-    const authError = await requireUserRole(event, supabase, ["admin", "owner"]);
-    if (authError) return authError;
-  }
-
+async function generateLearning() {
   try {
     // ── 1. Fetch the full batch (all videos with metrics) for comparison ──
     const { data: allVideos } = await supabase
@@ -60,11 +65,10 @@ exports.handler = async (event) => {
         script_outputs ( id, script_title, opening_hook, estimated_duration_seconds, full_voiceover_script )
       `)
       .eq("learning_status", "Ready")
-      .not("performance_tier", "is", null);
+      .not("performance_tier", "is", null)
+      .limit(MAX_VIDEOS_PER_RUN);
 
-    if (fetchErr) {
-      return { statusCode: 500, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: fetchErr.message }) };
-    }
+    if (fetchErr) throw new Error("ready videos query failed");
 
     if (!readyVideos || readyVideos.length === 0) {
       return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generated: 0, message: "No videos ready for learning" }) };
@@ -125,10 +129,9 @@ exports.handler = async (event) => {
     };
 
   } catch (err) {
-    console.error("generate-learning error:", err);
-    return { statusCode: 500, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: err.message }) };
+    throw err;
   }
-};
+}
 
 // ── Compute batch-wide averages and percentiles ───────────────────────────────
 function computeBatchStats(batch) {
@@ -359,42 +362,14 @@ async function buildBatchSummary(batch, batchStats) {
     .map(([t, n]) => `  ${t}: ${n} video${n > 1 ? "s" : ""}`)
     .join("\n");
 
-  const prompt = `You are summarizing patterns across a batch of published short-form videos for Succulent Box, a plant subscription brand. Use only the data provided — no platform speculation, no external benchmarks.
-
-BATCH DATA (${batchStats.count} videos total):
-- Avg views: ${batchStats.avgViews.toLocaleString()}
-- Avg save rate: ${batchStats.avgSaveRate}%
-- Avg like rate: ${batchStats.avgLikeRate}%
-- Avg follows per video: ${batchStats.avgFollows}
-- Avg comments per video: ${batchStats.avgComments}
-
-Performance tier breakdown:
-${tierLines}
-
-Platform breakdown:
-${platformLines}
-
-Top by views: ${topByViews || "none"}
-Top by save rate: ${topBySave || "none — zero saves across batch"}
-
-Write 3-4 sentences identifying the clearest patterns in THIS batch. Compare platforms if there's a difference worth noting. Call out what's getting saves vs. just views — those are different types of value. End with one specific thing to try in the next batch based on what the data shows. No bullet points, no headers, no speculation about platform changes.`;
+  const prompt = prompts.t("generate-learning.buildBatchSummary.prompt.1", [batchStats.count, batchStats.avgViews.toLocaleString(), batchStats.avgSaveRate, batchStats.avgLikeRate, batchStats.avgFollows, batchStats.avgComments, tierLines, platformLines, topByViews || "none", topBySave || "none — zero saves across batch"]);
 
   try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key":         CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-      },
-      body: JSON.stringify({
-        model:      CLAUDE_MODEL,
-        max_tokens: 400,
-        messages:   [{ role: "user", content: prompt }],
-      }),
+    const data = await claude.messages({
+      model:      CLAUDE_MODEL,
+      max_tokens: 400,
+      messages:   [{ role: "user", content: prompt }],
     });
-
-    const data = await resp.json();
     if (data.error) { console.error("Batch summary Claude error:", data.error.message); return null; }
 
     const summary = data.content?.[0]?.text?.trim();
@@ -438,97 +413,44 @@ async function generateRecommendation({ cleanTopic, hook, views, day, video, wha
   let metricsLines;
   if (viewTier === "low") {
     // Ratios are unreliable — show absolute numbers only
-    metricsLines = `- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
-- ⚠️ Low view count (${views?.toLocaleString()}): ratios are unreliable at this scale. Focus on absolute engagement only.
-- Absolute engagement: ${saves} saves | ${video.likes_count || 0} likes | ${comments} comments | ${shares} shares | ${follows} follows gained`;
+    metricsLines = prompts.t("generate-learning.generateRecommendation.1", [day || "?", views != null ? views.toLocaleString() : "unknown", relativeViews, views?.toLocaleString(), saves, video.likes_count || 0, comments, shares, follows]);
   } else if (viewTier === "medium") {
     // Show ratios as directional, not conclusive
     const relativeSave = rank?.saveRateVsAvg != null && parseFloat(rank.compAvgSave) > 0
       ? `${rank.saveRateVsAvg > 0 ? "+" : ""}${rank.saveRateVsAvg}% vs ${compLabel} avg (${rank.compAvgSave}%)`
       : `${compLabel} avg: ${rank?.compAvgSave || batchStats.avgSaveRate}%`;
-    metricsLines = `- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
-- Save rate: ${saveRate}% — ${relativeSave} (directional — moderate view count)
-- Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}`;
+    metricsLines = prompts.t("generate-learning.generateRecommendation.2", [day || "?", views != null ? views.toLocaleString() : "unknown", relativeViews, saveRate, relativeSave, comments, shares, follows]);
   } else {
     // Normal view count — ratios are meaningful
     const relativeSave = rank?.saveRateVsAvg != null && parseFloat(rank.compAvgSave) > 0
       ? `${rank.saveRateVsAvg > 0 ? "+" : ""}${rank.saveRateVsAvg}% vs ${compLabel} avg (${rank.compAvgSave}%)`
       : `${compLabel} avg: ${rank?.compAvgSave || batchStats.avgSaveRate}%`;
-    metricsLines = `- Views (Day ${day || "?"}): ${views != null ? views.toLocaleString() : "unknown"} — ${relativeViews}
-- Save rate: ${saveRate}% — ${relativeSave}
-- Comments: ${comments} | Shares: ${shares} | Follows gained: ${follows}`;
+    metricsLines = prompts.t("generate-learning.generateRecommendation.3", [day || "?", views != null ? views.toLocaleString() : "unknown", relativeViews, saveRate, relativeSave, comments, shares, follows]);
   }
 
   // Rules vary by view tier
   const tierRule = viewTier === "low"
-    ? "- View count is too low for ratios to be reliable. Do NOT reference like rate or save rate percentages. Only mention whether saves, follows, or comments happened at all — and be honest that conclusions are limited at this view count."
+    ? prompts.t("generate-learning.generateRecommendation.4")
     : viewTier === "medium"
-    ? "- View count is moderate — treat save rate as directional, not conclusive. Mention if engagement happened, but don't overstate ratio differences."
-    : "- Ratios are reliable at this view count. Save rate and follows are the strongest signals.";
+    ? prompts.t("generate-learning.generateRecommendation.5")
+    : prompts.t("generate-learning.generateRecommendation.6");
 
-  const durationLine = scriptDuration ? `- Script length: ${scriptDuration}s (${scriptWordCount || "?"} words)` : "";
+  const durationLine = scriptDuration ? prompts.t("generate-learning.generateRecommendation.7", [scriptDuration, scriptWordCount || "?"]) : "";
 
-  const prompt = `You are writing a one-line directive rule for an AI script writer at Succulent Box, a plant subscription brand. The rule will be injected directly into the AI's writing prompt.
-
-The topic is almost never the problem — the hook wording, script length, and approach usually are. Your job is to tell the AI writer HOW to write differently, not what topic to avoid.
-
-IMPORTANT: Write a rule that applies to a CATEGORY OF CONTENT — not just this one video. Abstract away from the specific plant name. The rule should be usable when writing about any similar topic, not just Monstera or Money Tree. For example, instead of "avoid personification hooks for Money Tree care", write "avoid personification hooks for plant care advice" — because that lesson applies broadly.
-
-THIS VIDEO'S DATA:
-- Topic: ${cleanTopic || "unknown"}
-- Platform: ${video.platform || "unknown"}
-${metricsLines}
-${durationLine}
-${hook ? `- Hook used: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : ""}
-${scriptTitle ? `- Script: "${scriptTitle}"` : ""}
-${whatWorked ? `- What worked (team note): ${whatWorked}` : ""}
-${improve ? `- Improve (team note): ${improve}` : ""}
-${crossPlatform ? `- Same content on other platforms: ${crossPlatform}` : ""}
-
-CRITICAL RULE — views vs. engagement are different signals, treat them differently:
-- HIGH VIEWS + low saves/follows = the hook drives reach but not retention. Do NOT say "avoid" — say "use this hook style when reach is the goal, but pair it with a stronger CTA or save prompt if you need engagement."
-- LOW VIEWS + any engagement = content resonates with those who see it but doesn't travel. Note the engagement strength, suggest a stronger hook to widen reach.
-- LOW VIEWS + zero engagement = genuinely weak — this is the only case where "avoid" or "do not" is appropriate.
-- HIGH VIEWS + high saves/follows = repeat this. Tell the AI to use this approach again.
-
-RULES FOR YOUR RESPONSE:
-- Write ONE directive sentence. Start with "Use", "Prefer", "Keep", "Avoid", "Do not", or "When writing about [topic]".
-- Match the directive to the actual outcome: high-view results have value even with low saves — acknowledge the reach, direct how to build on it.
-- Focus on HOW to write: hook style, script length, format — not whether to write about the topic.
-- Back the directive with the key numbers (views vs. avg, plus engagement).
-- If team notes exist, use those as the primary signal.
-${tierRule}
-- No hedging ("consider", "might", "could"). No analysis paragraphs. One directive sentence only.
-
-Examples of the format to follow:
-✅ HIGH VIEWS, LOW SAVES: "Use curiosity-gap hooks ('should make this sound') for reach — +125% views — but pair with a save prompt in the caption since it generated zero saves or follows."
-✅ LOW VIEWS, UNDERPERFORMED: "Avoid personification hooks ('if your plant could talk') for care advice — −30% views and zero engagement; lead with the specific symptom instead."
-✅ HIGH VIEWS + SAVES: "Repeat the problem/fix hook format for root rot topics — it drove +40% views and 3 saves on TikTok."
-✅ SHORT VIDEO WIN: "Keep cactus watering scripts under 10s — the 35s version got −16% views and zero engagement vs. the short tip format."
-✅ HOOK TWEAK NEEDED: "When writing about String of Pearls, open with the visible symptom — hook 'Your String of Pearls looks like…' got only 544 views (−48% vs avg); the topic works, the hook framing didn't."`;
+  const prompt = prompts.t("generate-learning.generateRecommendation.8", [cleanTopic || "unknown", video.platform || "unknown", metricsLines, durationLine, hook ? `- Hook used: "${hook.replace(/#\w+/g, "").trim().substring(0, 150)}"` : "", scriptTitle ? `- Script: "${scriptTitle}"` : "", whatWorked ? prompts.t("generate-learning.generateRecommendation.9", [whatWorked]) : "", improve ? prompts.t("generate-learning.generateRecommendation.10", [improve]) : "", crossPlatform ? prompts.t("generate-learning.generateRecommendation.11", [crossPlatform]) : "", tierRule]);
 
 
   try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key":         CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-      },
-      body: JSON.stringify({
-        model:      CLAUDE_MODEL,
-        max_tokens: 250,
-        messages:   [{ role: "user", content: prompt }],
-      }),
+    const data = await claude.messages({
+      model:      CLAUDE_MODEL,
+      max_tokens: 250,
+      messages:   [{ role: "user", content: prompt }],
     });
-
-    const data = await resp.json();
-    if (data.error) { console.error("Claude API error:", data.error.message); return `Analysis unavailable: ${data.error.message}`; }
+    if (data.error) { console.error("Claude API error:", data.error.message); return prompts.t("generate-learning.generateRecommendation.12", [data.error.message]); }
     return data.content?.[0]?.text?.trim() || "No analysis returned.";
   } catch (err) {
     console.error("Claude call failed:", err.message);
-    return `Analysis unavailable: ${err.message}`;
+    return prompts.t("generate-learning.generateRecommendation.13", [err.message]);
   }
 }
 

@@ -9,41 +9,30 @@
  * Body: { limit: 200 }  (optional)
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
+const { preflightOrMethod, errorResponse, baseHeaders, parseBody } = require("../lib/http");
+const { requireUserOrService, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = lazyService;
+const headers = baseHeaders();
 
 const PROMPT_VERSION = "extract-v2";
 
 exports.handler = async (event) => {
-
-  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
-  if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
-
-  // Allow agent calls via shared internal secret (same pattern as batch-cluster.js)
-  const internalSecret =
-    event.headers["x-internal-secret"] ||
-    event.headers["X-Internal-Secret"];
-  const isInternalCall = internalSecret && internalSecret === process.env.INTERNAL_SECRET;
-
-  let performedBy = null;
-  if (!isInternalCall) {
-    const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
-    if (authError) return authError;
-    performedBy = await getUserId(event, supabase);
-  }
-
-  let body = {};
-  try { if (event.body) body = JSON.parse(event.body); }
-  catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
-
-  const batchLimit = Math.min(body.limit || 100, 200);
-
+  let lockHolder = null;
   try {
+  const early = preflightOrMethod(event, ["POST"]);
+  if (early) return early;
+
+  // Agent tool call (internal credential) or an approved owner/admin/assistant.
+  const caller = await requireUserOrService(event, { roles: ROLES.WRITERS, scopes: ["internal", "scheduler"], bucket: "admin" });
+  const performedBy = caller.kind === "user" ? caller.userId : null;
+
+  const body = parseBody(event, { maxBytes: 4096 });
+  const batchLimit = Math.max(1, Math.min(Number(body.limit) || 100, 200));
+  lockHolder = await locks.acquire("maintenance_run", 120, "A maintenance pass is already running.");
+
     // ── 1. FETCH ALL COLLECTING CLUSTERS ─────────────────────────────────────
     const { data: clusters, error: fetchErr } = await supabase
       .from("discovery_clusters")
@@ -124,8 +113,9 @@ exports.handler = async (event) => {
     };
 
   } catch (err) {
-    console.error("maintenance-run error:", err);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    return errorResponse(err, "maintenance-run");
+  } finally {
+    if (lockHolder) await locks.release("maintenance_run", lockHolder);
   }
 };
 
@@ -165,96 +155,4 @@ function checkQualification(cluster) {
     return { qualifies: true, reason: "Manually pinned by reviewer" };
 
   return false;
-}
-
-
-// ── CANDIDATE PROMPT (kept for reference — not called in maintenance-run) ─────
-function buildCandidatePrompt(cluster, sheetEntries, dbPublished, watchlistText) {
-  const historyLines = [];
-  sheetEntries.forEach(e => {
-    historyLines.push(`[${e.month} 2026] "${e.title}"${e.style ? " | " + e.style : ""}${e.note ? " | " + e.note : ""}`);
-  });
-  dbPublished.forEach(p => {
-    historyLines.push(`[Published ${p.publish_date || "?"}] "${p.video_title || p.topic}" | Plant: ${p.plant_or_product || "?"} | Hook: ${p.hook_used || "—"} | Performance: ${p.performance_summary || "not recorded"} | Follow-up: ${p.audience_followup_questions || "none"}`);
-  });
-  const historyText = historyLines.length ? historyLines.join("\n") : "No content history available.";
-
-  return `You are preparing a Content Review candidate card for Succulents Box, a succulent plant subscription company.
-
-DISCOVERY CLUSTER:
-Title: ${cluster.title}
-Plant: ${cluster.plant_or_product || "unknown"}
-Primary question: ${cluster.primary_question || "none"}
-Problems: ${(cluster.problems_mentioned || []).join(", ") || "none"}
-Tips: ${(cluster.tips_mentioned || []).join(", ") || "none"}
-Audience wording: ${(cluster.audience_wording || []).slice(0, 8).join(", ") || "none"}
-Novelty: ${cluster.novelty_status || "Unclear"}
-Signal count: ${cluster.signal_count}
-Question count: ${cluster.question_count}
-Distinct sources: ${cluster.distinct_source_count}
-Platforms: ${(cluster.platforms || []).join(", ") || "unknown"}
-First seen: ${cluster.first_seen_at || "unknown"}
-Last seen: ${cluster.last_seen_at || "unknown"}
-
-HIGH-REVENUE PLANT WATCHLIST:
-${watchlistText}
-
-2026 PRODUCTION CONTENT HISTORY:
-${historyText}
-
-Analyze whether this cluster should become a content candidate and prepare the full review card.
-
-Return ONLY valid JSON:
-{
-  "title": "candidate title using audience language",
-  "what_people_are_saying": "2-3 sentence summary",
-  "representative_wording": ["exact audience phrases, up to 5"],
-  "pattern_growth": "how this pattern has grown",
-  "evidence_urls": [],
-  "what_appears_new": "what is genuinely new, or null",
-  "claims_needing_verification": "claims needing fact-checking, or null",
-  "contradictory_advice": "if sources disagree, or null",
-  "closest_published_title": "most similar owned content title, or null",
-  "closest_published_urls": [],
-  "closest_published_date": null,
-  "days_since_similar": null,
-  "previous_performance": null,
-  "audience_followup_demand": "follow-up question opportunity, or null",
-  "repetition_risk": "Low | Medium | High | Block | Needs reviewer check",
-  "freshness_reason": "why this is or isn't fresh — 1-2 sentences",
-  "same_topic": null,
-  "same_plant": null,
-  "same_question": null,
-  "same_advice": null,
-  "same_hook_or_angle": null,
-  "possible_directions": ["Answer the repeated question", "Verify the claim"],
-  "ai_confidence": "High | Medium | Low",
-  "candidate_status": "Ready for review | Recommended follow-up | Needs research | Needs reviewer check | Hold for repetition | Already covered"
-}`;
-}
-
-
-// ── CALL CLAUDE ────────────────────────────────────────────────────────────────
-async function callClaude(prompt, maxTokens = 1024) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method:  "POST",
-    headers: {
-      "x-api-key":         CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type":      "application/json",
-    },
-    body: JSON.stringify({
-      model:      CLAUDE_MODEL,
-      max_tokens: maxTokens,
-      messages:   [{ role: "user", content: prompt }],
-    }),
-  });
-
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
-
-  const text = data.content?.[0]?.text || "";
-  const jsonMatch = text.match(/```json\n?([\s\S]*?)\n?```/) || text.match(/(\{[\s\S]*\})/);
-  if (!jsonMatch) throw new Error("Could not parse Claude response");
-  return JSON.parse(jsonMatch[1] || jsonMatch[0]);
 }

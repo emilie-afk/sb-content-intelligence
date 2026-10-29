@@ -12,7 +12,7 @@
  * 3. Extensions → Apps Script → paste this file → Save
  * 4. Gear icon (Project Settings) → Script Properties → add:
  *    NETLIFY_URL  → https://sb-content-intelligence.netlify.app
- *    SUBMIT_TOKEN → sb-scraper-2026-xK9mP3qL7w
+ *    SUBMIT_TOKEN → <a submit_signal token from an admin — never paste it into this file>
  * 5. Reload the sheet → click 🌵 SB Intake → Set up headers
  */
 

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SB Content Intelligence — Social Listening + Script Production</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js" integrity="sha384-TcHRA3zBbn+Lexh5n+Oil4guNPOS3rjNDpGRAN46u/s/mB2IZ50ceC6TYDU2yvgK" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 /* ── RESET & BASE ── */
@@ -284,6 +284,17 @@ tbody tr:hover { background: #fafffe; }
     </button>
 
     <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- Signed in, but not (or no longer) an approved member -->
+<div id="pending-screen" style="display:none;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#1a2e1a 0%,#2d5a27 100%)">
+  <div class="auth-card">
+    <div class="auth-logo">⏳</div>
+    <h1>Waiting for approval</h1>
+    <p id="pending-msg">Your account is waiting for approval by the app owner.</p>
+    <p style="font-size:12px;color:#888;margin-bottom:20px">Signed in as <span id="pending-email"></span></p>
+    <button class="btn btn-secondary" onclick="signOut()">Sign out</button>
   </div>
 </div>
 
@@ -581,7 +592,7 @@ tbody tr:hover { background: #fafffe; }
         </div>
         <button class="btn btn-primary btn-sm" onclick="openPublishedModal()">+ Add Video</button>
         <button class="btn btn-secondary btn-sm" id="sync-metrics-btn" onclick="syncVideoMetrics()">↺ Sync metrics from sheet</button>
-        <a class="btn btn-secondary btn-sm" href="https://docs.google.com/spreadsheets/d/1AZNg8Akcucxk53ORhDrFgDP2bMqy-aeFE_SY6mT1EPs/edit?gid=0#gid=0" target="_blank" rel="noopener">📊 Open Video Tracker</a>
+        <a id="video-tracker-link" class="btn btn-secondary btn-sm" href="#" style="display:none" target="_blank" rel="noopener noreferrer">📊 Open Video Tracker</a>
       </div>
       <div class="table-wrap">
         <table>
@@ -704,7 +715,7 @@ tbody tr:hover { background: #fafffe; }
           📄 All Scripts
           <span id="scripts-all-count" style="font-size:12px;font-weight:500;color:#555;background:#f3f4f6;padding:2px 8px;border-radius:12px"></span>
           <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
-            <a id="script-sheet-link" href="#" target="_blank" style="font-size:12px;font-weight:600;color:#fff;background:#16a34a;padding:5px 12px;border-radius:6px;text-decoration:none;white-space:nowrap">📊 Short Video Script Spreadsheet</a>
+            <a id="script-sheet-link" href="#" target="_blank" rel="noopener noreferrer" style="display:none;font-size:12px;font-weight:600;color:#fff;background:#16a34a;padding:5px 12px;border-radius:6px;text-decoration:none;white-space:nowrap">📊 Short Video Script Spreadsheet</a>
             <button onclick="openScriptSheetSettings()" title="Update spreadsheet URL" style="background:#f3f4f6;border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:13px">⚙️</button>
           </span>
         </h2>
@@ -1358,47 +1369,40 @@ const SUPABASE_ANON = typeof __SUPABASE_ANON__ !== 'undefined' ? __SUPABASE_ANON
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
-// ── SCRIPT SPREADSHEET CONFIG ─────────────────────────────────────────────────
-// Loaded from Supabase app_settings. Fallback keeps things working if fetch fails.
-let _scriptSheetConfig = {
-  base_url: { 2026: 'https://docs.google.com/spreadsheets/d/1iDg61cxy6oSxb8vL2AkaivTnQJuTVJY5bKIbtNBLHAQ/edit' },
-  gids: {
-    2026: { 1:543399107,2:1014332536,3:827394542,4:81707702,5:2020833859,6:917654142,
-            7:1509550029,8:1130813057,9:847982453,10:1941512612,11:768311302,12:1383995983 }
-  }
-};
+// ── SHEET LINKS ───────────────────────────────────────────────────────────────
+// Sheet locations are not in this public page. Approved members get the links
+// from the server (/.netlify/functions/app-config) after signing in.
+let _sheetLinks = { script_sheet_url: null, video_tracker_url: null };
 
 async function loadScriptSheetConfig() {
-  const { data } = await sb.from('app_settings').select('value').eq('id','script_sheet').maybeSingle();
-  if (data?.value) _scriptSheetConfig = data.value;
+  try {
+    const res = await fetch('/.netlify/functions/app-config', { headers: await authHeaders() });
+    if (res.ok) _sheetLinks = await res.json();
+  } catch (_) { /* links stay hidden */ }
 }
 
-function getScriptSheetUrl(dateStr) {
-  const d = dateStr ? new Date(dateStr) : new Date();
-  const year = d.getFullYear();
-  const month = d.getMonth() + 1;
-  const base = _scriptSheetConfig.base_url?.[year] || _scriptSheetConfig.base_url?.[Math.max(...Object.keys(_scriptSheetConfig.base_url).map(Number))];
-  const gid  = _scriptSheetConfig.gids?.[year]?.[month];
-  if (!base) return '#';
-  return gid ? `${base}?gid=${gid}#gid=${gid}` : base;
+function getScriptSheetUrl() {
+  return _sheetLinks.script_sheet_url || '#';
 }
 
 function updateScriptSheetLink() {
   const el = document.getElementById('script-sheet-link');
-  if (el) el.href = getScriptSheetUrl();
+  if (el) { el.href = getScriptSheetUrl(); el.style.display = _sheetLinks.script_sheet_url ? '' : 'none'; }
+  const vt = document.getElementById('video-tracker-link');
+  if (vt) { vt.href = _sheetLinks.video_tracker_url || '#'; vt.style.display = _sheetLinks.video_tracker_url ? '' : 'none'; }
 }
 
 async function openScriptSheetSettings() {
+  if (!['admin','owner'].includes(userRole)) { toast('Only admins and owners can change the sheet link', true); return; }
   const year = new Date().getFullYear();
-  const current = _scriptSheetConfig.base_url?.[year] || '';
-  const newUrl = prompt(`Short Video Script Spreadsheet URL for ${year}:\n(Paste the full Google Sheets URL)`, current);
-  if (!newUrl || newUrl === current) return;
-  const updated = { ..._scriptSheetConfig };
-  if (!updated.base_url) updated.base_url = {};
-  updated.base_url[year] = newUrl.split('?')[0].split('#')[0]; // strip params
-  const { error } = await sb.from('app_settings').upsert({ id: 'script_sheet', value: updated, updated_at: new Date().toISOString() });
-  if (error) { toast('❌ ' + error.message, true); return; }
-  _scriptSheetConfig = updated;
+  const newUrl = prompt(`Short Video Script Spreadsheet URL for ${year}:\n(Paste the full Google Sheets URL)`, '');
+  if (!newUrl) return;
+  const res = await fetch('/.netlify/functions/app-config', {
+    method: 'POST', headers: await authHeaders(), body: JSON.stringify({ script_sheet_url: newUrl }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { toast('❌ ' + (data.error || 'Could not save'), true); return; }
+  _sheetLinks.script_sheet_url = data.script_sheet_url;
   updateScriptSheetLink();
   toast('✅ Spreadsheet link updated');
 }
@@ -1446,20 +1450,44 @@ async function initAuth() {
 
 async function loadUser(user) {
   currentUser = user;
-  const { data: profile } = await sb.from('users_profile').select('*').eq('id', user.id).single();
-  userRole = profile?.role || 'viewer';
-  document.getElementById('user-name').textContent = profile?.display_name || user.email;
+  // Access is decided by the server-side membership record (approved + role),
+  // never by anything the browser holds. This read returns only the user's own row.
+  const { data: profile } = await sb.from('users_profile').select('display_name, email, role, access_status').eq('id', user.id).maybeSingle();
+  if (!profile || profile.access_status !== 'approved') {
+    showPendingScreen(user, profile);
+    return;
+  }
+  userRole = profile.role || 'viewer';
+  document.getElementById('user-name').textContent = profile.display_name || user.email;
   document.getElementById('user-role').textContent = userRole;
   document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('pending-screen').style.display = 'none';
   document.getElementById('app').style.display = 'grid';
   document.getElementById('today-date').textContent = new Date().toLocaleDateString('en-US', {weekday:'long',year:'numeric',month:'long',day:'numeric'});
   loadScriptSheetConfig().then(updateScriptSheetLink);
   loadCommandCenter();
 }
 
+function showPendingScreen(user, profile) {
+  currentUser = user;
+  userRole = 'viewer';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('auth-screen').style.display = 'none';
+  const el = document.getElementById('pending-screen');
+  el.style.display = 'flex';
+  document.getElementById('pending-email').textContent = user.email || '';
+  document.getElementById('pending-msg').textContent = profile?.access_status === 'revoked'
+    ? 'Your access to this app has been removed. Contact the app owner if this is a mistake.'
+    : 'Your account is waiting for approval by the app owner. You will get access once approved — then reload this page.';
+}
+
 sb.auth.onAuthStateChange((_event, session) => {
   if (session?.user) loadUser(session.user);
-  else { document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; }
+  else {
+    document.getElementById('auth-screen').style.display='flex';
+    document.getElementById('app').style.display='none';
+    const p = document.getElementById('pending-screen'); if (p) p.style.display='none';
+  }
 });
 
 // ── NAVIGATION ────────────────────────────────────────────────────────
@@ -1562,7 +1590,7 @@ async function loadCommandCenter() {
   if (!vids?.length) { cTbody.innerHTML = '<tr><td colspan="5"><div class="empty"><p>No checkpoints due</p></div></td></tr>'; }
   else cTbody.innerHTML = vids.map(v => `
     <tr>
-      <td class="truncate"><a href="${esc(v.video_url)}" target="_blank">${esc(v.video_title||v.video_url)}</a></td>
+      <td class="truncate"><a href="${safeHref(v.video_url)}" target="_blank">${esc(v.video_title||v.video_url)}</a></td>
       <td>${esc(v.platform||'—')}</td>
       <td>${snapshotBadge(v.snapshot_24h_status)}</td>
       <td>${snapshotBadge(v.snapshot_72h_status)}</td>
@@ -1633,7 +1661,7 @@ async function loadInbox() {
                 ${s.caption_summary ? `<div style="color:#555;margin-bottom:4px"><b>Caption:</b> ${esc(s.caption_summary)}</div>` : '<div style="color:#f59e0b;margin-bottom:4px">⚠️ No caption captured</div>'}
                 ${s.audience_problem ? `<div style="color:#555;margin-bottom:4px"><b>Audience problem:</b> ${esc(s.audience_problem)}</div>` : '<div style="color:#f59e0b;margin-bottom:4px">⚠️ No audience problem captured</div>'}
                 ${s.plant_or_product ? `<div style="color:#555;margin-bottom:4px"><b>Plant/product:</b> ${esc(s.plant_or_product)}</div>` : ''}
-                <div style="color:#999;font-size:11px">${s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="color:#4CAF50">View source ↗</a>` : 'No source URL'} · ${s.date_found||'?'}</div>
+                <div style="color:#999;font-size:11px">${s.source_url ? `<a href="${safeHref(s.source_url)}" target="_blank" style="color:#4CAF50">View source ↗</a>` : 'No source URL'} · ${s.date_found||'?'}</div>
               </div>
               <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
                 <button class="btn btn-primary btn-sm" onclick="openEditSignalModal('${s.id}')">✏️ Fix</button>
@@ -1680,7 +1708,7 @@ async function loadInbox() {
       <td style="display:flex;gap:6px;align-items:center">
         <button class="btn btn-secondary btn-sm" onclick="openSignalDetail('${s.id}')" title="View what the system recorded">🔍</button>
         <button class="btn btn-danger btn-sm" onclick="quickDismissSignal('${s.id}')" title="Dismiss this signal">✕</button>
-        ${s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="font-size:12px;color:#4CAF50">View ↗</a>` : '—'}
+        ${s.source_url ? `<a href="${safeHref(s.source_url)}" target="_blank" style="font-size:12px;color:#4CAF50">View ↗</a>` : '—'}
       </td>
     </tr>`).join('');
 }
@@ -1695,7 +1723,7 @@ function openSignalDetail(id) {
     ['Caption summary', s.caption_summary], ['Audience problem', s.audience_problem],
     ['Likes', s.likes_count], ['Comments', s.comments_count],
     ['Manual submission', s.is_manual_submission ? 'Yes' : 'No'],
-    ['Source URL', s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="color:#4CAF50">${esc(s.source_url)}</a>` : null],
+    ['Source URL', s.source_url ? `<a href="${safeHref(s.source_url)}" target="_blank" style="color:#4CAF50">${esc(s.source_url)}</a>` : null],
   ].filter(([,v]) => v != null && v !== '');
   document.getElementById('modal-signal-detail-content').innerHTML = rows.map(([k,v]) =>
     `<div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px">
@@ -1750,14 +1778,23 @@ async function quickDismissSignal(id) {
   toast('✕ Dismissed');
 }
 
+function requireAdminUi(action) {
+  if (['admin','owner'].includes(userRole)) return true;
+  toast(`Only admins and owners can ${action}`, true);
+  return false;
+}
+
 async function deleteSignal(id) {
+  if (!requireAdminUi('delete signals')) return;
   if (!confirm('Delete this signal permanently?')) return;
-  await sb.from('signals').delete().eq('id', id);
+  const { error } = await sb.from('signals').delete().eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); return; }
   toast('Signal deleted');
   loadInbox();
 }
 
 async function deleteScraperCleanupSignals() {
+  if (!requireAdminUi('delete signals')) return;
   const ids = window._scraperCleanupIds || [];
   if (!ids.length) return;
   if (!confirm(`Delete ${ids.length} Instagram Scraper "Needs cleanup" signal${ids.length>1?'s':''}? This cannot be undone.`)) return;
@@ -1930,13 +1967,13 @@ async function loadToday() {
             <span style="font-size:11px;font-weight:600;color:${cc};margin-right:6px">${icon} ${esc(s.suggestion_type)}</span>
             <span style="font-size:13px;font-weight:600">${esc(s.cluster?.title || 'Unknown cluster')}</span>
           </div>
-          <span style="font-size:10px;color:${cc};font-weight:600;white-space:nowrap">${s.confidence}</span>
+          <span style="font-size:10px;color:${cc};font-weight:600;white-space:nowrap">${esc(s.confidence)}</span>
         </div>
         ${s.reason ? `<div style="font-size:12px;color:#9ca3af;margin-bottom:6px;line-height:1.4">${esc(s.reason)}</div>` : ''}
         ${s.evidence_preview ? `<div style="font-size:11px;color:#64748b;font-style:italic;margin-bottom:8px;padding:6px 8px;background:var(--bg-hover);border-radius:4px">"${esc(s.evidence_preview)}"</div>` : ''}
         ${s.suggested_destination ? `<div style="font-size:11px;color:#94a3b8;margin-bottom:6px">→ ${esc(s.suggested_destination)}</div>` : ''}
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button class="btn btn-primary btn-sm" onclick="actOnSuggestion('${s.id}','Confirmed','${s.cluster_id||''}','${s.suggestion_type}')">✓ Confirm</button>
+          <button class="btn btn-primary btn-sm" onclick="actOnSuggestion('${s.id}','Confirmed','${esc(s.cluster_id||'')}','${esc(String(s.suggestion_type||'').replace(/'/g,''))}')">✓ Confirm</button>
           <button class="btn btn-secondary btn-sm" onclick="actOnSuggestion('${s.id}','Rejected','','')">✕ Reject</button>
           ${s.cluster_id ? `<button class="btn btn-secondary btn-sm" onclick="openDiscoveryPanel('${s.cluster_id}')">🔍 View cluster</button>` : ''}
         </div>
@@ -2007,7 +2044,7 @@ function renderTodayItem(item, actionType) {
     const caId = caIdMatch ? caIdMatch[1] : '';
     const sourceUrl = caId && window._caSourceUrls?.[caId];
     actionBtns = `
-      ${sourceUrl ? `<a href="${sourceUrl}" target="_blank" class="btn btn-secondary btn-sm">🔗 View post</a>` : ''}
+      ${sourceUrl ? `<a href="${safeHref(sourceUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">🔗 View post</a>` : ''}
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Needs decision')">📋 Mark for review</button>
       <button class="btn btn-secondary btn-sm" onclick="todayItemDecide('${item.id}','Keep watching')">👀 Watch</button>
       ${caId
@@ -2037,7 +2074,7 @@ function renderTodayItem(item, actionType) {
             ? `<div class="today-item-title" style="cursor:pointer;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.2)" onclick="openDiscoveryPanel('${item.cluster_id}')" title="Click to view cluster signals and source posts">${esc(item.title)}</div>`
             : `<div class="today-item-title">${esc(item.title)}</div>`}
         </div>
-        <span style="color:${confColor};font-size:11px;font-weight:600;flex-shrink:0;margin-top:2px">${item.ai_confidence || ''}</span>
+        <span style="color:${confColor};font-size:11px;font-weight:600;flex-shrink:0;margin-top:2px">${esc(item.ai_confidence || '')}</span>
       </div>
       ${item.summary ? `<p class="today-item-summary">${esc(item.summary)}</p>` : ''}
       ${item.why_today ? `<p class="today-item-why"><strong>Why today:</strong> ${esc(item.why_today)}</p>` : ''}
@@ -2431,7 +2468,7 @@ async function loadPublished() {
       : `<button class="btn btn-secondary btn-sm" style="font-size:11px;padding:2px 8px" onclick="openLinkScriptModal('${v.id}')">Link script</button>`;
     return `
     <tr>
-      <td class="truncate"><a href="${esc(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.topic||v.video_url||'—')}</a></td>
+      <td class="truncate"><a href="${safeHref(v.video_url||'#')}" target="_blank">${esc(v.video_title||v.topic||v.video_url||'—')}</a></td>
       <td>${esc(v.platform||'—')}</td>
       <td>${v.publish_datetime ? new Date(v.publish_datetime).toLocaleDateString() : '—'}</td>
       <td style="font-weight:600">${v.views_count != null ? v.views_count.toLocaleString() + (v.views_day ? '<span style="font-size:11px;font-weight:400;color:#94a3b8;margin-left:4px">D'+v.views_day+'</span>' : '') : '—'}</td>
@@ -2983,6 +3020,7 @@ async function loadScripts() {
 }
 
 async function deleteScript(id) {
+  if (!requireAdminUi('delete scripts')) return;
   if (!confirm('Delete this script? This cannot be undone.')) return;
   const { error } = await sb.from('script_outputs').delete().eq('id', id);
   if (error) { toast('❌ ' + error.message, true); return; }
@@ -3323,7 +3361,7 @@ async function loadHelp() {
            onclick="document.getElementById('${item.id}')?.scrollIntoView({behavior:'smooth'});return false;"
            style="color:${item.level === 2 ? '#1a5c2a' : '#555'};text-decoration:none;font-weight:${item.level === 2 ? '600' : '400'};font-size:${item.level === 2 ? '12.5px' : '12px'};display:block;padding:2px 0;line-height:1.4"
            onmouseover="this.style.color='#4CAF50'" onmouseout="this.style.color='${item.level === 2 ? '#1a5c2a' : '#555'}'">
-          ${item.text}
+          ${esc(item.text)}
         </a>
       </div>`).join('')}`;
 }
@@ -3357,7 +3395,7 @@ async function loadActivityLog() {
     return `<tr>
       <td style="font-size:12px;color:#888;white-space:nowrap">${when}</td>
       <td style="font-size:12px">${who}</td>
-      <td style="font-size:12px">${typeEmoji[row.entity_type]||''} ${row.entity_type}</td>
+      <td style="font-size:12px">${typeEmoji[row.entity_type]||''} ${esc(row.entity_type)}</td>
       <td class="truncate" style="font-size:12px">${esc(row.entity_title||'—')}</td>
       <td style="font-weight:600;color:${actionColor(row.action)};font-size:12px">${esc(row.action)}</td>
       <td style="font-size:11px;color:#aaa">${esc(row.old_value||'—')}</td>
@@ -3395,18 +3433,23 @@ async function loadBrandRules() {
 }
 
 async function toggleBrandRule(id, active) {
-  await sb.from('brand_content_rules').update({ active }).eq('id', id);
+  if (!requireAdminUi('change brand rules')) { loadBrandRules(); return; }
+  const { error } = await sb.from('brand_content_rules').update({ active }).eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); loadBrandRules(); return; }
   toast(active ? 'Rule activated' : 'Rule deactivated');
 }
 
 async function deleteBrandRule(id) {
+  if (!requireAdminUi('remove brand rules')) return;
   if (!confirm('Remove this rule?')) return;
-  await sb.from('brand_content_rules').delete().eq('id', id);
+  const { error } = await sb.from('brand_content_rules').delete().eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); return; }
   toast('Rule removed');
   loadBrandRules();
 }
 
 async function saveBrandRule() {
+  if (!requireAdminUi('add brand rules')) return;
   const row = {
     category:                  document.getElementById('rule-category').value,
     severity:                  document.getElementById('rule-severity').value,
@@ -3435,10 +3478,8 @@ function openBrandRuleModal() { document.getElementById('modal-brand-rule').clas
 function closeModal(id)       { document.getElementById(id).classList.remove('open'); }
 
 // ── SHEET HISTORY NOTE ────────────────────────────────────────────────
-// The Apps Script sheet URL (settings key: calendar_script_url) is read
-// server-side by get-sheet-history.js for repetition checking.
-// Set it once in Supabase: Settings table → key = 'calendar_script_url'
-//   value = { "url": "https://script.google.com/macros/s/.../exec" }
+// The Apps Script location is private server configuration (ci_integration_config,
+// key 'script_apps_script'); the browser never sees it. See docs/SECURITY-ROLLOUT.md.
 
 // Close modal on overlay click
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
@@ -3448,7 +3489,13 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 // ── UTILITIES ─────────────────────────────────────────────────────────
 function esc(str) {
   if (str == null) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// Links built from imported / AI-produced data: only http(s) URLs are clickable.
+function safeHref(url) {
+  const s = String(url == null ? '' : url).trim();
+  return /^https?:\/\//i.test(s) ? esc(s) : '#';
 }
 
 function snapshotBadge(status) {
@@ -3927,7 +3974,7 @@ function renderRepetitionAnalysis(a) {
       ${a.previous_plant ? `<div>Plant: ${esc(a.previous_plant)}</div>` : ''}
       ${a.previous_hook  ? `<div>Hook: ${esc(a.previous_hook)}</div>` : ''}
       ${a.previous_angle ? `<div>Angle: ${esc(a.previous_angle)}</div>` : ''}
-      ${a.similar_published_url ? `<div><a href="${esc(a.similar_published_url)}" target="_blank" style="color:#4CAF50">View published video ↗</a></div>` : ''}
+      ${a.similar_published_url ? `<div><a href="${safeHref(a.similar_published_url)}" target="_blank" style="color:#4CAF50">View published video ↗</a></div>` : ''}
     </div>` : ''}
     ${a.audience_followup_demand ? `<div style="margin-top:8px"><b>Audience follow-up demand:</b> ${esc(a.audience_followup_demand)}</div>` : ''}
   </div>`;
@@ -4313,7 +4360,7 @@ async function openDiscoveryPanel(clusterId) {
   const signalList = (signals || []).map(l => {
     const s = l.signal;
     if (!s) return '';
-    const url = s.source_url ? `<a href="${esc(s.source_url)}" target="_blank" style="color:#60a5fa;font-size:11px">🔗 Source</a>` : '';
+    const url = s.source_url ? `<a href="${safeHref(s.source_url)}" target="_blank" style="color:#60a5fa;font-size:11px">🔗 Source</a>` : '';
     return `<div style="background:var(--bg-hover);border-radius:6px;padding:10px;margin-bottom:8px">
       <div style="font-size:12px;font-weight:500">${esc(s.topic || '—')}</div>
       <div style="font-size:11px;color:#9ca3af;margin-top:2px">${esc(s.platform||'?')} · ${esc(s.caption_summary || '')} ${url}</div>
@@ -4936,7 +4983,7 @@ async function loadCompetitorActivity() {
           ${r.collaborator_accounts?.length ? `<div style="color:#6b7280;font-size:12px">Collaborators: ${r.collaborator_accounts.map(c=>`@${esc(c)}`).join(', ')}</div>` : ''}
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
-          ${r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" class="btn btn-secondary btn-sm">View →</a>` : ''}
+          ${r.source_url ? `<a href="${safeHref(r.source_url)}" target="_blank" class="btn btn-secondary btn-sm">View →</a>` : ''}
           <select style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:4px;padding:3px 6px;font-size:12px"
             onchange="updateCaStatus('${r.id}', this.value)">
             <option value="New"      ${r.status==='New'      ?'selected':''}>New</option>

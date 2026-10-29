@@ -9,43 +9,50 @@
  * Body: { winner_id: "uuid", loser_id: "uuid" }
  */
 
-const { createClient } = require("@supabase/supabase-js");
-const { requireUserRole, getUserId, CORS_HEADERS: headers } = require("./_auth");
+const prompts = require("../lib/prompts");
+const { PublicError, preflightOrMethod, errorResponse, baseHeaders, parseBody } = require("../lib/http");
+const { requireUser, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
+const claude = require("../lib/claude");
+const { uuid } = require("../lib/validate");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+const supabase = lazyService;
+const headers = baseHeaders();
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 const PROMPT_VERSION = "merge-v1";
 
 exports.handler = async (event) => {
+  let lockKey = null, lockHolder = null;
+  try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    const caller = await requireUser(event, { roles: ROLES.WRITERS, bucket: "ai" });
+    const body = parseBody(event, { maxBytes: 4096, allowEmpty: false });
+    const winner_id = uuid(body.winner_id, "winner_id");
+    const loser_id = uuid(body.loser_id, "loser_id");
+    if (winner_id === loser_id) throw new PublicError(400, "Cannot merge a cluster with itself");
+    // Load prompts BEFORE changing anything, so a missing prompt set can't leave a half merge.
+    const set = await prompts.loadPromptSet(supabase);
+    lockKey = `merge:${[winner_id, loser_id].sort().join(":")}`;
+    lockHolder = await locks.acquire(lockKey, 120, "These clusters are already being merged.");
+    return await prompts.runWithPrompts(set, () => merge(winner_id, loser_id, caller.userId));
+  } catch (err) {
+    return errorResponse(err, "merge-clusters");
+  } finally {
+    if (lockHolder) await locks.release(lockKey, lockHolder);
+  }
+};
 
-  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
-  if (event.httpMethod !== "POST")    return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
-
-  const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
-  if (authError) return authError;
-  const performedBy = await getUserId(event, supabase);
-
-  let body = {};
-  try { if (event.body) body = JSON.parse(event.body); }
-  catch { return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) }; }
-
-  const { winner_id, loser_id } = body;
-  if (!winner_id || !loser_id) return { statusCode: 400, headers, body: JSON.stringify({ error: "winner_id and loser_id required" }) };
-  if (winner_id === loser_id)  return { statusCode: 400, headers, body: JSON.stringify({ error: "Cannot merge a cluster with itself" }) };
-
+async function merge(winner_id, loser_id, performedBy) {
   try {
     // ── 1. FETCH BOTH CLUSTERS ─────────────────────────────────────────────────
     const [{ data: winner, error: we }, { data: loser, error: le }] = await Promise.all([
       supabase.from("discovery_clusters").select("*").eq("id", winner_id).single(),
       supabase.from("discovery_clusters").select("*").eq("id", loser_id).single(),
     ]);
-    if (we || !winner) throw new Error("Winner cluster not found: " + (we?.message || ""));
-    if (le || !loser)  throw new Error("Loser cluster not found: "  + (le?.message || ""));
+    if (we || !winner) throw new PublicError(404, "Winner cluster not found");
+    if (le || !loser)  throw new PublicError(404, "Loser cluster not found");
 
     // ── 2. MOVE SIGNAL LINKS FROM LOSER → WINNER ──────────────────────────────
     // Get all loser signal IDs
@@ -111,39 +118,7 @@ exports.handler = async (event) => {
       .filter(Boolean).sort().at(-1);
 
     // ── 4. AI RE-ANALYSIS OF MERGED CLUSTER ───────────────────────────────────
-    const mergePrompt = `You are updating a Discovery cluster for Succulents Box after two clusters were merged together.
-
-WINNER CLUSTER (kept):
-Title: ${winner.title}
-Plant: ${winner.plant_or_product || "unspecified"}
-Summary: ${winner.summary || "none"}
-Primary question: ${winner.primary_question || "none"}
-
-LOSER CLUSTER (merged in):
-Title: ${loser.title}
-Plant: ${loser.plant_or_product || "unspecified"}
-Summary: ${loser.summary || "none"}
-Primary question: ${loser.primary_question || "none"}
-
-MERGED DATA:
-Total signals: ${newSignalCount}
-Total questions: ${newQuestionCount}
-Audience wording: ${mergedWording.slice(0, 8).join(", ") || "none"}
-Problems: ${mergedProblems.slice(0, 5).join("; ") || "none"}
-Tips: ${mergedTips.slice(0, 5).join("; ") || "none"}
-
-Produce an updated cluster card for the merged result. The title should use audience language and cover the full scope of both clusters. Keep reasons brief.
-
-Return ONLY valid JSON:
-{
-  "title": "updated cluster title covering scope of both",
-  "summary": "1-2 sentence summary of the combined audience issue",
-  "primary_question": "the single most representative audience question, or null",
-  "plant_or_product": "broader plant scope if both clusters had different plants, or specific if they matched",
-  "novelty_status": "Known recurring topic | New audience wording | New question about a known topic | New tip or claim | New contradiction | New plant connected to a known problem | Unclear",
-  "ai_confidence": "High | Medium | Low",
-  "merge_note": "one sentence on why these clusters belong together"
-}`;
+    const mergePrompt = prompts.t("merge-clusters.mergePrompt.1", [winner.title, winner.plant_or_product || "unspecified", winner.summary || "none", winner.primary_question || "none", loser.title, loser.plant_or_product || "unspecified", loser.summary || "none", loser.primary_question || "none", newSignalCount, newQuestionCount, mergedWording.slice(0, 8).join(", ") || "none", mergedProblems.slice(0, 5).join("; ") || "none", mergedTips.slice(0, 5).join("; ") || "none"]);
 
     let aiUpdate = {};
     try {
@@ -239,30 +214,18 @@ Return ONLY valid JSON:
     };
 
   } catch (err) {
-    console.error("merge-clusters error:", err);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    throw err;
   }
-};
+}
 
 
 // ── CALL CLAUDE ───────────────────────────────────────────────────────────────
 async function callClaude(prompt) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method:  "POST",
-    headers: {
-      "x-api-key":         CLAUDE_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type":      "application/json",
-    },
-    body: JSON.stringify({
-      model:      CLAUDE_MODEL,
-      max_tokens: 600,
-      messages:   [{ role: "user", content: prompt }],
-    }),
+  const data = await claude.messages({
+    model:      CLAUDE_MODEL,
+    max_tokens: 600,
+    messages:   [{ role: "user", content: prompt }],
   });
-
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
 
   const text = (data.content?.[0]?.text || "").trim();
   const jsonStr = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/, "").trim();

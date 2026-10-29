@@ -10,8 +10,10 @@
  * Body: { run_type: "manual" | "scheduled" }   (optional — inferred from auth)
  *
  * Auth:
- *   Scheduled task  → x-internal-secret header  (no user JWT needed)
- *   Manual trigger  → Authorization: Bearer <admin/owner token>
+ *   Scheduled task  → scheduler credential (GitHub Actions) or internal credential
+ *   Manual trigger  → approved owner / admin / assistant session
+ *   One run at a time (durable lock); the run type comes from the credential,
+ *   never from the request body.
  *
  * Hard caps (safety):
  *   MAX_TOOL_CALLS  = 20   — total Claude tool_use blocks per run
@@ -23,16 +25,17 @@
  *   Every action is logged to agent_action_log in Supabase.
  */
 
-const { createClient }              = require("@supabase/supabase-js");
-const { requireUserRole, getUserId, CORS_HEADERS } = require("./_auth");
-const { TOOL_SCHEMAS, dispatchTool } = require("./_agent-tools");
+const prompts = require("../lib/prompts");
+const { preflightOrMethod, errorResponse, baseHeaders } = require("../lib/http");
+const { requireUserOrService, ROLES } = require("../lib/auth");
+const { lazyService } = require("../lib/supabase");
+const locks = require("../lib/locks");
+const claude = require("../lib/claude");
+const { TOOL_SCHEMAS, dispatchTool } = require("../lib/agent-tools");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = lazyService;
+const CORS_HEADERS = baseHeaders();
 
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const CLAUDE_MODEL   = "claude-haiku-4-5-20251001";
 
 const MAX_TOOL_CALLS = 20;
@@ -56,71 +59,34 @@ const ACTION_TYPE = {
 const REQUIRES_REVIEW = new Set(["suggest_review_move", "suggest_cleanup"]);
 
 // ── System prompt — tells Claude its role, constraints, and output format ─────
-const SYSTEM_PROMPT = `You are the SB Signal Flow Agent for Succulents Box, a subscription plant brand.
-
-YOUR JOB:
-Keep new audience signals moving into the right queue with clear priority and evidence.
-You operate on the signal flow only. You do not write briefs, scripts, or publish anything.
-
-EACH RUN, work through these steps in order:
-1. Call check_signal_queue to understand the current state.
-2. If unclustered_new > 0: call process_signal_batch. Call it again if remaining > 0, but stop at the batch limit.
-3. If stuck_signals exist: call run_maintenance_pass.
-4. Call get_cluster_health to find clusters needing attention.
-5. For clusters in pattern_detected_no_candidate: consider suggest_review_move if evidence is strong.
-6. For stale or high-count-but-stuck clusters: consider suggest_cleanup if clearly problematic.
-7. Call get_content_candidates so you can include the review queue depth in your summary.
-8. Stop calling tools and provide your final summary.
-
-RULES — you must follow these:
-- Use only the tools provided. Never attempt actions outside them.
-- suggest_review_move and suggest_cleanup create suggestions only — they do NOT change cluster status. A human reviewer must approve. Make this clear in your summary.
-- Only suggest_review_move for clusters where evidence is meaningful:
-    - signal_count >= 3, AND
-    - distinct_source_count >= 2 OR manual_signal_count >= 1, AND
-    - there is a clear repeated question or audience problem.
-- Set confidence = "Low" unless evidence is clear and specific.
-- Do not suggest moving a cluster if it is already in Content review ready or Closed.
-- If you reach the batch limit, note remaining signals in your summary.
-- Do not repeat tool calls for the same data. Read once, act, summarize.
-
-FINAL SUMMARY FORMAT (always end with this):
-Provide a plain-text summary with these sections:
-- Signals processed: [number, or "none — no backlog"]
-- Maintenance: [promoted X clusters / nothing to promote]
-- Review suggestions queued: [list cluster titles + one-line reason, or "none"]
-- Cleanup suggestions queued: [list cluster titles + one-line reason, or "none"]
-- Content review queue: [X candidates waiting for human review]
-- Needs human attention: [anything specific the reviewer should check first]
-- Next recommended action: [one sentence]`;
+const SYSTEM_PROMPT = () => prompts.t("run-agent.SYSTEM_PROMPT.1");
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+  let caller, lockHolder, promptSet;
+  try {
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
+    caller = await requireUserOrService(event, { roles: ROLES.WRITERS, scopes: ["scheduler", "internal"], bucket: "ai_batch" });
+    if (!process.env.CLAUDE_API_KEY) return { statusCode: 503, headers: CORS_HEADERS, body: JSON.stringify({ error: "AI is not configured on the server" }) };
+    promptSet = await prompts.loadPromptSet(supabase);
+    lockHolder = await locks.acquire("agent_run", 10 * 60, "The agent is already running. Try again in a few minutes.");
+  } catch (err) {
+    return errorResponse(err, "run-agent");
   }
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, headers: CORS_HEADERS, body: JSON.stringify({ error: "Method not allowed" }) };
+  try {
+    return await prompts.runWithPrompts(promptSet, () => runAgent(caller));
+  } catch (err) {
+    return errorResponse(err, "run-agent");
+  } finally {
+    await locks.release("agent_run", lockHolder);
   }
-  if (!CLAUDE_API_KEY) {
-    return { statusCode: 500, headers: CORS_HEADERS, body: JSON.stringify({ error: "CLAUDE_API_KEY not set" }) };
-  }
+};
 
-  // ── Auth ──────────────────────────────────────────────────────────────────
-  const internalSecret =
-    event.headers["x-internal-secret"] ||
-    event.headers["X-Internal-Secret"];
-  const isScheduled = internalSecret && internalSecret === process.env.INTERNAL_SECRET;
-
-  let performedBy = null;
-  if (!isScheduled) {
-    const authError = await requireUserRole(event, supabase, ["admin", "owner", "assistant"]);
-    if (authError) return authError;
-    performedBy = await getUserId(event, supabase);
-  }
-
-  const body     = JSON.parse(event.body || "{}");
+async function runAgent(caller) {
+  const isScheduled = caller.kind === "service";
+  const performedBy = caller.kind === "user" ? caller.userId : null;
   const runType  = isScheduled ? "scheduled" : "manual";
   const startedAt = Date.now();
 
@@ -140,12 +106,12 @@ exports.handler = async (event) => {
     return {
       statusCode: 500,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ error: "Could not create agent run log: " + (runErr?.message || "unknown") }),
+      body: JSON.stringify({ error: "Could not create the agent run log" }),
     };
   }
 
   const runId  = run.id;
-  const context = { supabase, runId, performedBy };
+  const context = { supabase, runId, performedBy, promptVersion: promptSetId() };
 
   // ── Agent state ───────────────────────────────────────────────────────────
   let toolCallsCount  = 0;
@@ -185,30 +151,13 @@ exports.handler = async (event) => {
       }
 
       // ── Call Claude ───────────────────────────────────────────────────────
-      const claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type":      "application/json",
-          "x-api-key":         CLAUDE_API_KEY,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model:      CLAUDE_MODEL,
-          max_tokens: 1024,
-          system:     SYSTEM_PROMPT,
-          tools:      TOOL_SCHEMAS,
-          messages,
-        }),
+      const claudeBody = await claude.messages({
+        model:      CLAUDE_MODEL,
+        max_tokens: 1024,
+        system:     SYSTEM_PROMPT(),
+        tools:      TOOL_SCHEMAS,
+        messages,
       });
-
-      const claudeBody = await claudeResp.json();
-
-      if (!claudeResp.ok) {
-        throw new Error(
-          "Claude API error " + claudeResp.status + ": " +
-          (claudeBody?.error?.message || JSON.stringify(claudeBody).slice(0, 200))
-        );
-      }
 
       // Add assistant turn to message history
       messages.push({ role: "assistant", content: claudeBody.content });
@@ -281,8 +230,9 @@ exports.handler = async (event) => {
     }
 
   } catch (err) {
-    agentError = err.message;
-    console.error("Agent run failed:", err);
+    // stored in agent_run_log: keep it generic (no provider payloads)
+    agentError = err && err.isPublic ? err.message : "Agent run failed (internal error)";
+    console.error("Agent run failed:", err && err.isPublic ? err.message : "internal error");
   }
 
   // ── Finalize run log ──────────────────────────────────────────────────────
@@ -311,7 +261,9 @@ exports.handler = async (event) => {
       error:       agentError || undefined,
     }),
   };
-};
+}
+
+function promptSetId() { return prompts.currentVersionId(); }
 
 // ── Helper: log a single tool action ─────────────────────────────────────────
 async function _logAction(runId, toolName, input, output, status, requiresHumanReview) {
