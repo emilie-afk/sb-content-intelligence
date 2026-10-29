@@ -1,5 +1,12 @@
 name: Daily Auto-Cluster
 
+# Public repository: workflow logs are public. Print only status codes and counts.
+concurrency:
+  group: daily-cluster
+  cancel-in-progress: false
+
+permissions: {}
+
 on:
   schedule:
     - cron: '30 0 * * *'   # 7:30 AM Vietnam (UTC+7)

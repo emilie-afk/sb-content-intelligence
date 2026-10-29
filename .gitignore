@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.*
+!.env.example
+# Private prompt sets and exports must never be committed
+*.private.json
+private/
+.netlify/
+.tmp/

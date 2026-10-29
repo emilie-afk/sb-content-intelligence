@@ -6,19 +6,26 @@
  * Background function = 15-minute timeout (enough for large signal queues).
  */
 
-const NETLIFY_URL =
-  process.env.URL || "https://sb-content-intelligence.netlify.app";
-const INTERNAL_SECRET = process.env.INTERNAL_SECRET;
+const { requireService, internalHeaders, siteUrl } = require("../lib/auth");
+const locks = require("../lib/locks");
 const MAX_CALLS = 40; // batch-cluster now processes 6/call, some finish async — allow headroom
 
 exports.handler = async (event) => {
-  // Require the shared internal secret — this endpoint is otherwise open to
-  // anyone on the internet, and each run burns Claude API credits.
-  const provided =
-    event?.headers?.["x-internal-secret"] || event?.headers?.["X-Internal-Secret"];
-  if (!INTERNAL_SECRET || provided !== INTERNAL_SECRET) {
-    return { statusCode: 401, body: JSON.stringify({ error: "Unauthorized" }) };
+  // Scheduler credential only — each run burns Claude API credits. One loop at a
+  // time (durable lock), so overlapping triggers don't double the work.
+  try {
+    await requireService(event || {}, ["scheduler"]);
+  } catch (e) {
+    return { statusCode: e.status || 401, body: JSON.stringify({ error: e.isPublic ? e.message : "Unauthorized" }) };
   }
+  let holder;
+  try {
+    holder = await locks.acquire("scheduled_batch_cluster", 16 * 60, "A clustering loop is already running");
+  } catch (e) {
+    return { statusCode: e.status || 409, body: JSON.stringify({ error: e.message }) };
+  }
+  const target = `${siteUrl()}/.netlify/functions/batch-cluster`;
+  const callHeaders = internalHeaders();
 
   let remaining = 1;
   let totalProcessed = 0;
@@ -29,17 +36,7 @@ exports.handler = async (event) => {
 
   while (remaining > 0 && calls < MAX_CALLS && consecutiveErrors < 3 && stalls < 3) {
     try {
-      const resp = await fetch(
-        `${NETLIFY_URL}/.netlify/functions/batch-cluster`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-internal-secret": INTERNAL_SECRET,
-          },
-          body: JSON.stringify({}),
-        }
-      );
+      const resp = await fetch(target, { method: "POST", headers: callHeaders, body: JSON.stringify({}) });
 
       if (!resp.ok) {
         console.error(`batch-cluster HTTP ${resp.status}`);
@@ -87,6 +84,7 @@ exports.handler = async (event) => {
         : "complete",
   };
 
+  await locks.release("scheduled_batch_cluster", holder);
   console.log("scheduled-batch-cluster done:", JSON.stringify(summary));
   return { statusCode: 200, body: JSON.stringify(summary) };
 };

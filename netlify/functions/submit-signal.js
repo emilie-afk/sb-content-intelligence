@@ -1,173 +1,176 @@
 /**
  * Netlify Function: submit-signal
  *
- * Accepts a raw signal (e.g. from the Instagram scraper)
- * without requiring a full dashboard login.
+ * Intake for signals from integrations that don't use a dashboard login:
+ * the intake Google Sheet, the video tracker sheet, the Social Submission site
+ * and the Instagram scraper.
  *
- * POST to: /.netlify/functions/submit-signal
- * Header: x-submission-token: <your-token>
- * Body: JSON matching the signals table fields
+ * POST /.netlify/functions/submit-signal
+ * Header: x-submission-token: <token issued for "submit_signal">
+ * Body:   one signal object or an array (max 200)
+ *
+ * Safe to retry: every row gets a submission key (source URL, or the content of a
+ * manual note) and duplicates are skipped instead of inserted twice.
  */
-
-const { createClient } = require("@supabase/supabase-js");
 const crypto = require("crypto");
+const { PublicError, json, parseBody, preflightOrMethod, errorResponse } = require("../lib/http");
+const { requireSubmissionToken } = require("../lib/tokens");
+const { internalHeaders, siteUrl } = require("../lib/auth");
+const { serviceClient } = require("../lib/supabase");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const MAX_SIGNALS = 200;
+const AUTO_CLUSTER_PER_TOKEN_PER_DAY = 300; // beyond this, the daily scheduled batch clusters them
 
-function hashToken(plain) {
-  return crypto.createHash("sha256").update(plain).digest("hex");
+function text(v, max) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s ? s.slice(0, max) : null;
+}
+function num(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(String(v).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+function url(v) {
+  const s = text(v, 2048);
+  if (!s) return null;
+  return /^https?:\/\//i.test(s) ? s : null;
+}
+function date(v) {
+  const s = text(v, 40);
+  return s && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+}
+function oneOfOrNull(v, allowed) { return allowed.includes(v) ? v : null; }
+
+function submissionKey(row) {
+  const basis = row.source_url
+    ? "url:" + row.source_url.trim().replace(/\/$/, "").toLowerCase()
+    : ["note", row.topic, row.creator_name, row.platform, row.date_found, row.is_manual_submission].join("|").toLowerCase();
+  return crypto.createHash("sha256").update(basis).digest("hex");
 }
 
 exports.handler = async (event) => {
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: JSON.stringify({ error: "Method not allowed" }) };
-  }
-
-  // ── 1. Validate token ────────────────────────────────────────
-  const token = event.headers["x-submission-token"] || event.headers["X-Submission-Token"];
-  if (!token) {
-    return { statusCode: 401, body: JSON.stringify({ error: "Missing submission token" }) };
-  }
-
-  const tokenHash = hashToken(token);
-  const { data: tokenRow, error: tokenErr } = await supabase
-    .from("submission_tokens")
-    .select("id, label, active, expires_at, allowed_action, rate_limit_per_hour, requests_this_hour, hour_window_start")
-    .eq("token_hash", tokenHash)
-    .single();
-
-  if (tokenErr || !tokenRow || !tokenRow.active) {
-    return { statusCode: 401, body: JSON.stringify({ error: "Invalid or inactive token" }) };
-  }
-  if (tokenRow.expires_at && new Date(tokenRow.expires_at) < new Date()) {
-    return { statusCode: 401, body: JSON.stringify({ error: "Token has expired" }) };
-  }
-  if (tokenRow.allowed_action !== "submit_signal") {
-    return { statusCode: 403, body: JSON.stringify({ error: "Token not allowed for this action" }) };
-  }
-
-  // ── Rate limiting ─────────────────────────────────────────────
-  const limit = tokenRow.rate_limit_per_hour ?? 500; // default 500 requests/hour
-  const now   = new Date();
-  const windowStart = tokenRow.hour_window_start ? new Date(tokenRow.hour_window_start) : null;
-  const inSameHour  = windowStart && (now - windowStart) < 3600_000;
-  const count       = inSameHour ? (tokenRow.requests_this_hour || 0) : 0;
-
-  if (count >= limit) {
-    return { statusCode: 429, body: JSON.stringify({ error: "Rate limit exceeded — try again next hour" }) };
-  }
-
-  // Update rate-limit counters (fire-and-forget, non-blocking)
-  supabase.from("submission_tokens").update({
-    requests_this_hour: count + 1,
-    hour_window_start:  inSameHour ? tokenRow.hour_window_start : now.toISOString(),
-    last_used_at:       now.toISOString(),
-  }).eq("id", tokenRow.id).then(() => {}).catch(() => {});
-
-  // ── 2. Parse body ────────────────────────────────────────────
-  let body;
   try {
-    body = JSON.parse(event.body);
-  } catch {
-    return { statusCode: 400, body: JSON.stringify({ error: "Invalid JSON body" }) };
-  }
+    const early = preflightOrMethod(event, ["POST"]);
+    if (early) return early;
 
-  // Support single signal OR array of signals
-  const signals = Array.isArray(body) ? body : [body];
+    // ── 1. Token (scope + hourly limit, atomically) before anything else ──
+    const token = await requireSubmissionToken(event, "submit_signal");
 
-  if (signals.length === 0) {
-    return { statusCode: 400, body: JSON.stringify({ error: "No signals provided" }) };
-  }
-  if (signals.length > 200) {
-    return { statusCode: 400, body: JSON.stringify({ error: "Maximum 200 signals per request" }) };
-  }
+    // ── 2. Parse + validate ─────────────────────────────────────────────
+    const body = parseBody(event, { maxBytes: 2 * 1024 * 1024, allowEmpty: false });
+    const signals = Array.isArray(body) ? body : [body];
+    if (signals.length === 0) throw new PublicError(400, "No signals provided");
+    if (signals.length > MAX_SIGNALS) throw new PublicError(400, `Maximum ${MAX_SIGNALS} signals per request`);
+    if (signals.some(s => !s || typeof s !== "object" || Array.isArray(s))) throw new PublicError(400, "Each signal must be an object");
 
-  // ── 3. Map to signals table columns ─────────────────────────
-  const rows = signals.map((s) => {
-    const isManual = s.is_manual ?? s.is_manual_submission ?? false;
-    return {
-    date_found:            s.date_discovered || s.date_found || new Date().toISOString().slice(0, 10),
-    platform:              s.platform || null,
-    source_url:            s.source_url || null,
-    creator_name:          s.creator || s.creator_name || null,
-    topic:                 s.plant_shown || s.topic || null,
-    plant_or_product:      s.sb_product || s.plant_or_product || null,
-    caption_summary:       s.caption ? s.caption.slice(0, 500) : null,
-    metrics_summary:       s.likes !== undefined
-                             ? `Likes: ${s.likes}, Comments: ${s.comments}`
-                             : s.metrics_summary || null,
-    score:                 s.score !== undefined ? Number(s.score) : null,
-    priority:              isManual ? "High" : (s.priority || null),
-    search_tag:            s.search_tag || null,
-    shelf_life:            s.shelf_life || null,
-    likes:                 s.likes !== undefined ? Number(s.likes) : null,
-    comments_count:        s.comments !== undefined ? Number(s.comments) : null,
-    post_date:             s.post_date || null,
-    status:                "New",
-    // is_manual: true  = intake sheet or dashboard modal (human submitted)
-    // is_manual: false = scraper (not passed → defaults false)
-    is_manual_submission:  isManual,
-    };
-  });
+    // ── 3. Map to signals table columns (same mapping as before) ────────
+    const rows = signals.map((s) => {
+      const isManual = (s.is_manual ?? s.is_manual_submission ?? false) === true;
+      const likes = num(s.likes), comments = num(s.comments);
+      const row = {
+        date_found:            date(s.date_discovered) || date(s.date_found) || new Date().toISOString().slice(0, 10),
+        platform:              text(s.platform, 50),
+        source_url:            url(s.source_url),
+        creator_name:          text(s.creator, 200) || text(s.creator_name, 200),
+        topic:                 text(s.plant_shown, 2000) || text(s.topic, 2000),
+        plant_or_product:      text(s.sb_product, 300) || text(s.plant_or_product, 300),
+        caption_summary:       s.caption ? text(s.caption, 500) : null, // (unchanged: only "caption" is read)
+        metrics_summary:       s.likes !== undefined ? `Likes: ${s.likes}, Comments: ${s.comments}`.slice(0, 200) : text(s.metrics_summary, 500),
+        score:                 num(s.score),
+        priority:              isManual ? "High" : oneOfOrNull(s.priority, ["High", "Medium", "Low"]),
+        search_tag:            text(s.search_tag, 200),
+        shelf_life:            oneOfOrNull(s.shelf_life, ["Trend", "Seasonal", "Evergreen", "Experimental"]),
+        likes,
+        comments_count:        comments,
+        post_date:             date(s.post_date),
+        status:                "New",
+        // true = intake sheet / Social Submission (human); false = scraper
+        is_manual_submission:  isManual,
+      };
+      row.submission_key = submissionKey(row);
+      return row;
+    }).filter(r => r.topic || r.source_url || r.caption_summary);
+    if (!rows.length) throw new PublicError(400, "Signals need a topic, source URL or caption");
 
-  // ── 4. Deduplicate against existing source_urls ──────────────
-  const urls = rows.map((r) => r.source_url).filter(Boolean);
-  let existingUrls = new Set();
-  if (urls.length > 0) {
-    const { data: existing } = await supabase
-      .from("signals")
-      .select("source_url")
-      .in("source_url", urls);
-    if (existing) existingUrls = new Set(existing.map((r) => r.source_url));
-  }
+    const sb = serviceClient();
 
-  const newRows = rows.filter((r) => !r.source_url || !existingUrls.has(r.source_url));
-  const skipped = rows.length - newRows.length;
+    // ── 4. Deduplicate: within the batch, against old rows by URL, and by key ──
+    const unique = [...new Map(rows.map(r => [r.submission_key, r])).values()];
+    const urls = unique.map(r => r.source_url).filter(Boolean);
+    let existingUrls = new Set();
+    if (urls.length) {
+      const { data: existing, error } = await sb.from("signals").select("source_url").in("source_url", urls);
+      if (error) throw new PublicError(503, "Could not check for duplicates");
+      existingUrls = new Set((existing || []).map(r => r.source_url));
+    }
+    const candidates = unique.filter(r => !r.source_url || !existingUrls.has(r.source_url));
 
-  if (newRows.length === 0) {
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ success: true, inserted: 0, skipped, message: "All signals already exist" }),
-    };
-  }
+    let inserted = [];
+    if (candidates.length) {
+      // ON CONFLICT (submission_key) DO NOTHING → retries and concurrent sends are safe
+      const { data, error } = await sb.from("signals")
+        .upsert(candidates, { onConflict: "submission_key", ignoreDuplicates: true })
+        .select("id, is_manual_submission");
+      if (error) {
+        console.error("submit-signal insert failed:", error.code || "db error");
+        throw new PublicError(500, "Failed to save signals. Nothing was saved; it is safe to retry.");
+      }
+      inserted = data || [];
+    }
+    const skipped = signals.length - inserted.length;
 
-  // ── 5. Batch insert ──────────────────────────────────────────
-  const { data: inserted, error: insertErr } = await supabase
-    .from("signals").insert(newRows).select("id, topic, platform, source_url, caption_summary, plant_or_product, is_manual_submission, priority");
+    // ── 5. Auto-cluster the new rows (bounded per token per day) ──────────
+    let autoClustered = 0;
+    if (inserted.length && process.env.CLAUDE_API_KEY) {
+      try {
+        const { data: allowed } = await sb.rpc("ci_consume_usage", {
+          p_subject: `token:${token.tokenId}`, p_bucket: "auto_cluster",
+          p_limit: AUTO_CLUSTER_PER_TOKEN_PER_DAY, p_window_seconds: 86400, p_cost: inserted.length,
+        });
+        if (allowed === true) autoClustered = await dispatchClustering(sb, inserted.map(r => r.id));
+      } catch (e) {
+        console.warn("submit-signal: auto-cluster skipped:", e.message); // the daily batch picks them up
+      }
+    }
 
-  if (insertErr) {
-    console.error("Insert error:", insertErr);
-    return { statusCode: 500, body: JSON.stringify({ error: "Failed to insert signals", detail: insertErr.message }) };
-  }
-
-  // ── 6. Auto-cluster (fire and forget) ────────────────────────
-  // Don't await — clustering runs in background so submit stays fast
-  if (inserted?.length && process.env.CLAUDE_API_KEY) {
-    const netlifyUrl = process.env.URL || "https://sb-content-intelligence.netlify.app";
-    Promise.allSettled(
-      inserted.map((sig) =>
-        fetch(`${netlifyUrl}/.netlify/functions/ai-analyze`, {
-          method:  "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-internal-secret": process.env.INTERNAL_SECRET || "",
-          },
-          body:    JSON.stringify({ type: "cluster", data: sig }),
-        })
-      )
-    ).catch((e) => console.warn("Auto-cluster batch failed:", e.message));
-  }
-
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
+    return json(200, {
       success: true,
-      inserted: newRows.length,
+      inserted: inserted.length,
       skipped,
-      message: `${newRows.length} signal(s) added, ${skipped} duplicate(s) skipped`,
-    }),
-  };
+      auto_clustering: autoClustered,
+      message: inserted.length
+        ? `${inserted.length} signal(s) added, ${skipped} duplicate(s) skipped`
+        : "All signals already exist",
+    });
+  } catch (err) {
+    return errorResponse(err, "submit-signal");
+  }
 };
+
+// Claim each new signal and hand it to the background analysis (202 returns fast).
+async function dispatchClustering(sb, ids) {
+  const promptsLib = require("../lib/prompts");
+  const set = await promptsLib.loadPromptSet(sb);
+  const target = `${siteUrl()}/.netlify/functions/cluster-signal-background`;
+  const callHeaders = internalHeaders();
+  let dispatched = 0;
+  await Promise.allSettled(ids.map(async (id) => {
+    const claim = crypto.randomUUID();
+    const { data: prev } = await sb.rpc("ci_claim_signal", { p_id: id, p_claim: claim, p_expected: null });
+    if (!prev) return;
+    try {
+      const r = await fetch(target, {
+        method: "POST", headers: callHeaders,
+        body: JSON.stringify({ type: "cluster", data: { id }, claim, prompt_version: set.id }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r.status === 202 || r.ok) { dispatched++; return; }
+      throw new Error(`HTTP ${r.status}`);
+    } catch (_) {
+      // put it back in the queue for the scheduled batch
+      await sb.from("signals").update({ status: "New" }).eq("id", id).eq("clustering_claim", claim);
+    }
+  }));
+  return dispatched;
+}
