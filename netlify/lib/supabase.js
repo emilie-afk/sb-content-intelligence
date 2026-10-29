@@ -10,8 +10,15 @@ let cached = null;
 let factory = (url, key) =>
   createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 
+const MIN_NODE_MAJOR = 22; // the locked Supabase client needs Node >= 22 (native WebSocket)
+
 function serviceClient() {
   if (cached) return cached;
+  const major = Number(process.versions.node.split(".")[0]);
+  if (major < MIN_NODE_MAJOR) {
+    console.error(`[supabase] unsupported Node.js ${process.version}; Node ${MIN_NODE_MAJOR}+ is required`);
+    throw new PublicError(503, "Server runtime is misconfigured");
+  }
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new PublicError(503, "Server configuration is incomplete");
@@ -35,4 +42,4 @@ const lazyService = new Proxy({}, {
 function __setFactory(f) { factory = f; cached = null; }
 function __reset() { cached = null; }
 
-module.exports = { serviceClient, lazyService, __setFactory, __reset };
+module.exports = { serviceClient, lazyService, __setFactory, __reset, MIN_NODE_MAJOR };

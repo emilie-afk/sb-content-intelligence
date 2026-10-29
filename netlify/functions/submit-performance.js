@@ -7,9 +7,15 @@
  * Header: x-submission-token: <token issued for "submit_performance_snapshot">
  * Body:   { video_url, platform, snapshot_type: 24h|72h|7d|Manual, views, ... }
  *
- * Retries are safe: an identical snapshot (same video, type and timestamp — or,
- * without a timestamp, the same views within 10 minutes) is not stored twice.
+ * Retries are safe, also when they arrive at the same moment: each snapshot gets an
+ * idempotency key enforced by a unique index (INSERT … ON CONFLICT DO NOTHING).
+ * Retry identity:
+ *   - optional body field "idempotency_key" (recommended for integrations), else
+ *   - with snapshot_timestamp: video + type + timestamp
+ *   - without it: video + type + views within the same 10-minute UTC window
+ *     (a retry that crosses a window boundary is stored as a new observation)
  */
+const crypto = require("crypto");
 const { PublicError, json, parseBody, preflightOrMethod, errorResponse } = require("../lib/http");
 const { requireSubmissionToken } = require("../lib/tokens");
 const { serviceClient } = require("../lib/supabase");
@@ -74,20 +80,22 @@ exports.handler = async (event) => {
     if (videoErr) throw new PublicError(503, "Could not look up the video");
     if (!video) throw new PublicError(404, "Video not found. Add it to Published Results in the dashboard first.");
 
-    // Idempotency
-    let dup = sb.from("performance_snapshots").select("id").eq("published_video_id", video.id).eq("snapshot_type", row.snapshot_type);
-    dup = snapshotTs
-      ? dup.eq("snapshot_timestamp", snapshotTs)
-      : dup.eq("views", row.views).gte("created_at", new Date(Date.now() - 10 * 60 * 1000).toISOString());
-    const { data: existing } = await dup.limit(1);
-    if (existing && existing.length) {
-      return json(200, { success: true, duplicate: true, message: "Snapshot already recorded" });
-    }
-
-    const { error: insertErr } = await sb.from("performance_snapshots").insert({ published_video_id: video.id, ...row });
+    // Idempotency: one atomic insert guarded by a unique key
+    const basis = body.idempotency_key
+      ? `client|${token.tokenId}|${str(body.idempotency_key, "idempotency_key", { max: 200 })}`
+      : snapshotTs
+        ? `ts|${video.id}|${row.snapshot_type}|${snapshotTs}`
+        : `win|${video.id}|${row.snapshot_type}|${row.views}|${Math.floor(Date.now() / 600000)}`;
+    const idempotency_key = crypto.createHash("sha256").update(basis).digest("hex");
+    const { data: inserted, error: insertErr } = await sb.from("performance_snapshots")
+      .upsert({ published_video_id: video.id, ...row, idempotency_key }, { onConflict: "idempotency_key", ignoreDuplicates: true })
+      .select("id");
     if (insertErr) {
       console.error("submit-performance insert failed:", insertErr.code || "db error");
       throw new PublicError(500, "Failed to save snapshot");
+    }
+    if (!inserted || inserted.length === 0) {
+      return json(200, { success: true, duplicate: true, message: "Snapshot already recorded" });
     }
 
     const statusField = { "24h": "snapshot_24h_status", "72h": "snapshot_72h_status", "7d": "snapshot_7d_status" }[row.snapshot_type];

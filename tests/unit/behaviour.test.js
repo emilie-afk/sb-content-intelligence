@@ -275,3 +275,77 @@ test("no wildcard CORS; no secrets or source locations in logs", async () => {
   const { baseHeaders } = require("../../netlify/lib/http.js");
   assert.strictEqual(baseHeaders()["Access-Control-Allow-Origin"], undefined);
 });
+
+test("R5: concurrent identical snapshots store one row; new observations still insert", async () => {
+  const fake = setup({ tables: { published_videos: [{ id: "v1", video_url: "https://www.tiktok.com/@x/video/1" }] } });
+  const f = stubFetch();
+  const body = { video_url: "https://www.tiktok.com/@x/video/1", platform: "TikTok", snapshot_type: "24h", views: 100, snapshot_timestamp: "2026-10-27T10:00:00Z" };
+  const rs = await Promise.all([1, 2, 3].map(() => call("submit-performance", event({ submit: PERF_TOKEN, body }))));
+  assert.deepStrictEqual(rs.map(r => r.status), [200, 200, 200]);
+  assert.strictEqual(fake.state.tables.performance_snapshots.length, 1);
+  assert.strictEqual(rs.filter(r => r.body.duplicate).length, 2);
+  const noTs = { ...body, snapshot_timestamp: undefined };
+  await Promise.all([1, 2].map(() => call("submit-performance", event({ submit: PERF_TOKEN, body: noTs }))));
+  assert.strictEqual(fake.state.tables.performance_snapshots.length, 2, "timestamp-free retry within the window stored once");
+  await call("submit-performance", event({ submit: PERF_TOKEN, body: { ...noTs, views: 150 } }));
+  assert.strictEqual(fake.state.tables.performance_snapshots.length, 3, "a genuinely new observation inserts");
+  await Promise.all([10, 20].map(v => call("submit-performance", event({ submit: PERF_TOKEN, body: { ...noTs, views: v, idempotency_key: "client-key-1" } }))));
+  assert.strictEqual(fake.state.tables.performance_snapshots.length, 4, "client idempotency key wins");
+  f.restore();
+});
+
+test("R6: agent caps are enforced in code (tool count, batches, time)", async () => {
+  const toolBlock = (i, name = "check_signal_queue") => ({ type: "tool_use", id: `tu_${i}`, name, input: {} });
+
+  // (a) one response asking for 25 tools, then end_turn
+  let fake = setup();
+  let modelCalls = 0;
+  let f = stubFetch({ claude: () => (++modelCalls === 1
+    ? { content: Array.from({ length: 25 }, (_, i) => toolBlock(i)), stop_reason: "tool_use" }
+    : { content: [{ type: "text", text: "summary" }], stop_reason: "end_turn" }) });
+  let r = await call("run-agent", event({ token: TOKENS.admin }));
+  assert.strictEqual(r.status, 200, r.raw);
+  assert.strictEqual(r.body.tool_calls, 20);
+  assert.strictEqual(r.body.limit, "tool_calls");
+  assert.strictEqual(fake.state.tables.agent_action_log.filter(a => a.status !== "skipped").length, 20);
+  assert.ok(modelCalls <= 2, `model calls: ${modelCalls}`);
+  f.restore();
+
+  // (b) a model that never stops asking for tools
+  fake = setup(); modelCalls = 0;
+  f = stubFetch({ claude: (b) => (b.tool_choice && b.tool_choice.type === "none"
+    ? { content: [{ type: "text", text: "forced summary" }], stop_reason: "end_turn" }
+    : { content: [toolBlock(++modelCalls), toolBlock(1000 + modelCalls)], stop_reason: "tool_use" }) });
+  r = await call("run-agent", event({ token: TOKENS.admin }));
+  assert.strictEqual(r.body.tool_calls, 20);
+  assert.ok(modelCalls <= 11, `tool-using model calls: ${modelCalls}`);
+  assert.strictEqual(r.body.summary, "forced summary");
+  f.restore();
+
+  // (c) batch cap stays at four
+  fake = setup(); modelCalls = 0;
+  f = stubFetch({
+    claude: () => (++modelCalls === 1
+      ? { content: Array.from({ length: 6 }, (_, i) => toolBlock(i, "process_signal_batch")), stop_reason: "tool_use" }
+      : { content: [{ type: "text", text: "done" }], stop_reason: "end_turn" }),
+    other: async () => ({ ok: true, status: 200, json: async () => ({ processed: 0, remaining: 0 }), text: async () => "" }),
+  });
+  r = await call("run-agent", event({ token: TOKENS.admin }));
+  assert.strictEqual(r.body.batches, 4);
+  f.restore();
+
+  // (d) time budget: each model call "takes" 3 s → stops before 8.5 s, no call after the limit
+  fake = setup(); modelCalls = 0;
+  const realNow = Date.now; let offset = 0;
+  Date.now = () => realNow() + offset;
+  try {
+    f = stubFetch({ claude: () => { offset += 3000; modelCalls++; return { content: [toolBlock(modelCalls)], stop_reason: "tool_use" }; } });
+    r = await call("run-agent", event({ token: TOKENS.admin }));
+    assert.strictEqual(r.body.status, "timeout");
+    assert.ok(modelCalls <= 3, `model calls after budget: ${modelCalls}`);
+    assert.match(r.body.summary, /time limit/);
+  } finally {
+    Date.now = realNow;
+    f.restore();
+  }
+});

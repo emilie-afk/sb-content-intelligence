@@ -3,7 +3,10 @@
   functions = "netlify/functions"
 
 [build.environment]
-  NODE_VERSION = "18"
+  # @supabase/supabase-js 2.118 (locked) requires Node >= 22 (native WebSocket).
+  # Functions must run on the same major: set AWS_LAMBDA_JS_RUNTIME = nodejs22.x in the
+  # Netlify UI too and confirm "Node.js 22" in a function log (see docs/SECURITY-ROLLOUT.md).
+  NODE_VERSION = "22"
 
 [functions]
   node_bundler = "esbuild"

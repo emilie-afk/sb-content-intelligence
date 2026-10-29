@@ -8,10 +8,10 @@
  * POST { script_id }
  * Auth: approved owner / admin / assistant session.
  *
- * Exactly-once: a durable lock prevents parallel sends, the script row records
- * when it was exported, and the Apps Script also refuses a second row for the
- * same export id — so retries and double clicks never add duplicate rows, and a
- * failure after the sheet write is repaired by the next retry.
+ * Retry-safe: a durable lock prevents parallel sends, the script row records when it
+ * was exported, and the Apps Script reserves the target row in its _exports ledger
+ * before writing, refills that same row on a retry and refuses a completed export id.
+ * Retries and double clicks therefore never add a second row (failure-injection tested).
  */
 const { PublicError, json, parseBody, preflightOrMethod, errorResponse } = require("../lib/http");
 const { requireUser, ROLES } = require("../lib/auth");

@@ -1552,8 +1552,8 @@ async function loadCommandCenter() {
       <td class="truncate">${esc(o.topic)}</td>
       <td>${esc(o.plant_or_product || '—')}</td>
       <td><span class="score-pill ${o.total_ai_score>=65?'score-high':o.total_ai_score>=40?'score-medium':'score-low'}">${o.total_ai_score||0}</span></td>
-      <td><span class="badge badge-${(o.priority||'').toLowerCase()}">${o.priority||'—'}</span></td>
-      <td>${o.shelf_life||'—'}</td>
+      <td><span class="badge badge-${esc((o.priority||'').toLowerCase())}">${esc(o.priority||'—')}</span></td>
+      <td>${esc(o.shelf_life||'—')}</td>
       <td><button class="btn btn-primary btn-sm" onclick="decideOpportunity('${o.id}','Approve brief')">Approve</button></td>
     </tr>`).join('');
 
@@ -1566,7 +1566,7 @@ async function loadCommandCenter() {
       <td class="truncate">${esc(b.title)}</td>
       <td>${esc(b.featured_product||'—')}</td>
       <td>${b.deadline||'—'}</td>
-      <td><span class="badge badge-${b.status?.toLowerCase().replace(' ','-')}">${b.status}</span></td>
+      <td><span class="badge badge-${esc(b.status?.toLowerCase().replace(' ','-'))}">${esc(b.status)}</span></td>
       <td><button class="btn btn-primary btn-sm" onclick="updateBriefStatus('${b.id}','Approved')">Approve</button></td>
     </tr>`).join('');
 
@@ -1579,7 +1579,7 @@ async function loadCommandCenter() {
       <td class="truncate">${esc(s.title||'—')}</td>
       <td>${esc(s.platform||'—')}</td>
       <td>${esc(s.script_type||'—')}</td>
-      <td><span class="badge badge-${(s.status||'').toLowerCase().replace(/ /g,'-')}">${s.status}</span></td>
+      <td><span class="badge badge-${esc((s.status||'').toLowerCase().replace(/ /g,'-'))}">${esc(s.status)}</span></td>
       <td><button class="btn btn-primary btn-sm" onclick="updateScriptStatus('${s.id}','Approved')">Approve</button></td>
     </tr>`).join('');
 
@@ -1697,7 +1697,7 @@ async function loadInbox() {
       <td class="truncate">${esc(s.topic||'—')}</td>
       <td>${s.score != null ? `<span class="score-pill ${s.score>=65?'score-high':s.score>=40?'score-medium':'score-low'}">${s.score}</span>` : '—'}</td>
       <td>
-        ${s.priority ? `<span class="badge badge-${s.priority.toLowerCase()}">${s.priority}</span>` : '—'}
+        ${s.priority ? `<span class="badge badge-${esc(s.priority.toLowerCase())}">${esc(s.priority)}</span>` : '—'}
         ${s.revenue_priority_match === 'Yes' ? `<span class="badge badge-high" style="margin-left:4px;font-size:10px" title="${esc(s.revenue_priority_note||'')}">💰 Revenue match</span>` : s.revenue_priority_match === 'Needs check' ? `<span class="badge badge-pending" style="margin-left:4px;font-size:10px">🔍 Check stock</span>` : ''}
       </td>
       <td>
@@ -1727,8 +1727,8 @@ function openSignalDetail(id) {
   ].filter(([,v]) => v != null && v !== '');
   document.getElementById('modal-signal-detail-content').innerHTML = rows.map(([k,v]) =>
     `<div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px">
-      <div style="width:140px;flex-shrink:0;color:#888;font-weight:500">${k}</div>
-      <div style="color:#1a2e1a">${v}</div>
+      <div style="width:140px;flex-shrink:0;color:#888;font-weight:500">${esc(k)}</div>
+      <div style="color:#1a2e1a">${k === 'Source URL' ? v : esc(v)}</div>
     </div>`).join('');
   document.getElementById('modal-signal-detail').style.display = 'flex';
 }
@@ -1890,7 +1890,7 @@ async function loadToday() {
     const cleanupTotal = (cc.dismiss||0) + (cc.reroute||0) + (cc.merge||0) + (cc.split||0);
     summaryHtml = `
       <div class="today-summary-panel">
-        <div class="today-summary-label">AI Briefing · ${latestBriefing.briefing_type} · ${genDate}</div>
+        <div class="today-summary-label">AI Briefing · ${esc(latestBriefing.briefing_type)} · ${esc(genDate)}</div>
         <p class="today-summary-text">${esc(latestBriefing.summary || 'Briefing generated.')}</p>
         <div class="today-summary-stats">
           <span>${latestBriefing.signal_count || 0} signals reviewed</span>
@@ -2474,7 +2474,7 @@ async function loadPublished() {
       <td style="font-weight:600">${v.views_count != null ? v.views_count.toLocaleString() + (v.views_day ? '<span style="font-size:11px;font-weight:400;color:#94a3b8;margin-left:4px">D'+v.views_day+'</span>' : '') : '—'}</td>
       <td>${perfTierBadge(v.performance_tier, v.snapshot_7d_status)}</td>
       <td>${snapshotBadge(v.snapshot_7d_status)}</td>
-      <td><span class="badge badge-${(v.learning_status||'pending').toLowerCase().replace(' ','-')}">${v.learning_status||'Pending'}</span></td>
+      <td><span class="badge badge-${esc((v.learning_status||'pending').toLowerCase().replace(' ','-'))}">${esc(v.learning_status||'Pending')}</span></td>
       <td>${scriptCell}</td>
     </tr>`;
   }).join('');
@@ -2643,7 +2643,7 @@ async function loadLearning() {
           ${hasEvidence ? '<span style="font-size:10px;color:#94a3b8;margin-left:4px">▾ why?</span>' : ''}
         </td>
         <td style="font-size:12px;color:#4f46e5">${m.source ? `📝 ${esc(m.source)}` : '<span style="color:#94a3b8">—</span>'}</td>
-        <td>${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : '—'}</td>
+        <td>${m.confidence ? `<span class="badge badge-${esc(m.confidence.toLowerCase())}">${esc(m.confidence)}</span>` : '—'}</td>
         <td onclick="event.stopPropagation()">
           <select class="filter-select" style="padding:4px 8px;font-size:12px" onchange="updateLearningStatus('${m.id}',this.value)"${isAdmin ? '' : ' disabled'}>
             ${['Active','Approved rule','Archived'].map(opt=>`<option${m.status===opt?' selected':''}>${opt}</option>`).join('')}
@@ -2672,7 +2672,7 @@ async function loadLearning() {
             <span style="font-size:12px;color:#94a3b8;margin-left:8px">${m.date_added||''}</span>
           </div>
           <div style="display:flex;gap:6px;align-items:center">
-            ${m.confidence ? `<span class="badge badge-${m.confidence.toLowerCase()}">${m.confidence}</span>` : ''}
+            ${m.confidence ? `<span class="badge badge-${esc(m.confidence.toLowerCase())}">${esc(m.confidence)}</span>` : ''}
             <button class="btn btn-danger btn-sm" onclick="deleteLearning('${m.id}')">Archive</button>
           </div>
         </div>
@@ -2693,7 +2693,7 @@ async function loadSources() {
       <td>${esc(s.platform||'—')}</td>
       <td>${esc(s.source_type||'—')}</td>
       <td>${esc(s.collection_frequency||'—')}</td>
-      <td><span class="badge badge-${(s.signal_quality||'unknown').toLowerCase()}">${s.signal_quality||'Unknown'}</span></td>
+      <td><span class="badge badge-${esc((s.signal_quality||'unknown').toLowerCase())}">${esc(s.signal_quality||'Unknown')}</span></td>
       <td>${s.ideas_generated||0}</td>
       <td>${s.approved_ideas||0}</td>
       <td>${s.published_videos||0}</td>
@@ -3340,7 +3340,8 @@ async function loadHelp() {
   });
 
   // Render markdown → HTML with anchor IDs on headings
-  const md = data.content
+  // Manual text is escaped first, then the small markdown subset below adds tags.
+  const md = esc(data.content)
     .replace(/^### (.+)$/gm, (_, t) => `<h3 id="${slug(t)}" style="color:#1a5c2a;margin:20px 0 6px;scroll-margin-top:16px">${t}</h3>`)
     .replace(/^## (.+)$/gm,  (_, t) => `<h2 id="${slug(t)}" style="color:#1a2e1a;margin:32px 0 8px;border-bottom:2px solid #c8e6c9;padding-bottom:6px;scroll-margin-top:16px">${t}</h2>`)
     .replace(/^# (.+)$/gm,   (_, t) => `<h1 id="${slug(t)}" style="color:#1a2e1a;margin:0 0 16px;scroll-margin-top:16px">${t}</h1>`)
@@ -3495,6 +3496,12 @@ function esc(str) {
 }
 
 // Links built from imported / AI-produced data: only http(s) URLs are clickable.
+// A value passed as a JavaScript string argument inside an HTML attribute
+// (onclick="fn(${jsArg(x)})"): JSON-quote it, then HTML-escape the result.
+function jsArg(value) {
+  return esc(JSON.stringify(String(value == null ? '' : value)));
+}
+
 function safeHref(url) {
   const s = String(url == null ? '' : url).trim();
   return /^https?:\/\//i.test(s) ? esc(s) : '#';
@@ -3502,7 +3509,7 @@ function safeHref(url) {
 
 function snapshotBadge(status) {
   const cls = { Pending:'badge-pending', Submitted:'badge-submitted', Overdue:'badge-overdue' }[status] || 'badge-pending';
-  return `<span class="badge ${cls}">${status||'Pending'}</span>`;
+  return `<span class="badge ${cls}">${esc(status||'Pending')}</span>`;
 }
 
 function perfTierBadge(tier, snapshotStatus) {
@@ -3726,7 +3733,7 @@ function renderScriptAnalysis(a) {
     <div style="font-weight:600;margin-bottom:10px">🤖 AI Brand Check</div>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
       <span style="font-size:15px;font-weight:600;color:${color}">${esc(a.overall||'—')}</span>
-      <span style="font-size:13px;color:#555">Score: ${a.score||'—'}/100</span>
+      <span style="font-size:13px;color:#555">Score: ${esc(a.score||'—')}/100</span>
       <span style="font-size:13px">Hook: ${esc(a.hook_strength||'—')}</span>
       <span style="font-size:13px">CTA: ${a.cta_present ? '✅' : '❌'}</span>
     </div>
@@ -3809,7 +3816,7 @@ async function loadWatchlist() {
       <td>${fmt(p.revenue)}</td>
       <td>${p.skus != null ? p.skus : '—'}</td>
       <td>${p.net_items_sold != null ? p.net_items_sold.toLocaleString() : '—'}</td>
-      <td>${p.stock_status || 'Unknown'}</td>
+      <td>${esc(p.stock_status || 'Unknown')}</td>
       <td><span class="badge ${p.priority_level==='High'?'badge-high':'badge-pending'}">${esc(p.priority_level||'Normal')}</span></td>
       <td style="font-size:12px;color:#888">${p.last_imported_at ? new Date(p.last_imported_at).toLocaleDateString() : '—'}</td>
     </tr>
@@ -3967,7 +3974,7 @@ function renderRepetitionAnalysis(a) {
     <div style="font-weight:600;margin-bottom:8px">🔁 Repetition Check</div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
       <span style="font-weight:700;color:${riskColor}">${esc(a.repetition_risk||'—')} risk</span>
-      ${a.days_since_similar ? `<span style="color:#555">${a.days_since_similar} days since similar post</span>` : ''}
+      ${a.days_since_similar ? `<span style="color:#555">${esc(a.days_since_similar)} days since similar post</span>` : ''}
     </div>
     ${a.freshness_reason ? `<div style="margin-bottom:6px"><b>Freshness:</b> ${esc(a.freshness_reason)}</div>` : ''}
     ${a.repetition_recommendation ? `<div style="margin-bottom:6px;font-style:italic;color:#444">${esc(a.repetition_recommendation)}</div>` : ''}
@@ -4389,7 +4396,7 @@ async function openDiscoveryPanel(clusterId) {
       <span>📊 ${cluster.signal_count||0} signals</span>
       <span>❓ ${cluster.question_count||0} questions</span>
       <span>🔗 ${cluster.distinct_source_count||0} sources</span>
-      <span>📱 ${(cluster.platforms||[]).join(', ')||'—'}</span>
+      <span>📱 ${esc((cluster.platforms||[]).join(', ')||'—')}</span>
     </div>
     <div style="font-size:12px;color:#6b7280;margin-bottom:20px">
       First seen: ${cluster.first_seen_at ? new Date(cluster.first_seen_at).toLocaleDateString() : '—'} ·
@@ -4428,7 +4435,7 @@ async function openDiscoveryPanel(clusterId) {
         </div>
         <div>
           <label style="${labelStyle}">Audience wording (one per line)</label>
-          <textarea id="edit-wording" style="${inputStyle};resize:vertical;min-height:70px">${(cluster.audience_wording||[]).join('\n')}</textarea>
+          <textarea id="edit-wording" style="${inputStyle};resize:vertical;min-height:70px">${esc((cluster.audience_wording||[]).join('\n'))}</textarea>
         </div>
         <button class="btn btn-primary" style="font-size:13px" onclick="saveClusterEdit('${cluster.id}')">💾 Save changes</button>
       </div>
@@ -4443,7 +4450,7 @@ async function openDiscoveryPanel(clusterId) {
         <button class="btn btn-secondary" onclick="pinCluster('${cluster.id}')">📌 Pin</button>
         <button class="btn btn-secondary" onclick="openMergePicker('${cluster.id}')">🔀 Merge</button>
         <button class="btn btn-secondary" onclick="dismissCluster('${cluster.id}')">✕ Dismiss</button>
-        <button class="btn btn-secondary" style="color:#e74c3c;border-color:#e74c3c" onclick="deleteCluster('${cluster.id}','${cluster.title.replace(/'/g,"\\'")}')">🗑 Delete + block</button>
+        <button class="btn btn-secondary" style="color:#e74c3c;border-color:#e74c3c" onclick="deleteCluster('${cluster.id}',${jsArg(cluster.title)})">🗑 Delete + block</button>
       </div>
 
       <!-- Merge picker (hidden by default) -->
@@ -4523,7 +4530,7 @@ function filterMergeCandidates(winnerId, query) {
   container.innerHTML = matches.map(c => `
     <div style="background:#1e293b;border-radius:6px;padding:9px 12px;cursor:pointer;border:1px solid transparent"
       onmouseover="this.style.borderColor='#4f46e5'" onmouseout="this.style.borderColor='transparent'"
-      onclick="confirmMerge('${winnerId}','${c.id}',${JSON.stringify(c.title).replace(/"/g,'&quot;')})">
+      onclick="confirmMerge('${winnerId}','${c.id}',${jsArg(c.title)})">
       <div style="font-size:12px;font-weight:600;color:#e2e8f0">${esc(c.title)}</div>
       <div style="font-size:11px;color:#64748b;margin-top:2px">
         ${c.plant_or_product ? `🌱 ${esc(c.plant_or_product)} · ` : ''}
@@ -4755,7 +4762,7 @@ async function loadContentReview() {
         <span>📊 ${c.signal_count||0} signals</span>
         ${(c.question_count||0) > 0 ? `<span>❓ ${c.question_count} questions</span>` : ''}
         ${(c.distinct_source_count||0) > 0 ? `<span>🔗 ${c.distinct_source_count} sources</span>` : ''}
-        ${(c.platforms||[]).length ? `<span>📱 ${c.platforms.join(', ')}</span>` : ''}
+        ${(c.platforms||[]).length ? `<span>📱 ${esc(c.platforms.join(', '))}</span>` : ''}
         <span>📅 ${firstSeen} → ${lastSeen}</span>
       </div>
 
@@ -4772,7 +4779,7 @@ async function loadContentReview() {
       ${c.closest_published_title ? `<div style="background:#1e293b;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12.5px">
         <div style="color:#94a3b8;margin-bottom:3px">Closest published content</div>
         <div style="font-weight:500;color:#e2e8f0">${esc(c.closest_published_title)}</div>
-        <div style="color:#9ca3af;margin-top:2px">${c.closest_published_date ? new Date(c.closest_published_date).toLocaleDateString('en-US', {year:'numeric',month:'short'}) : '—'}${c.days_since_similar ? ` · ${c.days_since_similar} days ago` : ''}</div>
+        <div style="color:#9ca3af;margin-top:2px">${c.closest_published_date ? new Date(c.closest_published_date).toLocaleDateString('en-US', {year:'numeric',month:'short'}) : '—'}${c.days_since_similar ? ` · ${esc(c.days_since_similar)} days ago` : ''}</div>
         ${c.freshness_reason ? `<div style="color:#d1d5db;margin-top:4px;font-style:italic">${esc(c.freshness_reason)}</div>` : ''}
       </div>` : ''}
 

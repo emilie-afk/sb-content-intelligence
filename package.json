@@ -4,7 +4,7 @@
   "description": "Succulents Box social listening dashboard",
   "scripts": {
     "dev": "netlify dev",
-    "test": "node --test tests/unit/*.test.js tests/apps-script/*.test.js tests/static/*.test.js",
+    "test": "node --test tests/runtime/*.test.js tests/unit/*.test.js tests/apps-script/*.test.js tests/static/*.test.js",
     "test:db": "tests/db/run.sh",
     "test:browser": "node tests/browser/check.js",
     "check": "for f in netlify/functions/*.js netlify/lib/*.js scripts/*.js; do node --check \"$f\" || exit 1; done"
@@ -18,6 +18,6 @@
     "acorn-walk": "^8.3.5"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

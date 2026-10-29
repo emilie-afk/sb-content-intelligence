@@ -135,11 +135,33 @@ alter table public.signals
   add column if not exists clustering_claimed_at timestamptz;
 create unique index if not exists signals_submission_key_uniq on public.signals (submission_key);
 
+-- Performance snapshots: atomic de-duplication of retries (existing rows keep NULL, so
+-- historic duplicates are preserved as they are and never conflict).
+do $$ begin
+  if to_regclass('public.performance_snapshots') is not null then
+    alter table public.performance_snapshots add column if not exists idempotency_key text;
+    create unique index if not exists performance_snapshots_idempotency_uniq on public.performance_snapshots (idempotency_key);
+  end if;
+end $$;
+
 do $$ begin
   if to_regclass('public.script_outputs') is not null then
     alter table public.script_outputs
       add column if not exists sheet_exported_at timestamptz,
-      add column if not exists sheet_export_ref text;
+      add column if not exists sheet_export_ref text,
+      add column if not exists approved_at timestamptz,
+      add column if not exists approved_by uuid,
+      -- irreversible, database-controlled marker: this script was approved at some point
+      add column if not exists ever_approved boolean not null default false,
+      -- irreversible: text frozen for non-admins (ever approved, used in production or measured)
+      add column if not exists content_locked boolean not null default false;
+    -- legacy rows: anything approved, used or measured, or carrying approval metadata
+    update public.script_outputs set ever_approved = true
+     where not ever_approved
+       and (review_status in ('Approved','Used in production','Measured')
+            or approved_at is not null or approved_by is not null);
+    update public.script_outputs set content_locked = true
+     where not content_locked and (ever_approved or review_status in ('Approved','Used in production','Measured'));
   end if;
 end $$;
 
@@ -202,16 +224,31 @@ declare
                                'shot_list','broll_notes','product_mention','cta','caption','hashtags','platform','script_type'];
   c text;
 begin
+  -- Reaching Approved / Used in production / Measured freezes the text for non-admins,
+  -- whoever makes the change (browser, Netlify Function or SQL editor); never undone.
+  if new.review_status in ('Approved','Used in production','Measured') then new.content_locked := true; end if;
+  if tg_op = 'UPDATE' then new.content_locked := new.content_locked or old.content_locked; end if;
   if not ci_private.is_api_user() then return new; end if;
+
+  -- Approval provenance is controlled by the database for every browser user, in every
+  -- state: approved_at / approved_by / ever_approved can't be set, cleared or forged.
   if tg_op = 'INSERT' then
     if new.review_status in ('Approved','Used in production','Measured') and not is_admin then
       raise exception 'Only an owner or admin can approve scripts' using errcode = '42501';
     end if;
+    new.approved_at := null; new.approved_by := null; new.ever_approved := false;
+    new.content_locked := new.review_status in ('Approved','Used in production','Measured');
     if new.review_status = 'Approved' then
-      new.approved_by := auth.uid(); new.approved_at := now();
+      new.approved_by := auth.uid(); new.approved_at := now(); new.ever_approved := true;
     end if;
     return new;
   end if;
+
+  new.approved_at := old.approved_at;
+  new.approved_by := old.approved_by;
+  new.ever_approved := old.ever_approved;
+  new.content_locked := old.content_locked or new.review_status in ('Approved','Used in production','Measured');
+
   if new.review_status is distinct from old.review_status then
     if new.review_status = 'Approved' and not is_admin then
       raise exception 'Only an owner or admin can approve scripts' using errcode = '42501';
@@ -220,15 +257,13 @@ begin
       raise exception 'Only an owner or admin can un-approve a script' using errcode = '42501';
     end if;
     if new.review_status = 'Approved' then
-      new.approved_by := auth.uid(); new.approved_at := now();
+      new.approved_by := auth.uid(); new.approved_at := now(); new.ever_approved := true;
     end if;
-  elsif old.review_status = 'Approved' then
-    -- keep approval metadata trustworthy
-    new.approved_by := old.approved_by; new.approved_at := old.approved_at;
   end if;
-  -- Text is locked once a script has been approved (also after it moves on to
-  -- Used in production / Measured / Archived), so approval can't be bypassed in two steps.
-  if not is_admin and (old.approved_at is not null
+
+  -- Text is locked for non-admins once a script has ever been approved (in any later
+  -- status), or while it is Approved / Used in production / Measured.
+  if not is_admin and (old.content_locked or old.ever_approved or old.approved_at is not null
                        or old.review_status in ('Approved','Used in production','Measured')) then
     foreach c in array content_cols loop
       if (to_jsonb(new) -> c) is distinct from (to_jsonb(old) -> c) then

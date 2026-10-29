@@ -85,76 +85,120 @@ function doGet(e) {
   return jsonResponse({ success: false, error: 'Unauthorized' });
 }
 
-// ── Exports ledger (hidden tab) so the same script is never appended twice ───
+// ── Exports ledger (hidden tab "_exports") ───────────────────────────────────
+// One ledger row per export id:  export_id | sheet | row | number | status | updated_at
+// The target row is RESERVED (and flushed) before any content cell is written, then
+// marked "complete". A retry of the same export id after any failure re-fills that same
+// reserved row (also across a month change) instead of allocating a new one, and a
+// completed export is never written again. The script lock serialises overlapping calls.
+var LEDGER_HEADERS = ['export_id', 'sheet', 'row', 'number', 'status', 'updated_at'];
+
 function exportsSheet(ss) {
   var sh = ss.getSheetByName('_exports');
   if (!sh) {
     sh = ss.insertSheet('_exports');
-    sh.getRange(1, 1, 1, 3).setValues([['export_id', 'placed', 'exported_at']]);
+    sh.getRange(1, 1, 1, LEDGER_HEADERS.length).setValues([LEDGER_HEADERS]);
     sh.hideSheet();
   }
   return sh;
 }
 
-function findExport(sh, exportId) {
+function ledgerEntries(sh) {
   var last = sh.getLastRow();
-  if (last < 2) return null;
-  var values = sh.getRange(2, 1, last - 1, 2).getValues();
+  if (last < 2) return [];
+  var values = sh.getRange(2, 1, last - 1, LEDGER_HEADERS.length).getValues();
+  var out = [];
   for (var i = 0; i < values.length; i++) {
-    if (String(values[i][0]) === exportId) return String(values[i][1]);
+    out.push({ ledgerRow: i + 2, id: String(values[i][0]), sheet: String(values[i][1]),
+               row: Number(values[i][2]), number: values[i][3], status: String(values[i][4]) });
   }
+  return out;
+}
+
+function findExport(entries, exportId) {
+  for (var i = 0; i < entries.length; i++) if (entries[i].id === exportId) return entries[i];
   return null;
 }
 
+// highest row already reserved in a month tab (a reserved row may still be empty)
+function maxReservedRow(entries, sheetName) {
+  var max = 0;
+  for (var i = 0; i < entries.length; i++) if (entries[i].sheet === sheetName && entries[i].row > max) max = entries[i].row;
+  return max;
+}
+
+function writeScriptRow(sheet, cols, row, number, f) {
+  if (cols['no.'])             sheet.getRange(row, cols['no.']).setValue(number);
+  if (cols['title'])           sheet.getRange(row, cols['title']).setValue(safe(f.title));
+  if (cols['thumbnail title']) sheet.getRange(row, cols['thumbnail title']).setValue(safe(f.thumbnail_title));
+  if (cols['script'])          sheet.getRange(row, cols['script']).setValue(safe(f.script_text));
+  if (cols['link sample'])     sheet.getRange(row, cols['link sample']).setValue('');
+  if (cols['note'])            sheet.getRange(row, cols['note']).setValue(safe(f.note));
+  if (cols['status'])          sheet.getRange(row, cols['status']).setValue('');
+  if (cols['uploaded'])        sheet.getRange(row, cols['uploaded']).setValue('');
+  if (cols['caption'])         sheet.getRange(row, cols['caption']).setValue(safe(f.caption));
+  if (cols['script'])          sheet.getRange(row, cols['script']).setWrap(true);
+  sheet.setRowHeight(row, 21);
+}
+
 function appendScript(data) {
-  var title           = field(data, 'title');
-  var thumbnail_title = field(data, 'thumbnail_title');
-  var script_text     = field(data, 'script_text');
-  var caption         = field(data, 'caption');
-  var platform        = field(data, 'platform');
-  var exportId        = field(data, 'export_id');
-  var note            = platform ? 'Platform: ' + platform : '';
-  if (!title) throw new Error('title is required');
+  var f = {
+    title:           field(data, 'title'),
+    thumbnail_title: field(data, 'thumbnail_title'),
+    script_text:     field(data, 'script_text'),
+    caption:         field(data, 'caption'),
+    platform:        field(data, 'platform'),
+  };
+  var exportId = field(data, 'export_id');
+  f.note = f.platform ? 'Platform: ' + f.platform : '';
+  if (!f.title) throw new Error('title is required');
 
   var lock = LockService.getScriptLock();
-  lock.waitLock(20000); // one append at a time → no duplicate row numbers / rows
+  lock.waitLock(20000); // one export at a time
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var ledger = exportsSheet(ss);
-    if (exportId) {
-      var already = findExport(ledger, exportId);
-      if (already) return { success: true, duplicate: true, placed: already };
+    var entries = exportId ? ledgerEntries(ledger) : [];
+    var entry = exportId ? findExport(entries, exportId) : null;
+
+    if (entry && entry.status === 'complete') {
+      return { success: true, duplicate: true, placed: entry.sheet + ' row ' + entry.row, number: entry.number };
     }
 
-    var monthName = MONTHS[new Date().getMonth()];
-    var sheet     = ss.getSheetByName(monthName);
-    if (!sheet) throw new Error('Sheet not found: ' + monthName);
+    var sheet, cols, row, number;
+    if (entry) {
+      // repair the reserved row of an earlier, interrupted attempt
+      sheet = ss.getSheetByName(entry.sheet);
+      if (!sheet) throw new Error('Sheet not found: ' + entry.sheet);
+      var h0 = findHeaderRow(sheet);
+      if (!h0) throw new Error('Could not find header row in ' + entry.sheet);
+      cols = getColumnMap(sheet, h0.row, h0.startCol);
+      row = entry.row; number = entry.number;
+    } else {
+      var monthName = MONTHS[new Date().getMonth()];
+      sheet = ss.getSheetByName(monthName);
+      if (!sheet) throw new Error('Sheet not found: ' + monthName);
+      var header = findHeaderRow(sheet);
+      if (!header) throw new Error('Could not find header row in ' + monthName);
+      cols = getColumnMap(sheet, header.row, header.startCol);
+      var lastDataRow = Math.max(findLastDataRow(sheet, header.row), maxReservedRow(entries, monthName));
+      number = lastDataRow > header.row ? lastDataRow - header.row : 1;   // numbering unchanged
+      row = lastDataRow + 1;
+      if (exportId) {
+        ledger.appendRow([exportId, monthName, row, number, 'reserved', new Date()]);
+        SpreadsheetApp.flush(); // reservation is durable before any content is written
+        entry = findExport(ledgerEntries(ledger), exportId);
+        if (!entry || entry.row !== row) throw new Error('Could not reserve the export row');
+      }
+    }
 
-    var header = findHeaderRow(sheet);
-    if (!header) throw new Error('Could not find header row in ' + monthName);
-    var cols = getColumnMap(sheet, header.row, header.startCol);
-
-    var lastDataRow = findLastDataRow(sheet, header.row);
-    var nextNum     = lastDataRow > header.row ? lastDataRow - header.row : 1;
-    var newRow      = lastDataRow + 1;
-
-    // Headers: No. | Title | Thumbnail Title | Script | Link sample | Note | Status | Uploaded | Caption
-    if (cols['no.'])             sheet.getRange(newRow, cols['no.']).setValue(nextNum);
-    if (cols['title'])           sheet.getRange(newRow, cols['title']).setValue(safe(title));
-    if (cols['thumbnail title']) sheet.getRange(newRow, cols['thumbnail title']).setValue(safe(thumbnail_title));
-    if (cols['script'])          sheet.getRange(newRow, cols['script']).setValue(safe(script_text));
-    if (cols['link sample'])     sheet.getRange(newRow, cols['link sample']).setValue('');
-    if (cols['note'])            sheet.getRange(newRow, cols['note']).setValue(safe(note));
-    if (cols['status'])          sheet.getRange(newRow, cols['status']).setValue('');
-    if (cols['uploaded'])        sheet.getRange(newRow, cols['uploaded']).setValue('');
-    if (cols['caption'])         sheet.getRange(newRow, cols['caption']).setValue(safe(caption));
-    if (cols['script'])          sheet.getRange(newRow, cols['script']).setWrap(true);
-    sheet.setRowHeight(newRow, 21);
-
-    var placed = monthName + ' row ' + newRow;
-    if (exportId) ledger.appendRow([exportId, placed, new Date()]);
+    writeScriptRow(sheet, cols, row, number, f);
     SpreadsheetApp.flush();
-    return { success: true, placed: placed, number: nextNum };
+    if (exportId) {
+      ledger.getRange(entry.ledgerRow, 5, 1, 2).setValues([['complete', new Date()]]);
+      SpreadsheetApp.flush();
+    }
+    return { success: true, placed: sheet.getName() + ' row ' + row, number: number };
   } finally {
     lock.releaseLock();
   }

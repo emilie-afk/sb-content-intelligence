@@ -55,14 +55,14 @@ before that (proven by the matrix test: 24 endpoint variants × 17 caller types)
 | `log-published` | Dashboard | writers | `sheet`; lock per URL | URL/date/ids validated; sheet + DB row created once |
 | `maintenance-run` | Dashboard, agent | writers, internal, scheduler | `admin`; lock | limit 1–200 |
 | `merge-clusters` | Dashboard | writers | `ai`; lock per pair | UUIDs; prompts loaded before any change |
-| `run-agent` | GitHub schedule, dashboard | writers, scheduler, internal | `ai_batch`; one run at a time | run type from credential, not body; tool input validated |
+| `run-agent` | GitHub schedule, dashboard | writers, scheduler, internal | `ai_batch`; one run at a time; ≤20 tools, ≤4 batches, 8.5 s budget enforced in code | run type from credential, not body; tool input validated |
 | `scheduled-agent` | optional trigger | scheduler | → run-agent lock | — |
 | `scheduled-batch-cluster-background` | optional trigger | scheduler | loop lock | — |
 | `sync-video-metrics` | GitHub schedule, dashboard | owner, admin, scheduler | `sheet`; lock | — |
 | `update-sheet-metrics` | scheduled metrics task | **metrics** only | lock | ≤200 videos, numbers, URLs, formula-safe |
-| `write-to-sheet` | Dashboard (approval) | writers; script must be Approved | `sheet`; lock per script | exactly-once export |
+| `write-to-sheet` | Dashboard (approval) | writers; script must be Approved | `sheet`; lock per script | retry-safe export: DB marker + Apps Script reservation ledger (failure-injection tested) |
 | `submit-signal` | intake sheet, video tracker, Social Submission, scraper | token `submit_signal` | token hourly limit (atomic); auto-cluster ≤300/token/day | ≤200 rows, 2 MB, field lengths; retry-safe |
-| `submit-performance` | integrations | token `submit_performance_snapshot` | token hourly limit | numeric fields; idempotent |
+| `submit-performance` | integrations | token `submit_performance_snapshot` | token hourly limit | numeric fields; atomic idempotency key (unique index); optional client `idempotency_key` |
 | `app-config` GET / POST | Dashboard | GET all approved roles; POST owner, admin | `read` / `admin` | sheet URL format |
 | `prompt-versions` | owner/admin tooling | owner, admin | `admin` | complete template set required |
 | `push-to-calendar` | removed | nobody (410) | — | — |
@@ -90,7 +90,9 @@ no active prompt version → 503 before any model call; `CLAUDE_API_KEY` missing
 
 Row rules (triggers): only owner/admin approve or un-approve scripts, insert scripts as
 Approved / Used in production / Measured, and change the text of a script that was ever
-approved (also after it moves to Used / Measured / Archived) (`approved_by`/`approved_at` set by the database); only owner/admin promote
+approved, used or measured (also after it is archived); approval metadata
+(`approved_at`, `approved_by`, `ever_approved`, `content_locked`) can't be set or cleared by
+browser users in any state (`approved_by`/`approved_at` set by the database); only owner/admin promote
 or edit "Approved rule" learning memories (`reviewed_by` set by the database).
 Callable functions: `ci_private.*` helpers (policies only), owner procedures (SQL editor only),
 `public.ci_*` RPCs (`service_role` only). `get_user_role()` now returns only an approved role
@@ -124,17 +126,33 @@ and publishable key, product catalog seed (public store data).
 
 ## 5. Test results (local)
 
+Runtime used: **Node.js v22.23.4** (matches `NODE_VERSION = "22"` and `engines.node >= 22`),
+PostgreSQL 16.15, Chromium (Playwright). Branch HEAD is given in the hand-off note.
+
 | Suite | Result |
 |---|---|
-| `npm test` — unit, endpoint matrix, behaviour, Apps Script, exposure | 50/50 passed |
-| Independent review (separate agent, fresh context) | no critical/high; 7 medium/low items — fixed (two-step script rewrite, tokens during maintenance, claims before config checks, activity-log names, manual-flag parsing, silent learning errors) or documented below |
-| Prompt equivalence (old inline prompts vs private templates, rich + empty inputs, 40+ cases incl. model calls in generate-learning) | byte-identical |
-| `tests/db/run.sh` — real PostgreSQL 16 with a Supabase stand-in (roles anon / authenticated / service_role, `request.jwt.claims`): baseline finding reproduced → migration applied twice → RLS tests as anon, pending (with forged admin claims), revoked, viewer, assistant, admin, owner; revocation with the same token; maintenance; service RPCs; tokens; view closing; config move | passed; fresh install from the repository's SQL + migration also passed |
-| `node tests/browser/check.js` — Chromium against the real page + real handlers: signed-out, pending, assistant (intake, dismiss, delete refused, Discovery, Content Review, script generation, approval refused, brand rules refused, help/history), admin (approve + export once, delete), no page errors | 22/22 passed |
-| `npm run check` (syntax of all functions/libs/scripts) | passed |
+| `npm test` — runtime, unit, endpoint matrix, behaviour, Apps Script (incl. failure injection), exposure | 71/71 passed |
+| Runtime (R1): real, uninjected `serviceClient()` initialises; every function module loads; NODE_VERSION / package engines / every locked package's `engines.node` agree | passed on Node 22. On Node 18 the runtime test fails and `serviceClient()` refuses with 503 "Server runtime is misconfigured" (logged reason) instead of crashing; Supabase JS 2.118 itself cannot initialise on Node 18 or 20 (reproduced) |
+| Prompt equivalence (old inline prompts vs private templates, rich + empty inputs, incl. model calls in generate-learning) | byte-identical |
+| `tests/db/run.sh` — PostgreSQL 16 with a Supabase stand-in (roles anon / authenticated / service_role, `request.jwt.claims`): baseline finding reproduced → migration applied twice → RLS tests as anon, pending (with forged admin claims), revoked, viewer, assistant, admin, owner; revocation; maintenance; service RPCs; tokens; views; config move; **R3** approval provenance (Approved→Archived while clearing metadata, clearing after archiving, Approved→Used→Archived, legacy rows without timestamps, forged metadata on insert, admin still allowed); legacy backfill; **R5** two concurrent sessions inserting the same snapshot key | passed; fresh install from the repository's SQL + migration also passed |
+| `node tests/browser/check.js` — Chromium, real page + real handlers + deployed CSP: signed-out, pending, assistant (intake, dismiss, delete refused, Discovery, Content Review, generation, approval refused, brand rules refused, help/history), admin (approve + export, re-send, delete), **R2** stored-XSS payloads in cluster title / wording / problems / tips / platforms / summary / note / audit log, signal fields + `javascript:` URL, help manual; Delete and Merge buttons clicked | 24/24 passed (the same XSS check fails on the pre-change page: 7 injected elements, script executed) |
+| Apps Script failure injection (**R4**): failure at the ledger reservation, each flush, each of the 9 content cells, the completion mark, then retry; retry across a month change; another export after an interrupted one | exactly one complete row each time (16 cases) |
+| Agent caps (**R6**): one response with 25 tool calls; a model that never stops; 6 batch calls; 3 s per model call | ≤20 tools, ≤4 batches, stops at the 8.5 s budget with status `timeout`, at most one tool-free summary call |
+| `npm run check` (syntax of all functions/libs/scripts); `npm ci --ignore-scripts` from the lockfile | passed |
 
 There is no build step (Netlify publishes `public/` and bundles functions); "production
-build" = syntax checks + all modules load with esbuild-compatible `require`s.
+build" = syntax checks + all function modules load on the configured runtime.
+
+### Second independent review (R1–R6) — all fixed
+
+| # | Issue | Fix |
+|---|---|---|
+| R1 | Locked Supabase JS 2.118 needs Node ≥ 22; Netlify was set to Node 18 → client initialisation fails | `NODE_VERSION = "22"`, `engines.node >= 22`, runtime guard + runtime tests; set `AWS_LAMBDA_JS_RUNTIME = nodejs22.x` in Netlify and confirm in a function log (rollout step 3/9) |
+| R2 | Stored XSS in the Discovery panel (wording textarea, title in the Delete handler) and other raw fields | every untrusted value escaped for its context (`esc`, `safeHref`, `jsArg` for JS arguments in attributes); help manual escaped before markdown; audit script + browser regressions |
+| R3 | Assistants could clear approval metadata and then rewrite an approved script | `approved_at` / `approved_by` / `ever_approved` / `content_locked` are database-controlled in every state; `content_locked` is irreversible once a script is Approved, Used in production or Measured (whoever changes it); legacy rows backfilled |
+| R4 | Apps Script partial failure → duplicate row on retry | row reserved (ledger + flush) before content; retries refill the same reserved row; completion marked last |
+| R5 | Concurrent identical snapshots both inserted | idempotency key + unique index, single `INSERT … ON CONFLICT DO NOTHING` |
+| R6 | Agent tool/time caps relied on the model | caps checked before every model call and every tool dispatch; remaining time passed to each model call; one bounded tool-free summary or a deterministic one; limit recorded in the run log |
 
 ## 6. Production-only checks (unverified until done)
 
@@ -169,4 +187,12 @@ build" = syntax checks + all modules load with esbuild-compatible `require`s.
   change): assistants can import the plant watchlist and merge clusters through their
   functions, and AI brief/script reviews keep updating the "lessons" settings that feed later
   prompts (model output, reviewable by owners in `settings`).
+- Export retries: a retry fills the row that was reserved for that export; if someone typed
+  into that reserved-but-empty row in between, the retry overwrites it (rare; visible in the
+  hidden `_exports` tab).
+- Snapshots without a timestamp or `idempotency_key`: retries are merged only within the same
+  10-minute UTC window; integrations should send a timestamp or key.
+- Scripts that were approved and archived before this change *and* carry no approval metadata
+  can't be recognised as once-approved (anything Approved / Used / Measured or with
+  `approved_at` is).
 - Owner-account compromise = full access; use 2-step verification.
