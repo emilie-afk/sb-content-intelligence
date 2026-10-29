@@ -58,6 +58,9 @@ exports.handler = async (event) => {
     // ── Step 2: Atomically claim up to BATCH_SIZE New signals ───────────────
     // FOR UPDATE SKIP LOCKED + a claim id: overlapping runs (schedule, agent,
     // button) can never dispatch the same signal twice.
+    // Check dispatch configuration BEFORE claiming, so a missing setting can't strand signals.
+    const analyzeUrl = `${siteUrl()}/.netlify/functions/cluster-signal-background`;
+    const callHeaders = internalHeaders();
     const claim = crypto.randomUUID();
     const { data: allNew, error: fetchError } = await supabase.rpc("ci_claim_signals_for_clustering", { p_limit: BATCH_SIZE, p_claim: claim });
 
@@ -84,8 +87,6 @@ exports.handler = async (event) => {
       };
     }
 
-    const analyzeUrl = `${siteUrl()}/.netlify/functions/cluster-signal-background`;
-    const callHeaders = internalHeaders();
     let done = 0;   // dispatched (202 accepted)
     const failedIds = [];
 

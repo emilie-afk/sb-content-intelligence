@@ -61,6 +61,10 @@ exports.handler = async (event) => {
     }
     const performedBy = caller.kind === "user" ? caller.userId : null;
 
+    // Prompt set first: background jobs use the version their batch started with.
+    // (Loaded before any claim or lock so missing configuration changes nothing.)
+    const set = await prompts.loadPromptSet(supabase, { versionId: caller.kind === "service" && body.prompt_version != null ? Number(body.prompt_version) : undefined });
+
     let data = clampDeep(body.data);
     let lockKey = null, lockHolder = null, clusterClaim = null, previousStatus = null;
 
@@ -107,8 +111,6 @@ exports.handler = async (event) => {
 
     if (lockKey) lockHolder = await locks.acquire(lockKey, 300, "This is already being generated. Wait for it to finish.");
 
-    // Prompt set: background jobs use the version their batch started with.
-    const set = await prompts.loadPromptSet(supabase, { versionId: caller.kind === "service" && body.prompt_version != null ? Number(body.prompt_version) : undefined });
     try {
       return await prompts.runWithPrompts(set, () => analyze(type, data, { performedBy, clusterClaim, previousStatus, isService: caller.kind === "service" }));
     } finally {

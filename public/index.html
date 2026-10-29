@@ -2781,7 +2781,8 @@ async function updateBriefStatus(id, status) {
 }
 
 async function updateLearningStatus(id, status) {
-  await sb.from('learning_memory').update({ status }).eq('id', id);
+  const { error } = await sb.from('learning_memory').update({ status }).eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); return; }
   toast('Memory updated');
   if (status === 'Approved rule') {
     const panel = document.getElementById('ai-preview-panel');
@@ -2806,7 +2807,8 @@ async function approveLearningRule(id) {
 }
 
 async function deleteLearning(id) {
-  await sb.from('learning_memory').update({ status: 'Archived' }).eq('id', id);
+  const { error } = await sb.from('learning_memory').update({ status: 'Archived' }).eq('id', id);
+  if (error) { toast('❌ ' + error.message, true); return; }
   toast('Memory archived');
   loadLearning();
 }

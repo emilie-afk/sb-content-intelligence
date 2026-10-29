@@ -177,7 +177,7 @@ select t.expect_denied('select * from submission_tokens', 'admin tokens via API'
 select t.expect_denied('select * from ci_integration_config', 'admin integration config via API');
 select t.expect_denied($q$select ci_private.approve_member('pending@example.test','owner')$q$, 'admin calls owner procedure via API');
 select t.expect_denied($q$select ci_private.set_maintenance(false)$q$, 'admin toggles maintenance via API');
-select t.expect_rows('select * from users_profile', 1, 'admin sees only own profile row');
+select t.expect_rows('select * from users_profile', 4, 'admin sees approved teammates only (not pending/revoked)');
 reset role; select set_config('request.jwt.claims', '', false);
 do $$ begin
   if (select approved_by from script_outputs where id = '20000000-0000-0000-0000-000000000001') <> '00000000-0000-0000-0000-0000000000a2' then
@@ -295,5 +295,29 @@ do $$ declare n int; begin
                         'submission_tokens','settings','app_settings','discovery_clusters','ci_prompt_versions');
   if n > 0 then raise exception 'FAIL [anon still has % grants]', n; end if;
 end $$;
+
+
+-- ── review follow-ups ─────────────────────────────────────────────────────────
+insert into script_outputs (id, script_title, review_status, full_voiceover_script, approved_at)
+values ('20000000-0000-0000-0000-000000000003', 'Approved 2', 'Approved', 'approved text', now());
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a3","role":"authenticated"}', false);
+select t.expect_ok($q$update script_outputs set review_status = 'Archived' where id = '20000000-0000-0000-0000-000000000003'$q$, 'assistant archives approved');
+select t.expect_denied($q$update script_outputs set full_voiceover_script = 'rewritten' where id = '20000000-0000-0000-0000-000000000003'$q$, 'two-step rewrite after archiving');
+select t.expect_denied($q$insert into script_outputs (script_title, review_status) values ('x', 'Used in production')$q$, 'assistant inserts used-in-production');
+select t.expect_rows($q$select * from users_profile where access_status = 'approved'$q$, 4, 'members see approved teammates');
+select t.expect_rows($q$select * from users_profile where email in ('pending@example.test','revoked@example.test')$q$, 0, 'pending/revoked not listed');
+reset role; select set_config('request.jwt.claims', '', false);
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a5","role":"authenticated"}', false);
+select t.expect_rows('select * from users_profile', 1, 'pending still sees only own row');
+reset role; select set_config('request.jwt.claims', '', false);
+select ci_private.set_maintenance(true);
+do $$ begin
+  if (ci_consume_submission_token(encode(digest('raw-token-1','sha256'),'hex'), 'submit_signal'))->>'reason' <> 'maintenance' then
+    raise exception 'FAIL [token during maintenance]';
+  end if;
+end $$;
+select ci_private.set_maintenance(false);
 
 \echo 'RLS TESTS PASSED'

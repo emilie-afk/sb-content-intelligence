@@ -18,6 +18,7 @@ async function requireSubmissionToken(event, action) {
   if (error || !data) throw new PublicError(503, "Token check is unavailable");
   if (data.ok) return { kind: "token", tokenId: data.id, label: data.label };
   if (data.reason === "wrong_action") throw new PublicError(403, "Token not allowed for this action");
+  if (data.reason === "maintenance") throw new PublicError(503, "The app is in maintenance mode");
   if (data.reason === "rate_limited") throw new PublicError(429, "Rate limit exceeded — try again next hour");
   throw new PublicError(401, "Invalid or inactive token");
 }

@@ -82,14 +82,15 @@ no active prompt version → 503 before any model call; `CLAUDE_API_KEY` missing
 | brand_content_rules, plant_watchlist | read: members · write: owner/admin | none |
 | settings | read: members · writers only `competitor_blocked_accounts`, other keys owner/admin · constraint forbids source locations | none |
 | performance_snapshots, activity_log, cluster_audit_log, discovery_briefings, help_docs | read: members | none |
-| users_profile | own row only (to show approval status); **no writes** (trigger also blocks) | none |
+| users_profile | own row (approval status) + approved teammates (names in the activity log); pending/revoked accounts never listed; **no writes** (trigger also blocks) | none |
 | submission_tokens, app_settings, sb_products, agent_run_log, agent_action_log | server only | none |
 | ci_integration_config, ci_prompt_versions, ci_usage_counters, ci_locks (new) | server only | none |
 | views over these tables | revoked from API roles (reported by the migration) | none |
 | storage buckets | none used by this app (inventory lists any) | — |
 
-Row rules (triggers): only owner/admin approve or un-approve scripts and change the text of
-an approved script (`approved_by`/`approved_at` set by the database); only owner/admin promote
+Row rules (triggers): only owner/admin approve or un-approve scripts, insert scripts as
+Approved / Used in production / Measured, and change the text of a script that was ever
+approved (also after it moves to Used / Measured / Archived) (`approved_by`/`approved_at` set by the database); only owner/admin promote
 or edit "Approved rule" learning memories (`reviewed_by` set by the database).
 Callable functions: `ci_private.*` helpers (policies only), owner procedures (SQL editor only),
 `public.ci_*` RPCs (`service_role` only). `get_user_role()` now returns only an approved role
@@ -126,6 +127,7 @@ and publishable key, product catalog seed (public store data).
 | Suite | Result |
 |---|---|
 | `npm test` — unit, endpoint matrix, behaviour, Apps Script, exposure | 50/50 passed |
+| Independent review (separate agent, fresh context) | no critical/high; 7 medium/low items — fixed (two-step script rewrite, tokens during maintenance, claims before config checks, activity-log names, manual-flag parsing, silent learning errors) or documented below |
 | Prompt equivalence (old inline prompts vs private templates, rich + empty inputs, 40+ cases incl. model calls in generate-learning) | byte-identical |
 | `tests/db/run.sh` — real PostgreSQL 16 with a Supabase stand-in (roles anon / authenticated / service_role, `request.jwt.claims`): baseline finding reproduced → migration applied twice → RLS tests as anon, pending (with forged admin claims), revoked, viewer, assistant, admin, owner; revocation with the same token; maintenance; service RPCs; tokens; view closing; config move | passed; fresh install from the repository's SQL + migration also passed |
 | `node tests/browser/check.js` — Chromium against the real page + real handlers: signed-out, pending, assistant (intake, dismiss, delete refused, Discovery, Content Review, script generation, approval refused, brand rules refused, help/history), admin (approve + export once, delete), no page errors | 22/22 passed |
@@ -163,4 +165,8 @@ build" = syntax checks + all modules load with esbuild-compatible `require`s.
 - AI-driven automations that existed before (auto-routing signals, cleanup closing clusters,
   scraper "needs catalog review" deletions) are preserved; untrusted text can still influence
   those decisions, never approvals, publishing or permissions.
+- Preserved function-level behaviour that is broader than the table rules (as before this
+  change): assistants can import the plant watchlist and merge clusters through their
+  functions, and AI brief/script reviews keep updating the "lessons" settings that feed later
+  prompts (model output, reviewable by owners in `settings`).
 - Owner-account compromise = full access; use 2-step verification.
