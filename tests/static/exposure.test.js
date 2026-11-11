@@ -7,6 +7,7 @@ const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const crypto = require("crypto");
 
 const ROOT = path.resolve(__dirname, "../..");
 const BASE_REF = process.env.PROMPT_BASE_REF || "ddb3428";
@@ -19,13 +20,37 @@ function trackedFiles() {
 const FORBIDDEN = [
   /docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]{25,}/,              // real sheet ids
   /script\.google\.com\/macros\/s\/AKfyc[A-Za-z0-9_-]{20,}/,               // Apps Script deployments
-  /REMOVED_SHEET_ID_3|REMOVED_SHEET_ID_2|REMOVED_SHEET_ID_1/,
-  /REMOVED_TAB_ID_1|REMOVED_TAB_ID_2|REMOVED_TAB_ID_3|REMOVED_TAB_ID_4/,                           // monthly tab ids
   /sb-scraper-2026-[A-Za-z0-9]+/,                                         // committed submit token
-  /REMOVED_TOKEN_HASH/,      // token hash
   /sk-ant-[A-Za-z0-9_-]{10,}/, /sb_secret_[A-Za-z0-9_-]+/, /BEGIN PRIVATE KEY/,
   /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/,        // JWTs (service role keys)
 ];
+
+// Former sheet ids, monthly tab ids, Apps Script deployment id, submission token, token id and
+// token hash, kept only as SHA-256 digests so this file does not publish them again.
+const FORMER_VALUE_DIGESTS = new Set([
+  "108609ab63329267f1bfcb6ca9739b1f2c9a2bccb83404029502c8acff1dc9bd",
+  "911ef213e0549fc3bc1cc77821e2a42d35ff53dd5d2e85963661fa4ff18e01a7",
+  "ba14c916a10dda9d8b4731c0d6ff13e5468ed653263f32121a607c8c2a3a51df",
+  "a531ea9403f245532352e9176067e5cf94662284c4b1363e96bd39b151b0db7d",
+  "8465bc646bd58eb1f88df6344cca89d3c5722ccae01ce4301b8f8c89a23fb829",
+  "24a809a5ffb645220baec2ae04a05fc214ea70838d1ee822d9fd3999c155fa98",
+  "1f7634be2c8831d7fed8c59ade923e503843190ba488cf1c2388190305b2742a",
+  "8eed20d8a9457281bed147cf4300aa5cd67e5ad1402cb7a0950857b69888a588",
+  "3f28bbe5013760f586604bb12428ca5e1bed8a9eb532cbb0443d7dd01b5c96b1",
+  "a5f074b7e174b88307e5b00a02aaed534daa089752a1f88e2bbb8b5ca4673f89",
+  "2a49db898a4b094b7371e3428651c144acb219ba4d2c3d7eb2711939cbdc586a",
+]);
+const CANDIDATE = /[A-Za-z0-9_-]{9,80}/g;
+function formerValues(s) {
+  const found = new Set();
+  for (const m of s.match(CANDIDATE) || []) {
+    for (const v of [m, ...m.split(/[_-]/)]) {
+      if (FORMER_VALUE_DIGESTS.has(crypto.createHash("sha256").update(v).digest("hex"))) found.add("former value");
+    }
+  }
+  return [...found];
+}
+
 const SELF = new Set(["tests/static/exposure.test.js"]);
 
 test("no source locations or credentials in tracked files", () => {
@@ -34,6 +59,7 @@ test("no source locations or credentials in tracked files", () => {
     if (SELF.has(f) || f.startsWith("node_modules/") || f === "package-lock.json") continue;
     const s = fs.readFileSync(path.join(ROOT, f), "utf8");
     for (const re of FORBIDDEN) if (re.test(s)) hits.push(`${f}: ${re}`);
+    for (const v of formerValues(s)) hits.push(`${f}: ${v}`);
   }
   assert.deepStrictEqual(hits, []);
 });
